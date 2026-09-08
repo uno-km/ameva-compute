@@ -1,12 +1,13 @@
 /**
  * @file ac_buffer.h
- * @brief Vulkan Buffer Memory Management with Explicit Context Ownership
+ * @brief Vulkan Buffer Memory Management with Explicit Context Ownership & Cache Coherency
  *
  * Contract:
- *   - Persistently Mapped Host-Visible Buffer: Requires both VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
- *     and VK_MEMORY_PROPERTY_HOST_COHERENT_BIT. Returns AC_ERR_FEATURE_NOT_SUPPORTED if unavailable.
+ *   - Persistently Mapped Host-Visible Buffer: Tries HOST_VISIBLE | HOST_COHERENT first.
+ *     Falls back to HOST_VISIBLE non-coherent if coherent is unavailable.
  *   - Rejects destruction with AC_ERR_DEVICE_BUSY if submission_outstanding_count > 0.
  *   - Enforces context match against owning_context.
+ *   - Provides explicit memory range flush and invalidate operations.
  */
 #ifndef AC_BUFFER_H
 #define AC_BUFFER_H
@@ -27,10 +28,11 @@ struct AcVkBuffer {
     VkMemoryPropertyFlags memory_property_flags;
     AcVkContext* owning_context;
     uint32_t submission_outstanding_count;
+    bool is_coherent;
 };
 
 /**
- * @brief Allocate a host-visible coherent storage buffer with persistently mapped virtual address.
+ * @brief Allocate a host-visible storage buffer with persistently mapped virtual address.
  *
  * @param ctx Owning Vulkan compute context.
  * @param size_bytes Buffer allocation size in bytes (> 0).
@@ -53,6 +55,28 @@ AcResult ac_vk_buffer_create(
  * @return AC_SUCCESS on success, error code on failure.
  */
 AcResult ac_vk_buffer_destroy(AcVkBuffer* buf);
+
+/**
+ * @brief Flush mapped memory range for host writes to be visible to device.
+ * For coherent memory, this performs parameter validation and returns AC_SUCCESS.
+ *
+ * @param buf Buffer to flush.
+ * @param offset Byte offset from buffer start.
+ * @param size_bytes Size of range in bytes (0 flushes from offset to end of buffer).
+ * @return AC_SUCCESS on success, error code on failure.
+ */
+AcResult ac_vk_buffer_flush(AcVkBuffer* buf, size_t offset, size_t size_bytes);
+
+/**
+ * @brief Invalidate mapped memory range for device writes to be visible to host.
+ * For coherent memory, this performs parameter validation and returns AC_SUCCESS.
+ *
+ * @param buf Buffer to invalidate.
+ * @param offset Byte offset from buffer start.
+ * @param size_bytes Size of range in bytes (0 invalidates from offset to end of buffer).
+ * @return AC_SUCCESS on success, error code on failure.
+ */
+AcResult ac_vk_buffer_invalidate(AcVkBuffer* buf, size_t offset, size_t size_bytes);
 
 #ifdef __cplusplus
 }

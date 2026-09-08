@@ -5,7 +5,7 @@
  * Ground Truth Engineering: Zero-Silent-Fallback & Fail-Fast Doctrine.
  *
  * Thread Safety Specification:
- *   AMUDA Phase 2 / 2.1 Core ABI is strictly single-thread-owned per context.
+ *   AMUDA Core ABI is strictly single-thread-owned per context.
  *   Concurrent API invocations on the same AcVkContext, AcVkBuffer, AcVkKernel,
  *   or AcVkEvent instances without external synchronization are unsupported.
  *   Multi-threaded workloads must instantiate separate AcVkContext instances.
@@ -88,6 +88,15 @@ typedef enum {
     AC_QUIRK_ADRENO_FP16_REDUCE         = 1 << 3,
     AC_QUIRK_HEADLESS_EGL               = 1 << 4
 } AcQuirkFlags;
+
+/**
+ * @brief Universal Backend Feature Flags
+ */
+typedef enum {
+    AC_FEATURE_NONE                     = 0,
+    AC_FEATURE_TIMESTAMPS               = 1 << 0,
+    AC_FEATURE_NON_COHERENT_ATOM        = 1 << 1
+} AcFeatureFlags;
 
 /**
  * @brief 3D Dimensions for Grid and Block

@@ -29,6 +29,8 @@ AcResult ac_vk_dispatch(
     VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
     VkCommandBuffer command_buffer = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
+    VkQueryPool query_pool = VK_NULL_HANDLE;
+    bool has_timestamp = false;
     AcVkEvent* event = NULL;
     VkDescriptorPoolSize poolSize = {};
     VkDescriptorPoolCreateInfo poolInfo = {};
@@ -158,11 +160,28 @@ AcResult ac_vk_dispatch(
         goto cleanup_cmd;
     }
 
-    /* 6. Record Command Buffer */
+    /* 6. Optional Hardware Timestamp Query Pool */
+    if (ctx->device_properties.limits.timestampComputeAndGraphics && ctx->timestamp_valid_bits > 0) {
+        VkQueryPoolCreateInfo qpci = {};
+        qpci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+        qpci.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qpci.queryCount = 2;
+        if (vkCreateQueryPool(ctx->device, &qpci, NULL, &query_pool) == VK_SUCCESS) {
+            has_timestamp = true;
+        }
+    }
+
+    /* 7. Record Command Buffer */
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
     vkBeginCommandBuffer(command_buffer, &beginInfo);
+
+    if (has_timestamp) {
+        vkCmdResetQueryPool(command_buffer, query_pool, 0, 2);
+        vkCmdWriteTimestamp(command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, 0);
+    }
+
     vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, kernel->compute_pipeline);
     vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, kernel->pipeline_layout, 0, 1, &descriptor_set, 0, NULL);
 
@@ -171,13 +190,18 @@ AcResult ac_vk_dispatch(
     }
 
     vkCmdDispatch(command_buffer, group_x, group_y, group_z);
+
+    if (has_timestamp) {
+        vkCmdWriteTimestamp(command_buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, 1);
+    }
+
     vkEndCommandBuffer(command_buffer);
 
-    /* 7. Pre-allocate AcVkEvent wrapper before queue submit */
+    /* 8. Pre-allocate AcVkEvent wrapper before queue submit */
     event = (AcVkEvent*)calloc(1, sizeof(AcVkEvent));
     if (!event) {
         ret = AC_ERR_OUT_OF_HOST_MEMORY;
-        goto cleanup_fence;
+        goto cleanup_query;
     }
 
     event->bound_buffers = (AcVkBuffer**)malloc(kernel->buffer_count * sizeof(AcVkBuffer*));
@@ -185,7 +209,7 @@ AcResult ac_vk_dispatch(
         free(event);
         event = NULL;
         ret = AC_ERR_OUT_OF_HOST_MEMORY;
-        goto cleanup_fence;
+        goto cleanup_query;
     }
     for (uint32_t i = 0; i < kernel->buffer_count; ++i) {
         event->bound_buffers[i] = buffers[i];
@@ -194,7 +218,12 @@ AcResult ac_vk_dispatch(
     event->command_buffer = command_buffer;
     event->descriptor_pool = descriptor_pool;
     event->descriptor_set = descriptor_set;
+    event->query_pool = query_pool;
+    event->has_timestamp = has_timestamp;
     event->submit_timestamp_ns = get_time_ns();
+    event->completion_timestamp_ns = 0;
+    event->wall_latency_ns = 0;
+    event->gpu_duration_ns = 0;
     event->is_signaled = false;
     event->resources_retired = false;
     event->owning_context = ctx;
@@ -211,7 +240,7 @@ AcResult ac_vk_dispatch(
     ctx->submission_outstanding_count++;
 
     /* ------------------------------------------------------------------------
-     * 8. Submit to Compute Queue
+     * 9. Submit to Compute Queue
      * ------------------------------------------------------------------------ */
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.commandBufferCount = 1;
@@ -230,10 +259,10 @@ AcResult ac_vk_dispatch(
         free(event);
         event = NULL;
         ret = AC_ERR_DRIVER_CRASH_OR_LOST;
-        goto cleanup_fence;
+        goto cleanup_query;
     }
 
-    /* 9. Return Event or Synchronous Wait */
+    /* 10. Return Event or Synchronous Wait */
     if (out_event) {
         *out_event = event;
         return AC_SUCCESS;
@@ -243,7 +272,10 @@ AcResult ac_vk_dispatch(
         return wait_res;
     }
 
-cleanup_fence:
+cleanup_query:
+    if (query_pool != VK_NULL_HANDLE) {
+        vkDestroyQueryPool(ctx->device, query_pool, NULL);
+    }
     if (fence != VK_NULL_HANDLE) {
         vkDestroyFence(ctx->device, fence, NULL);
     }

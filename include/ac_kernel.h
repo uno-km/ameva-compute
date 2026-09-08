@@ -1,10 +1,11 @@
 /**
  * @file ac_kernel.h
- * @brief Vulkan Compute Pipeline & Kernel Management
+ * @brief Universal Vulkan Compute Pipeline & Kernel Management with Metadata Authentication
  *
  * Contract:
  *   - Rejects destruction with AC_ERR_DEVICE_BUSY if submission_outstanding_count > 0.
- *   - Validates SPIR-V bytecode size alignment and word count.
+ *   - Validates SPIR-V bytecode size alignment, word count, and optional SHA-256 hash.
+ *   - Supports universal AcKernelMetadata descriptors for explicit entry points and bindings.
  *   - Enforces explicit owning_context relationship.
  */
 #ifndef AC_KERNEL_H
@@ -18,6 +19,28 @@
 extern "C" {
 #endif
 
+typedef enum {
+    AC_BINDING_TYPE_STORAGE_BUFFER = 0,
+    AC_BINDING_TYPE_UNIFORM_BUFFER = 1
+} AcBindingType;
+
+typedef struct {
+    uint32_t binding_index;
+    AcBindingType binding_type;
+    VkShaderStageFlags stage_flags;
+} AcKernelBindingDesc;
+
+typedef struct {
+    const char* kernel_name;
+    const char* entry_point;
+    uint32_t binding_count;
+    const AcKernelBindingDesc* bindings;
+    size_t push_constant_size;
+    AcDim3 local_size;
+    uint32_t required_features;
+    const char* expected_spirv_sha256;
+} AcKernelMetadata;
+
 struct AcVkKernel {
     VkShaderModule shader_module;
     VkDescriptorSetLayout descriptor_set_layout;
@@ -27,18 +50,29 @@ struct AcVkKernel {
     uint32_t buffer_count;
     AcVkContext* owning_context;
     uint32_t submission_outstanding_count;
+    AcKernelMetadata metadata;
 };
 
 /**
- * @brief Create a compute kernel from SPIR-V bytecode.
+ * @brief Create a compute kernel with explicit universal metadata and validation.
  *
  * @param ctx Owning Vulkan compute context.
  * @param spirv_code Pointer to 32-bit aligned SPIR-V bytecode words.
  * @param code_size_bytes Byte size of the SPIR-V bytecode.
- * @param push_constant_size Size of push constant block in bytes (0 if unused).
- * @param buffer_count Number of storage buffer bindings (0 defaults to 3).
+ * @param metadata Kernel metadata descriptor containing entry point, bindings, push constant size, SHA-256.
  * @param out_kernel Output kernel pointer (set to NULL on failure).
  * @return AC_SUCCESS on success, error code on failure.
+ */
+AcResult ac_vk_kernel_create_with_metadata(
+    AcVkContext* ctx,
+    const uint32_t* spirv_code,
+    size_t code_size_bytes,
+    const AcKernelMetadata* metadata,
+    AcVkKernel** out_kernel
+);
+
+/**
+ * @brief Backwards-compatible SPIR-V kernel creation wrapper.
  */
 AcResult ac_vk_kernel_create_spirv(
     AcVkContext* ctx,

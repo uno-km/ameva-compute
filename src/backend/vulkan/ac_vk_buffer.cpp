@@ -33,6 +33,7 @@ AcResult ac_vk_buffer_create(
     VkResult vk_res = VK_SUCCESS;
     uint32_t memTypeIndex = 0xFFFFFFFFu;
     VkMemoryPropertyFlags required_props = 0;
+    bool is_coherent = false;
 
     if (!out_buf) {
         return AC_ERR_NULL_POINTER;
@@ -58,12 +59,20 @@ AcResult ac_vk_buffer_create(
 
     vkGetBufferMemoryRequirements(ctx->device, buffer, &memReqs);
 
-    /* Persistently Mapped Host-Visible Buffer Contract: Both Host-Visible and Host-Coherent are required */
+    /* Try persistently mapped host-visible coherent first */
     required_props = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     memTypeIndex = find_memory_type(ctx->physical_device, memReqs.memoryTypeBits, required_props);
-    if (memTypeIndex == 0xFFFFFFFFu) {
-        ret = AC_ERR_FEATURE_NOT_SUPPORTED;
-        goto cleanup;
+    if (memTypeIndex != 0xFFFFFFFFu) {
+        is_coherent = true;
+    } else {
+        /* Fall back to host-visible non-coherent */
+        required_props = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+        memTypeIndex = find_memory_type(ctx->physical_device, memReqs.memoryTypeBits, required_props);
+        if (memTypeIndex == 0xFFFFFFFFu) {
+            ret = AC_ERR_FEATURE_NOT_SUPPORTED;
+            goto cleanup;
+        }
+        is_coherent = false;
     }
 
     allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
@@ -102,6 +111,7 @@ AcResult ac_vk_buffer_create(
         buf->memory_property_flags = required_props;
         buf->owning_context = ctx;
         buf->submission_outstanding_count = 0;
+        buf->is_coherent = is_coherent;
 
         ctx->active_child_buffers++;
         *out_buf = buf;
@@ -156,6 +166,88 @@ AcResult ac_vk_buffer_destroy(AcVkBuffer* buf) {
     buf->owning_context = NULL;
     buf->size_bytes = 0;
     free(buf);
+    return AC_SUCCESS;
+}
+
+AcResult ac_vk_buffer_flush(AcVkBuffer* buf, size_t offset, size_t size_bytes) {
+    if (!buf) {
+        return AC_ERR_NULL_POINTER;
+    }
+    if (!buf->owning_context || buf->owning_context->device == VK_NULL_HANDLE) {
+        return AC_ERR_INVALID_CONTEXT;
+    }
+    if (offset >= buf->size_bytes) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (size_bytes == 0) {
+        size_bytes = buf->size_bytes - offset;
+    } else if (offset + size_bytes > buf->size_bytes) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+
+    if (buf->is_coherent) {
+        return AC_SUCCESS;
+    }
+
+    VkDeviceSize atom_size = buf->owning_context->device_properties.limits.nonCoherentAtomSize;
+    if (atom_size == 0) atom_size = 1;
+
+    VkDeviceSize aligned_offset = (offset / atom_size) * atom_size;
+    VkDeviceSize end = offset + size_bytes;
+    VkDeviceSize aligned_end = ((end + atom_size - 1) / atom_size) * atom_size;
+    VkDeviceSize final_size = (aligned_end >= buf->size_bytes) ? VK_WHOLE_SIZE : (aligned_end - aligned_offset);
+
+    VkMappedMemoryRange range = {};
+    range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+    range.memory = buf->memory;
+    range.offset = aligned_offset;
+    range.size = final_size;
+
+    VkResult vk_res = vkFlushMappedMemoryRanges(buf->owning_context->device, 1, &range);
+    if (vk_res != VK_SUCCESS) {
+        return AC_ERR_DRIVER_CRASH_OR_LOST;
+    }
+    return AC_SUCCESS;
+}
+
+AcResult ac_vk_buffer_invalidate(AcVkBuffer* buf, size_t offset, size_t size_bytes) {
+    if (!buf) {
+        return AC_ERR_NULL_POINTER;
+    }
+    if (!buf->owning_context || buf->owning_context->device == VK_NULL_HANDLE) {
+        return AC_ERR_INVALID_CONTEXT;
+    }
+    if (offset >= buf->size_bytes) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (size_bytes == 0) {
+        size_bytes = buf->size_bytes - offset;
+    } else if (offset + size_bytes > buf->size_bytes) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+
+    if (buf->is_coherent) {
+        return AC_SUCCESS;
+    }
+
+    VkDeviceSize atom_size = buf->owning_context->device_properties.limits.nonCoherentAtomSize;
+    if (atom_size == 0) atom_size = 1;
+
+    VkDeviceSize aligned_offset = (offset / atom_size) * atom_size;
+    VkDeviceSize end = offset + size_bytes;
+    VkDeviceSize aligned_end = ((end + atom_size - 1) / atom_size) * atom_size;
+    VkDeviceSize final_size = (aligned_end >= buf->size_bytes) ? VK_WHOLE_SIZE : (aligned_end - aligned_offset);
+
+    VkMappedMemoryRange range = {};
+    range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+    range.memory = buf->memory;
+    range.offset = aligned_offset;
+    range.size = final_size;
+
+    VkResult vk_res = vkInvalidateMappedMemoryRanges(buf->owning_context->device, 1, &range);
+    if (vk_res != VK_SUCCESS) {
+        return AC_ERR_DRIVER_CRASH_OR_LOST;
+    }
     return AC_SUCCESS;
 }
 

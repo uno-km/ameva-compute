@@ -28,6 +28,7 @@ struct AcVkContext {
     uint32_t active_child_buffers;
     uint32_t active_child_kernels;
     uint32_t submission_outstanding_count;
+    uint32_t timestamp_valid_bits;
 };
 
 /**

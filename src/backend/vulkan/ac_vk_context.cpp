@@ -48,6 +48,7 @@ AcResult ac_vk_context_create(AcVkContext** out_ctx) {
     VkPhysicalDevice selectedDevice = VK_NULL_HANDLE;
     VkPhysicalDeviceProperties selectedProps = {};
     uint32_t computeQueueFamilyIndex = 0xFFFFFFFFu;
+    uint32_t timestampValidBits = 0;
 
     for (uint32_t i = 0; i < deviceCount; ++i) {
         VkPhysicalDeviceProperties props;
@@ -66,6 +67,7 @@ AcResult ac_vk_context_create(AcVkContext** out_ctx) {
                     selectedDevice = physicalDevices[i];
                     selectedProps = props;
                     computeQueueFamilyIndex = q;
+                    timestampValidBits = queueFamilies[q].timestampValidBits;
                     break;
                 }
             }
@@ -130,6 +132,7 @@ AcResult ac_vk_context_create(AcVkContext** out_ctx) {
     ctx->active_child_buffers = 0;
     ctx->active_child_kernels = 0;
     ctx->submission_outstanding_count = 0;
+    ctx->timestamp_valid_bits = timestampValidBits;
 
     *out_ctx = ctx;
     return AC_SUCCESS;

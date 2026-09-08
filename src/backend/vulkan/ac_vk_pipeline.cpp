@@ -1,17 +1,17 @@
 #include "ac_kernel.h"
 #include "ac_types.h"
+#include "ac_vk_sha256.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 extern "C" {
 
-AcResult ac_vk_kernel_create_spirv(
+AcResult ac_vk_kernel_create_with_metadata(
     AcVkContext* ctx,
     const uint32_t* spirv_code,
     size_t code_size_bytes,
-    size_t push_constant_size,
-    uint32_t buffer_count,
+    const AcKernelMetadata* metadata,
     AcVkKernel** out_kernel
 ) {
     VkShaderModule shader_module = VK_NULL_HANDLE;
@@ -26,6 +26,9 @@ AcResult ac_vk_kernel_create_spirv(
     VkComputePipelineCreateInfo pipelineInfo = {};
     AcResult ret = AC_SUCCESS;
     VkResult vk_res = VK_SUCCESS;
+    uint32_t buffer_count = 0;
+    size_t push_constant_size = 0;
+    const char* entry_name = "main";
 
     if (!out_kernel) {
         return AC_ERR_NULL_POINTER;
@@ -38,15 +41,47 @@ AcResult ac_vk_kernel_create_spirv(
     if (!spirv_code || code_size_bytes < 4 || (code_size_bytes % 4 != 0)) {
         return AC_ERR_BINARY_CORRUPTED;
     }
+    if (!metadata) {
+        return AC_ERR_NULL_POINTER;
+    }
 
+    /* 1. Cryptographic Authentication against expected SHA-256 */
+    if (metadata->expected_spirv_sha256 && metadata->expected_spirv_sha256[0] != '\0') {
+        char actual_sha256[65];
+        ac_sha256_compute_hex((const uint8_t*)spirv_code, code_size_bytes, actual_sha256);
+        if (strcmp(actual_sha256, metadata->expected_spirv_sha256) != 0) {
+            return AC_ERR_BINARY_CORRUPTED;
+        }
+    }
+
+    /* 2. Feature Requirements Validation */
+    if (metadata->required_features & AC_FEATURE_TIMESTAMPS) {
+        if (!ctx->device_properties.limits.timestampComputeAndGraphics || ctx->timestamp_valid_bits == 0) {
+            return AC_ERR_FEATURE_NOT_SUPPORTED;
+        }
+    }
+    if ((metadata->required_features & ~(AC_FEATURE_TIMESTAMPS | AC_FEATURE_NON_COHERENT_ATOM)) != 0) {
+        return AC_ERR_FEATURE_NOT_SUPPORTED;
+    }
+
+    buffer_count = metadata->binding_count;
     if (buffer_count == 0) {
-        buffer_count = 3; /* Default for ternary GEMV: weights, activations, output */
+        buffer_count = 3; /* Default for ternary GEMV */
     }
     if (buffer_count > 16) {
         return AC_ERR_KERNEL_ARG_INVALID;
     }
 
-    /* 1. Shader Module */
+    push_constant_size = metadata->push_constant_size;
+    if (push_constant_size > 128) {
+        return AC_ERR_KERNEL_ARG_INVALID;
+    }
+
+    if (metadata->entry_point && metadata->entry_point[0] != '\0') {
+        entry_name = metadata->entry_point;
+    }
+
+    /* 3. Shader Module Creation */
     smci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
     smci.codeSize = code_size_bytes;
     smci.pCode = spirv_code;
@@ -56,12 +91,16 @@ AcResult ac_vk_kernel_create_spirv(
         return AC_ERR_KERNEL_BUILD_FAILED;
     }
 
-    /* 2. Descriptor Set Layout */
+    /* 4. Descriptor Set Layout */
     for (uint32_t i = 0; i < buffer_count; ++i) {
-        bindings[i].binding = i;
-        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bindings[i].binding = (metadata->bindings != NULL) ? metadata->bindings[i].binding_index : i;
+        bindings[i].descriptorType = (metadata->bindings != NULL && metadata->bindings[i].binding_type == AC_BINDING_TYPE_UNIFORM_BUFFER)
+            ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+            : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         bindings[i].descriptorCount = 1;
-        bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        bindings[i].stageFlags = (metadata->bindings != NULL && metadata->bindings[i].stage_flags != 0)
+            ? metadata->bindings[i].stage_flags
+            : VK_SHADER_STAGE_COMPUTE_BIT;
     }
 
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -74,7 +113,7 @@ AcResult ac_vk_kernel_create_spirv(
         goto cleanup;
     }
 
-    /* 3. Pipeline Layout with Push Constants */
+    /* 5. Pipeline Layout with Push Constants */
     pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     pushRange.offset = 0;
     pushRange.size = (uint32_t)push_constant_size;
@@ -93,12 +132,12 @@ AcResult ac_vk_kernel_create_spirv(
         goto cleanup;
     }
 
-    /* 4. Compute Pipeline */
+    /* 6. Compute Pipeline Creation */
     pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
     pipelineInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
     pipelineInfo.stage.module = shader_module;
-    pipelineInfo.stage.pName = "main";
+    pipelineInfo.stage.pName = entry_name;
     pipelineInfo.layout = pipeline_layout;
 
     vk_res = vkCreateComputePipelines(ctx->device, VK_NULL_HANDLE, 1, &pipelineInfo, NULL, &compute_pipeline);
@@ -122,6 +161,7 @@ AcResult ac_vk_kernel_create_spirv(
         k->buffer_count = buffer_count;
         k->owning_context = ctx;
         k->submission_outstanding_count = 0;
+        k->metadata = *metadata;
 
         ctx->active_child_kernels++;
         *out_kernel = k;
@@ -142,6 +182,26 @@ cleanup:
         vkDestroyShaderModule(ctx->device, shader_module, NULL);
     }
     return ret;
+}
+
+AcResult ac_vk_kernel_create_spirv(
+    AcVkContext* ctx,
+    const uint32_t* spirv_code,
+    size_t code_size_bytes,
+    size_t push_constant_size,
+    uint32_t buffer_count,
+    AcVkKernel** out_kernel
+) {
+    AcKernelMetadata default_meta = {};
+    default_meta.kernel_name = "spirv_kernel";
+    default_meta.entry_point = "main";
+    default_meta.binding_count = buffer_count;
+    default_meta.bindings = NULL;
+    default_meta.push_constant_size = push_constant_size;
+    default_meta.local_size = {0, 0, 0};
+    default_meta.required_features = AC_FEATURE_NONE;
+    default_meta.expected_spirv_sha256 = NULL;
+    return ac_vk_kernel_create_with_metadata(ctx, spirv_code, code_size_bytes, &default_meta, out_kernel);
 }
 
 AcResult ac_vk_kernel_destroy(AcVkKernel* kernel) {
