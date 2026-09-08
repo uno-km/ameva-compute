@@ -1,0 +1,183 @@
+#include "ac_kernel.h"
+#include "ac_types.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+extern "C" {
+
+AcResult ac_vk_kernel_create_spirv(
+    AcVkContext* ctx,
+    const uint32_t* spirv_code,
+    size_t code_size_bytes,
+    size_t push_constant_size,
+    uint32_t buffer_count,
+    AcVkKernel** out_kernel
+) {
+    VkShaderModule shader_module = VK_NULL_HANDLE;
+    VkDescriptorSetLayout descriptor_set_layout = VK_NULL_HANDLE;
+    VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
+    VkPipeline compute_pipeline = VK_NULL_HANDLE;
+    VkShaderModuleCreateInfo smci = {};
+    VkDescriptorSetLayoutBinding bindings[16] = {};
+    VkDescriptorSetLayoutCreateInfo layoutInfo = {};
+    VkPushConstantRange pushRange = {};
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
+    VkComputePipelineCreateInfo pipelineInfo = {};
+    AcResult ret = AC_SUCCESS;
+    VkResult vk_res = VK_SUCCESS;
+
+    if (!out_kernel) {
+        return AC_ERR_NULL_POINTER;
+    }
+    *out_kernel = NULL;
+
+    if (!ctx || ctx->device == VK_NULL_HANDLE) {
+        return AC_ERR_INVALID_CONTEXT;
+    }
+    if (!spirv_code || code_size_bytes < 4 || (code_size_bytes % 4 != 0)) {
+        return AC_ERR_BINARY_CORRUPTED;
+    }
+
+    if (buffer_count == 0) {
+        buffer_count = 3; /* Default for ternary GEMV: weights, activations, output */
+    }
+    if (buffer_count > 16) {
+        return AC_ERR_KERNEL_ARG_INVALID;
+    }
+
+    /* 1. Shader Module */
+    smci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    smci.codeSize = code_size_bytes;
+    smci.pCode = spirv_code;
+
+    vk_res = vkCreateShaderModule(ctx->device, &smci, NULL, &shader_module);
+    if (vk_res != VK_SUCCESS) {
+        return AC_ERR_KERNEL_BUILD_FAILED;
+    }
+
+    /* 2. Descriptor Set Layout */
+    for (uint32_t i = 0; i < buffer_count; ++i) {
+        bindings[i].binding = i;
+        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bindings[i].descriptorCount = 1;
+        bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+
+    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.bindingCount = buffer_count;
+    layoutInfo.pBindings = bindings;
+
+    vk_res = vkCreateDescriptorSetLayout(ctx->device, &layoutInfo, NULL, &descriptor_set_layout);
+    if (vk_res != VK_SUCCESS) {
+        ret = AC_ERR_KERNEL_BUILD_FAILED;
+        goto cleanup;
+    }
+
+    /* 3. Pipeline Layout with Push Constants */
+    pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pushRange.offset = 0;
+    pushRange.size = (uint32_t)push_constant_size;
+
+    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutInfo.setLayoutCount = 1;
+    pipelineLayoutInfo.pSetLayouts = &descriptor_set_layout;
+    if (push_constant_size > 0) {
+        pipelineLayoutInfo.pushConstantRangeCount = 1;
+        pipelineLayoutInfo.pPushConstantRanges = &pushRange;
+    }
+
+    vk_res = vkCreatePipelineLayout(ctx->device, &pipelineLayoutInfo, NULL, &pipeline_layout);
+    if (vk_res != VK_SUCCESS) {
+        ret = AC_ERR_KERNEL_BUILD_FAILED;
+        goto cleanup;
+    }
+
+    /* 4. Compute Pipeline */
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pipelineInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    pipelineInfo.stage.module = shader_module;
+    pipelineInfo.stage.pName = "main";
+    pipelineInfo.layout = pipeline_layout;
+
+    vk_res = vkCreateComputePipelines(ctx->device, VK_NULL_HANDLE, 1, &pipelineInfo, NULL, &compute_pipeline);
+    if (vk_res != VK_SUCCESS) {
+        ret = AC_ERR_KERNEL_BUILD_FAILED;
+        goto cleanup;
+    }
+
+    {
+        AcVkKernel* k = (AcVkKernel*)calloc(1, sizeof(AcVkKernel));
+        if (!k) {
+            ret = AC_ERR_OUT_OF_HOST_MEMORY;
+            goto cleanup;
+        }
+
+        k->shader_module = shader_module;
+        k->descriptor_set_layout = descriptor_set_layout;
+        k->pipeline_layout = pipeline_layout;
+        k->compute_pipeline = compute_pipeline;
+        k->push_constant_size = push_constant_size;
+        k->buffer_count = buffer_count;
+        k->owning_context = ctx;
+        k->in_flight_count = 0;
+
+        *out_kernel = k;
+        return AC_SUCCESS;
+    }
+
+cleanup:
+    if (compute_pipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(ctx->device, compute_pipeline, NULL);
+    }
+    if (pipeline_layout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(ctx->device, pipeline_layout, NULL);
+    }
+    if (descriptor_set_layout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(ctx->device, descriptor_set_layout, NULL);
+    }
+    if (shader_module != VK_NULL_HANDLE) {
+        vkDestroyShaderModule(ctx->device, shader_module, NULL);
+    }
+    return ret;
+}
+
+AcResult ac_vk_kernel_destroy(AcVkKernel* kernel) {
+    if (!kernel) {
+        return AC_SUCCESS;
+    }
+
+    if (kernel->in_flight_count > 0) {
+        return AC_ERR_DEVICE_BUSY;
+    }
+
+    if (!kernel->owning_context || kernel->owning_context->device == VK_NULL_HANDLE) {
+        return AC_ERR_INVALID_CONTEXT;
+    }
+
+    VkDevice device = kernel->owning_context->device;
+
+    if (kernel->compute_pipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device, kernel->compute_pipeline, NULL);
+        kernel->compute_pipeline = VK_NULL_HANDLE;
+    }
+    if (kernel->pipeline_layout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(device, kernel->pipeline_layout, NULL);
+        kernel->pipeline_layout = VK_NULL_HANDLE;
+    }
+    if (kernel->descriptor_set_layout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(device, kernel->descriptor_set_layout, NULL);
+        kernel->descriptor_set_layout = VK_NULL_HANDLE;
+    }
+    if (kernel->shader_module != VK_NULL_HANDLE) {
+        vkDestroyShaderModule(device, kernel->shader_module, NULL);
+        kernel->shader_module = VK_NULL_HANDLE;
+    }
+
+    kernel->owning_context = NULL;
+    free(kernel);
+    return AC_SUCCESS;
+}
+
+} // extern "C"

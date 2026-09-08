@@ -1,27 +1,49 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "fixtures": {
     "fixture_i2s_upstream.bin": {
-      "sha256": "c22f3866ab7d9f5b154bf68e98852b84c77442aa0a6415d4083dc2b939bd3c33",
+      "upstream_repository": "https://github.com/microsoft/BitNet.git",
+      "upstream_commit": "0b341e582afbf9e1011f24744b554c96a3477eb5",
+      "source_file": "3rdparty/llama.cpp/ggml/src/ggml-cpu/quants.c & utils/convert-hf-to-gguf-bitnet.py",
+      "generator_command": "clang -O3 gen_fixture.c -o gen_fixture -lm && ./gen_fixture",
+      "generator_binary_sha256": "c53d9e802a28ea56f9202167d4f711e51b54a10dfbe22fbc841f3e7b1c3132e0",
+      "input_f32_sha256": "09ae9aa306dd369d6e4bb74973af6e23f8c4fd4a07dd44533728f42a071b5f65",
+      "packed_fixture_sha256": "c22f3866ab7d9f5b154bf68e98852b84c77442aa0a6415d4083dc2b939bd3c33",
       "size_bytes": 96,
-      "description": "BitNet I2_S packed ternary weight fixture (64B payload = 256 weights, 32B trailer with scale=1.625f and 28B reserved metadata)",
-      "endianness": "little-endian",
-      "source": "Upstream BitNet quantizer specification (BitNet_ms/3rdparty/llama.cpp/ggml/src/ggml-cpu/quants.c & convert-hf-to-gguf-bitnet.py)"
+      "byte_order": "little-endian",
+      "float_format": "IEEE-754 binary32",
+      "description": "BitNet I2_S packed ternary weight fixture (64B payload = 256 weights, 32B trailer with scale=1.625f and 28B reserved metadata)"
     },
     "expected_i2s_upstream_f32.bin": {
-      "sha256": "09ae9aa306dd369d6e4bb74973af6e23f8c4fd4a07dd44533728f42a071b5f65",
+      "upstream_repository": "https://github.com/microsoft/BitNet.git",
+      "upstream_commit": "0b341e582afbf9e1011f24744b554c96a3477eb5",
+      "source_file": "3rdparty/llama.cpp/ggml/src/ggml-cpu/quants.c (dequantize_row_i2_s)",
+      "generator_command": "python gen_expected_f32.py",
+      "expected_f32_sha256": "09ae9aa306dd369d6e4bb74973af6e23f8c4fd4a07dd44533728f42a071b5f65",
       "size_bytes": 1024,
-      "description": "Expected dequantized IEEE-754 float32 weights array (256 float32 elements)",
-      "endianness": "little-endian",
-      "source": "Analytical dequantization baseline of fixture_i2s_upstream.bin"
+      "byte_order": "little-endian",
+      "float_format": "IEEE-754 binary32",
+      "description": "Expected dequantized IEEE-754 float32 weights array (256 float32 elements, 86 neg, 85 zero, 85 pos)"
     },
     "gguf_slice_blk0_v.bin": {
-      "sha256": "dd6282e81e403e77daa27f69ff53039182b5557f9b2e4c55d16381c1d8244f75",
+      "upstream_repository": "https://huggingface.co/microsoft/BitNet-b1.58-2B-4T",
+      "model_file": "bitnet-2b-ggml-model-i2_s.gguf",
+      "tensor_name": "blk.0.attn_v.weight",
+      "shape": [2560, 640],
+      "nelements": 1638400,
+      "tensor_start_byte": 682038080,
+      "payload_bytes": 409600,
+      "trailer_start_byte": 682447680,
+      "next_tensor_name": "blk.1.attn_norm.weight",
+      "next_tensor_start_byte": 682447712,
+      "next_tensor_gap_bytes": 0,
+      "slice_composition": "Block 0 (32B) + Tensor Scale Trailer (32B from trailer_start)",
+      "packed_fixture_sha256": "dd6282e81e403e77daa27f69ff53039182b5557f9b2e4c55d16381c1d8244f75",
       "size_bytes": 64,
-      "description": "Real model tensor slice from bitnet-2b-ggml-model-i2_s.gguf (blk.0.attn_v.weight: Block 0 [32B] + Tensor Scale Trailer [32B])",
-      "endianness": "little-endian",
-      "source": "Extracted from bitnet-2b-ggml-model-i2_s.gguf on Galaxy S25 (tensor offset 682038080, trailer offset 682447680)"
+      "byte_order": "little-endian",
+      "float_format": "IEEE-754 binary32",
+      "description": "Real model tensor slice from bitnet-2b-ggml-model-i2_s.gguf (scale=2.2931101322f, 48 neg, 38 zero, 42 pos)"
     }
   }
 }

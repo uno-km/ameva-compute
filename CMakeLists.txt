@@ -83,6 +83,32 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(amuda_cli dl m)
 endif()
 
+# =============================================================================
+# Vulkan Compute Core (AMUDA 2.0 Native Vulkan Backend)
+# =============================================================================
+set(AC_VK_SOURCES
+    src/backend/vulkan/ac_vk_context.cpp
+    src/backend/vulkan/ac_vk_buffer.cpp
+    src/backend/vulkan/ac_vk_pipeline.cpp
+    src/backend/vulkan/ac_vk_dispatch.cpp
+    src/backend/vulkan/ac_vk_event.cpp
+    src/backend/vulkan/ac_vk_loader.cpp
+)
 
+add_library(ac_vulkan_core STATIC ${AC_VK_SOURCES})
+target_include_directories(ac_vulkan_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(ac_vulkan_core vulkan dl m)
+endif()
 
+# Vulkan Verification Executables
+add_executable(test_phase1_vulkan_i2s tests/test_phase1_vulkan_i2s.cpp)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_phase1_vulkan_i2s vulkan dl m)
+endif()
 
+add_executable(test_phase2_vulkan_core tests/test_phase2_vulkan_core.cpp)
+target_link_libraries(test_phase2_vulkan_core ac_vulkan_core)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_phase2_vulkan_core vulkan dl m)
+endif()

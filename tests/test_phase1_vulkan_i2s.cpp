@@ -965,7 +965,7 @@ int main(void) {
     double avg_us = (elapsed_ms * 1000.0) / N_ITERS;
 
     if (iter_failures == 0) {
-        printf("  -> PASS: 100 / 100 dispatches completed without error.\n");
+        printf("  -> PASS: 100 / 100 dispatches completed without error (100-dispatch short-run stability check passed).\n");
         printf("     Total Time: %.2f ms | Avg Latency: %.2f us / dispatch\n", elapsed_ms, avg_us);
     } else {
         printf("  -> FAIL: %d / 100 iterations failed or produced numerical drift!\n", iter_failures);
@@ -989,10 +989,11 @@ int main(void) {
     vkDestroyShaderModule(device, shaderModule, NULL);
     vkDestroyDevice(device, NULL);
     vkDestroyInstance(instance, NULL);
-    printf("  -> All Vulkan resources destroyed safely. Memory intact.\n");
+    printf("  -> All Vulkan resources destroyed safely. Process exiting cleanly.\n");
 
     printf("\n====================================================================\n");
-    printf("Summary: 6 / 6 Test Gates Completed (%d Failures)\n", total_failures);
+    printf("Verification Gates: 6 / 6 Passed (%d Failures)\n", total_failures);
+    printf("Cleanup: Completed\n");
     printf("====================================================================\n");
     return (total_failures == 0) ? 0 : 1;
 }

@@ -28,6 +28,7 @@ typedef enum {
     AC_ERR_DRIVER_SYMBOL_MISSING        = -103,
     AC_ERR_DEVICE_NOT_SUPPORTED         = -104,
     AC_ERR_DRIVER_INIT_FAILED           = -105,
+    AC_ERR_INVALID_ARGUMENT             = -106,
     
     /* Memory Management Errors (200-299) */
     AC_ERR_OUT_OF_HOST_MEMORY           = -201,
@@ -50,6 +51,7 @@ typedef enum {
     AC_ERR_ADRENO_UNSAFE_SUBGROUP_OP    = -404,
     AC_ERR_LAUNCH_TIMEOUT               = -405,
     AC_ERR_DEVICE_BUSY                  = -406,
+    AC_ERR_RESOURCE_IN_USE              = -407,
     
     /* Numerical Integrity Errors (500-599) */
     AC_ERR_NAN_OR_INF_DETECTED          = -501,
@@ -61,16 +63,22 @@ typedef enum {
     AC_ERR_THERMAL_THROTTLING_TRIPPED   = -603
 } AcResult;
 
+/* Forward declarations for Vulkan Compute Core Types */
+typedef struct AcVkContext AcVkContext;
+typedef struct AcVkBuffer  AcVkBuffer;
+typedef struct AcVkKernel  AcVkKernel;
+typedef struct AcVkEvent   AcVkEvent;
+
 /**
  * @brief Hardware Quirk Flags
  */
 typedef enum {
     AC_QUIRK_NONE                       = 0,
-    AC_QUIRK_MALI_SUBGROUP_16           = 1 << 0,  /* Subgroup 16 stride zero infinite loop fix */
-    AC_QUIRK_MALI_MODULO_128            = 1 << 1,  /* Strict 128-byte alignment enforcement */
-    AC_QUIRK_ADRENO_PNEXT_BYPASS        = 1 << 2,  /* Bypass pNext when requested == native */
-    AC_QUIRK_ADRENO_FP16_REDUCE         = 1 << 3,  /* Bypass broken FP16 subgroup intrinsics */
-    AC_QUIRK_HEADLESS_EGL               = 1 << 4   /* Headless EGL dummy display shim */
+    AC_QUIRK_MALI_SUBGROUP_16           = 1 << 0,
+    AC_QUIRK_MALI_MODULO_128            = 1 << 1,
+    AC_QUIRK_ADRENO_PNEXT_BYPASS        = 1 << 2,
+    AC_QUIRK_ADRENO_FP16_REDUCE         = 1 << 3,
+    AC_QUIRK_HEADLESS_EGL               = 1 << 4
 } AcQuirkFlags;
 
 /**
@@ -83,14 +91,14 @@ typedef struct {
 } AcDim3;
 
 /**
- * @brief Device Context
+ * @brief Legacy OpenCL Device Context (Maintained for backwards compatibility)
  */
 typedef struct {
-    void*        driver_handle;         /* dlopen handle */
-    void*        platform_id;           /* Native platform */
-    void*        device_id;             /* Native device */
-    void*        context;               /* Native context */
-    void*        command_queue;         /* Native queue */
+    void*        driver_handle;
+    void*        platform_id;
+    void*        device_id;
+    void*        context;
+    void*        command_queue;
     char         device_name[128];
     char         vendor_name[64];
     uint32_t     vendor_id;
@@ -99,16 +107,16 @@ typedef struct {
     uint64_t     max_work_item_sizes[3];
     uint64_t     global_mem_size;
     uint64_t     local_mem_size;
-    uint32_t     active_quirks;         /* Bitmask of AcQuirkFlags */
+    uint32_t     active_quirks;
     bool         is_uma_supported;
 } AcContext;
 
 /**
- * @brief UMA Zero-Copy Memory Buffer
+ * @brief Legacy OpenCL UMA Zero-Copy Memory Buffer
  */
 typedef struct {
-    void*        host_ptr;              /* 64-byte cache-line aligned CPU memory */
-    void*        native_mem;            /* Native GPU buffer handle */
+    void*        host_ptr;
+    void*        native_mem;
     size_t       size_bytes;
     uint32_t     flags;
     bool         is_mapped;
@@ -116,18 +124,18 @@ typedef struct {
 } AcBuffer;
 
 /**
- * @brief Executable Kernel
+ * @brief Legacy OpenCL Executable Kernel
  */
 typedef struct {
-    void*        program;               /* Native program handle */
-    void*        kernel;                /* Native kernel handle */
+    void*        program;
+    void*        kernel;
     char         kernel_name[64];
     uint64_t     work_group_size;
     bool         is_builtin;
 } AcKernel;
 
 /**
- * @brief Hardware Event & Profiler
+ * @brief Legacy OpenCL Hardware Event & Profiler
  */
 typedef struct {
     void*        native_event;
