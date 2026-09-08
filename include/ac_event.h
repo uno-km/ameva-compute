@@ -9,6 +9,7 @@
  *   - Double-wait is idempotent and returns AC_SUCCESS.
  *   - Destruction without explicit wait automatically waits for fence completion before retiring resources.
  *   - Provides fine-grained hardware timestamp query alongside host wall latency.
+ *     Timestamp calculations incorporate wrap-safe masking based on timestampValidBits.
  */
 #ifndef AC_EVENT_H
 #define AC_EVENT_H
@@ -64,8 +65,9 @@ AcResult ac_vk_event_destroy(AcVkEvent* event);
  * @brief Retrieve execution latency metrics for a signaled event.
  *
  * @param event Signaled event.
- * @param out_wall_latency_ns Pointer to receive host wall latency in nanoseconds (optional, can be NULL).
- * @param out_gpu_duration_ns Pointer to receive GPU duration in nanoseconds (optional, can be NULL).
+ * @param out_wall_latency_ns Host synchronous wall latency in nanoseconds (optional, can be NULL).
+ * @param out_gpu_duration_ns GPU timestamp command interval duration in nanoseconds (optional, can be NULL).
+ *        Represents interval between TOP_OF_PIPE and BOTTOM_OF_PIPE stages.
  * @return AC_SUCCESS on success, AC_ERR_DEVICE_BUSY if not signaled, AC_ERR_FEATURE_NOT_SUPPORTED if GPU timestamps unsupported.
  */
 AcResult ac_vk_event_get_timing(

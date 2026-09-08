@@ -2,10 +2,16 @@
  * @file ac_kernel.h
  * @brief Universal Vulkan Compute Pipeline & Kernel Management with Metadata Authentication
  *
+ * Supported Descriptor Scope (Phase 3 & 4 Contract):
+ *   - Descriptor Set 0 only (Single descriptor set architecture; multi-set is planned for subsequent phases).
+ *   - Resource Bindings: VK_DESCRIPTOR_TYPE_STORAGE_BUFFER and VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER.
+ *   - Push Constants: Up to 128 bytes (enforced by hardware limit check).
+ *   - Workgroup Local Dimensions: 1D, 2D, 3D up to device limits.
+ *   - Bytecode Verification: Cryptographically authenticated against expected_spirv_sha256.
+ *
  * Contract:
  *   - Rejects destruction with AC_ERR_DEVICE_BUSY if submission_outstanding_count > 0.
  *   - Validates SPIR-V bytecode size alignment, word count, and optional SHA-256 hash.
- *   - Supports universal AcKernelMetadata descriptors for explicit entry points and bindings.
  *   - Enforces explicit owning_context relationship.
  */
 #ifndef AC_KERNEL_H

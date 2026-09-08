@@ -70,9 +70,12 @@ AcResult ac_vk_event_wait(AcVkEvent* event, uint64_t timeout_ns) {
                 sizeof(uint64_t),
                 VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT
             );
-            if (qr == VK_SUCCESS && timestamps[1] >= timestamps[0]) {
+            if (qr == VK_SUCCESS) {
+                uint32_t valid_bits = event->owning_context->timestamp_valid_bits;
+                uint64_t mask = (valid_bits >= 64 || valid_bits == 0) ? 0xFFFFFFFFFFFFFFFFULL : ((1ULL << valid_bits) - 1ULL);
+                uint64_t raw_delta = (timestamps[1] - timestamps[0]) & mask;
                 double period = (double)event->owning_context->device_properties.limits.timestampPeriod;
-                event->gpu_duration_ns = (uint64_t)((double)(timestamps[1] - timestamps[0]) * period);
+                event->gpu_duration_ns = (uint64_t)((double)raw_delta * period);
             }
         }
 

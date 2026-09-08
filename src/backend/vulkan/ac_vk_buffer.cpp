@@ -4,11 +4,18 @@
 #include <stdlib.h>
 #include <string.h>
 
-static uint32_t find_memory_type(VkPhysicalDevice physical_device, uint32_t type_filter, VkMemoryPropertyFlags properties) {
+static uint32_t find_memory_type(
+    VkPhysicalDevice physical_device,
+    uint32_t type_filter,
+    VkMemoryPropertyFlags required_props,
+    VkMemoryPropertyFlags forbidden_props
+) {
     VkPhysicalDeviceMemoryProperties mem_props;
     vkGetPhysicalDeviceMemoryProperties(physical_device, &mem_props);
     for (uint32_t i = 0; i < mem_props.memoryTypeCount; ++i) {
-        if ((type_filter & (1u << i)) && (mem_props.memoryTypes[i].propertyFlags & properties) == properties) {
+        if ((type_filter & (1u << i)) &&
+            ((mem_props.memoryTypes[i].propertyFlags & required_props) == required_props) &&
+            ((mem_props.memoryTypes[i].propertyFlags & forbidden_props) == 0)) {
             return i;
         }
     }
@@ -17,10 +24,11 @@ static uint32_t find_memory_type(VkPhysicalDevice physical_device, uint32_t type
 
 extern "C" {
 
-AcResult ac_vk_buffer_create(
+AcResult ac_vk_buffer_create_explicit(
     AcVkContext* ctx,
     size_t size_bytes,
     VkBufferUsageFlags usage_flags,
+    bool force_non_coherent,
     AcVkBuffer** out_buf
 ) {
     VkBuffer buffer = VK_NULL_HANDLE;
@@ -32,7 +40,7 @@ AcResult ac_vk_buffer_create(
     AcResult ret = AC_SUCCESS;
     VkResult vk_res = VK_SUCCESS;
     uint32_t memTypeIndex = 0xFFFFFFFFu;
-    VkMemoryPropertyFlags required_props = 0;
+    VkMemoryPropertyFlags selected_props = 0;
     bool is_coherent = false;
 
     if (!out_buf) {
@@ -59,20 +67,35 @@ AcResult ac_vk_buffer_create(
 
     vkGetBufferMemoryRequirements(ctx->device, buffer, &memReqs);
 
-    /* Try persistently mapped host-visible coherent first */
-    required_props = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    memTypeIndex = find_memory_type(ctx->physical_device, memReqs.memoryTypeBits, required_props);
-    if (memTypeIndex != 0xFFFFFFFFu) {
-        is_coherent = true;
-    } else {
-        /* Fall back to host-visible non-coherent */
-        required_props = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
-        memTypeIndex = find_memory_type(ctx->physical_device, memReqs.memoryTypeBits, required_props);
+    if (force_non_coherent) {
+        /* Strictly require host visible without coherent bit */
+        VkMemoryPropertyFlags req = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+        VkMemoryPropertyFlags forb = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        memTypeIndex = find_memory_type(ctx->physical_device, memReqs.memoryTypeBits, req, forb);
         if (memTypeIndex == 0xFFFFFFFFu) {
             ret = AC_ERR_FEATURE_NOT_SUPPORTED;
             goto cleanup;
         }
+        selected_props = req;
         is_coherent = false;
+    } else {
+        /* Try host-visible coherent first */
+        VkMemoryPropertyFlags req = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        memTypeIndex = find_memory_type(ctx->physical_device, memReqs.memoryTypeBits, req, 0);
+        if (memTypeIndex != 0xFFFFFFFFu) {
+            selected_props = req;
+            is_coherent = true;
+        } else {
+            /* Fall back to host-visible non-coherent */
+            req = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+            memTypeIndex = find_memory_type(ctx->physical_device, memReqs.memoryTypeBits, req, 0);
+            if (memTypeIndex == 0xFFFFFFFFu) {
+                ret = AC_ERR_FEATURE_NOT_SUPPORTED;
+                goto cleanup;
+            }
+            selected_props = req;
+            is_coherent = false;
+        }
     }
 
     allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
@@ -108,7 +131,9 @@ AcResult ac_vk_buffer_create(
         buf->memory = memory;
         buf->mapped_ptr = mapped_ptr;
         buf->size_bytes = size_bytes;
-        buf->memory_property_flags = required_props;
+        buf->allocation_size_bytes = memReqs.size;
+        buf->memory_property_flags = selected_props;
+        buf->memory_type_index = memTypeIndex;
         buf->owning_context = ctx;
         buf->submission_outstanding_count = 0;
         buf->is_coherent = is_coherent;
@@ -129,6 +154,15 @@ cleanup:
         vkDestroyBuffer(ctx->device, buffer, NULL);
     }
     return ret;
+}
+
+AcResult ac_vk_buffer_create(
+    AcVkContext* ctx,
+    size_t size_bytes,
+    VkBufferUsageFlags usage_flags,
+    AcVkBuffer** out_buf
+) {
+    return ac_vk_buffer_create_explicit(ctx, size_bytes, usage_flags, false, out_buf);
 }
 
 AcResult ac_vk_buffer_destroy(AcVkBuffer* buf) {
@@ -165,6 +199,7 @@ AcResult ac_vk_buffer_destroy(AcVkBuffer* buf) {
 
     buf->owning_context = NULL;
     buf->size_bytes = 0;
+    buf->allocation_size_bytes = 0;
     free(buf);
     return AC_SUCCESS;
 }
@@ -195,7 +230,11 @@ AcResult ac_vk_buffer_flush(AcVkBuffer* buf, size_t offset, size_t size_bytes) {
     VkDeviceSize aligned_offset = (offset / atom_size) * atom_size;
     VkDeviceSize end = offset + size_bytes;
     VkDeviceSize aligned_end = ((end + atom_size - 1) / atom_size) * atom_size;
-    VkDeviceSize final_size = (aligned_end >= buf->size_bytes) ? VK_WHOLE_SIZE : (aligned_end - aligned_offset);
+    VkDeviceSize final_size = (aligned_end >= buf->allocation_size_bytes) ? VK_WHOLE_SIZE : (aligned_end - aligned_offset);
+
+    if (aligned_offset >= buf->allocation_size_bytes) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
 
     VkMappedMemoryRange range = {};
     range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
@@ -236,7 +275,11 @@ AcResult ac_vk_buffer_invalidate(AcVkBuffer* buf, size_t offset, size_t size_byt
     VkDeviceSize aligned_offset = (offset / atom_size) * atom_size;
     VkDeviceSize end = offset + size_bytes;
     VkDeviceSize aligned_end = ((end + atom_size - 1) / atom_size) * atom_size;
-    VkDeviceSize final_size = (aligned_end >= buf->size_bytes) ? VK_WHOLE_SIZE : (aligned_end - aligned_offset);
+    VkDeviceSize final_size = (aligned_end >= buf->allocation_size_bytes) ? VK_WHOLE_SIZE : (aligned_end - aligned_offset);
+
+    if (aligned_offset >= buf->allocation_size_bytes) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
 
     VkMappedMemoryRange range = {};
     range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
