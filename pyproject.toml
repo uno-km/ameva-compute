@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ameva-compute"
+version = "0.1.0"
+description = "AMUDA: Ultra-lightweight CUDA-like GPGPU Runtime for Mobile & Termux"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [
+    { name = "Kim Eunho", email = "uno@ameva.io" }
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: C",
+    "Programming Language :: Python :: 3"
+]
+dependencies = [
+    "numpy>=1.20.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/uno-km/ameva-compute"
+Repository = "https://github.com/uno-km/ameva-compute.git"
