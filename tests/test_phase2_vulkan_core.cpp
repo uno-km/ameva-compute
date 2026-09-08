@@ -674,7 +674,7 @@ int main(void) {
 
     if (iter_failures == 0) {
         printf("  -> PASS: 100 / 100 dispatches completed without error (100-dispatch short-run stability check passed).\n");
-        printf("     Total Time: %.2f ms | Avg Latency: %.2f us / dispatch\n", elapsed_ms, avg_us);
+        printf("     Total Wall Time: %.2f ms | Avg Synchronous End-to-End Wall Latency: %.2f us / dispatch\n", elapsed_ms, avg_us);
     } else {
         printf("  -> FAIL: %d / 100 iterations failed or produced numerical drift!\n", iter_failures);
         total_failures++;
@@ -710,12 +710,12 @@ int main(void) {
         }
 
         AcResult c_res = ac_vk_context_destroy(ctx);
-        if (c_res != AC_ERR_DEVICE_BUSY) {
-            printf("  -> FAIL: Context destruction during active dispatch was not rejected! (Got %d, expected %d)\n",
-                   c_res, AC_ERR_DEVICE_BUSY);
+        if (c_res != AC_ERR_DEVICE_BUSY && c_res != AC_ERR_RESOURCE_IN_USE) {
+            printf("  -> FAIL: Context destruction during active dispatch was not rejected! (Got %d, expected %d or %d)\n",
+                   c_res, AC_ERR_DEVICE_BUSY, AC_ERR_RESOURCE_IN_USE);
             total_failures++;
         } else {
-            printf("  -> PASS: In-flight context destruction correctly rejected (AC_ERR_DEVICE_BUSY).\n");
+            printf("  -> PASS: In-flight context destruction correctly rejected (AC_ERR_RESOURCE_IN_USE / AC_ERR_DEVICE_BUSY: %d).\n", c_res);
         }
 
         /* Wait and destroy event cleanly */

@@ -29,6 +29,7 @@ AcResult ac_vk_dispatch(
     VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
     VkCommandBuffer command_buffer = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
+    AcVkEvent* event = NULL;
     VkDescriptorPoolSize poolSize = {};
     VkDescriptorPoolCreateInfo poolInfo = {};
     VkDescriptorSetAllocateInfo allocSetInfo = {};
@@ -39,6 +40,7 @@ AcResult ac_vk_dispatch(
     AcResult ret = AC_SUCCESS;
     VkResult vk_res = VK_SUCCESS;
 
+    /* Output safety: Set to NULL immediately on entry */
     if (out_event) {
         *out_event = NULL;
     }
@@ -46,24 +48,48 @@ AcResult ac_vk_dispatch(
     if (!ctx || ctx->device == VK_NULL_HANDLE) {
         return AC_ERR_INVALID_CONTEXT;
     }
-    if (!kernel || kernel->owning_context != ctx) {
-        return AC_ERR_INVALID_CONTEXT;
+    if (!kernel) {
+        return AC_ERR_NULL_POINTER;
     }
-    if (!buffers || buffer_count < kernel->buffer_count) {
+    /* Context Mismatch: Kernel must belong to this context */
+    if (kernel->owning_context != ctx) {
+        return AC_ERR_CONTEXT_MISMATCH;
+    }
+    if (!buffers) {
+        return AC_ERR_NULL_POINTER;
+    }
+    /* Buffer count mismatch */
+    if (buffer_count != kernel->buffer_count) {
         return AC_ERR_KERNEL_ARG_INVALID;
     }
+    /* Context Mismatch: All buffers must belong to this context */
+    for (uint32_t i = 0; i < kernel->buffer_count; ++i) {
+        if (!buffers[i]) {
+            return AC_ERR_NULL_POINTER;
+        }
+        if (buffers[i]->owning_context != ctx) {
+            return AC_ERR_CONTEXT_MISMATCH;
+        }
+    }
+    /* Push constant size validation */
     if (push_constants_size != kernel->push_constant_size) {
         return AC_ERR_KERNEL_ARG_INVALID;
     }
+    /* Workgroup dimensions validation */
     if (group_x == 0 || group_y == 0 || group_z == 0) {
         return AC_ERR_INVALID_WORK_GROUP_SIZE;
     }
-
-    for (uint32_t i = 0; i < kernel->buffer_count; ++i) {
-        if (!buffers[i] || buffers[i]->owning_context != ctx) {
-            return AC_ERR_INVALID_CONTEXT;
+    /* Multiplication overflow validation */
+    {
+        uint64_t total_groups = (uint64_t)group_x * (uint64_t)group_y * (uint64_t)group_z;
+        if (total_groups == 0 || total_groups > 0xFFFFFFFFULL) {
+            return AC_ERR_NUMERICAL_OVERFLOW;
         }
     }
+
+    /* ------------------------------------------------------------------------
+     * Pre-Submit Allocations: Complete all host tracking allocations BEFORE queue submit
+     * ------------------------------------------------------------------------ */
 
     /* 1. Allocate Descriptor Pool */
     poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -88,7 +114,7 @@ AcResult ac_vk_dispatch(
     vk_res = vkAllocateDescriptorSets(ctx->device, &allocSetInfo, &descriptor_set);
     if (vk_res != VK_SUCCESS) {
         ret = AC_ERR_OUT_OF_DEVICE_MEMORY;
-        goto cleanup;
+        goto cleanup_pool;
     }
 
     /* 3. Update Descriptor Sets */
@@ -121,7 +147,7 @@ AcResult ac_vk_dispatch(
     vk_res = vkAllocateCommandBuffers(ctx->device, &cmdAllocInfo, &command_buffer);
     if (vk_res != VK_SUCCESS) {
         ret = AC_ERR_OUT_OF_DEVICE_MEMORY;
-        goto cleanup;
+        goto cleanup_pool;
     }
 
     /* 5. Create Completion Fence */
@@ -129,7 +155,7 @@ AcResult ac_vk_dispatch(
     vk_res = vkCreateFence(ctx->device, &fenceInfo, NULL, &fence);
     if (vk_res != VK_SUCCESS) {
         ret = AC_ERR_OUT_OF_DEVICE_MEMORY;
-        goto cleanup;
+        goto cleanup_cmd;
     }
 
     /* 6. Record Command Buffer */
@@ -147,75 +173,85 @@ AcResult ac_vk_dispatch(
     vkCmdDispatch(command_buffer, group_x, group_y, group_z);
     vkEndCommandBuffer(command_buffer);
 
-    /* 7. Submit to Compute Queue */
+    /* 7. Pre-allocate AcVkEvent wrapper before queue submit */
+    event = (AcVkEvent*)calloc(1, sizeof(AcVkEvent));
+    if (!event) {
+        ret = AC_ERR_OUT_OF_HOST_MEMORY;
+        goto cleanup_fence;
+    }
+
+    event->bound_buffers = (AcVkBuffer**)malloc(kernel->buffer_count * sizeof(AcVkBuffer*));
+    if (!event->bound_buffers) {
+        free(event);
+        event = NULL;
+        ret = AC_ERR_OUT_OF_HOST_MEMORY;
+        goto cleanup_fence;
+    }
+    for (uint32_t i = 0; i < kernel->buffer_count; ++i) {
+        event->bound_buffers[i] = buffers[i];
+    }
+    event->fence = fence;
+    event->command_buffer = command_buffer;
+    event->descriptor_pool = descriptor_pool;
+    event->descriptor_set = descriptor_set;
+    event->submit_timestamp_ns = get_time_ns();
+    event->is_signaled = false;
+    event->resources_retired = false;
+    event->owning_context = ctx;
+    event->bound_kernel = kernel;
+    event->bound_buffer_count = kernel->buffer_count;
+
+    /* ------------------------------------------------------------------------
+     * Increment Outstanding Submission Counters right before submit
+     * ------------------------------------------------------------------------ */
+    kernel->submission_outstanding_count++;
+    for (uint32_t i = 0; i < kernel->buffer_count; ++i) {
+        buffers[i]->submission_outstanding_count++;
+    }
+    ctx->submission_outstanding_count++;
+
+    /* ------------------------------------------------------------------------
+     * 8. Submit to Compute Queue
+     * ------------------------------------------------------------------------ */
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &command_buffer;
 
     vk_res = vkQueueSubmit(ctx->compute_queue, 1, &submitInfo, fence);
     if (vk_res != VK_SUCCESS) {
-        ret = AC_ERR_DRIVER_CRASH_OR_LOST;
-        goto cleanup;
-    }
-
-    /* 8. Increment In-Flight Usage Counters */
-    kernel->in_flight_count++;
-    for (uint32_t i = 0; i < kernel->buffer_count; ++i) {
-        buffers[i]->in_flight_count++;
-    }
-    ctx->in_flight_dispatches++;
-
-    /* 9. Construct Event Handle */
-    {
-        AcVkEvent* event = (AcVkEvent*)calloc(1, sizeof(AcVkEvent));
-        if (!event) {
-            ret = AC_ERR_OUT_OF_HOST_MEMORY;
-            goto cleanup_counters;
-        }
-
-        event->fence = fence;
-        event->command_buffer = command_buffer;
-        event->descriptor_pool = descriptor_pool;
-        event->descriptor_set = descriptor_set;
-        event->submit_timestamp_ns = get_time_ns();
-        event->is_completed = false;
-        event->owning_context = ctx;
-        event->bound_kernel = kernel;
-        event->bound_buffer_count = kernel->buffer_count;
-        event->bound_buffers = (AcVkBuffer**)malloc(kernel->buffer_count * sizeof(AcVkBuffer*));
-        if (!event->bound_buffers) {
-            free(event);
-            ret = AC_ERR_OUT_OF_HOST_MEMORY;
-            goto cleanup_counters;
-        }
+        /* Fail-Safe Rollback: Revert all incremented counters immediately! */
+        kernel->submission_outstanding_count--;
         for (uint32_t i = 0; i < kernel->buffer_count; ++i) {
-            event->bound_buffers[i] = buffers[i];
+            buffers[i]->submission_outstanding_count--;
         }
+        ctx->submission_outstanding_count--;
 
-        if (out_event) {
-            *out_event = event;
-            return AC_SUCCESS;
-        } else {
-            AcResult wait_res = ac_vk_event_wait(event, 5000000000ULL);
-            ac_vk_event_destroy(event);
-            return wait_res;
-        }
+        free(event->bound_buffers);
+        free(event);
+        event = NULL;
+        ret = AC_ERR_DRIVER_CRASH_OR_LOST;
+        goto cleanup_fence;
     }
 
-cleanup_counters:
-    kernel->in_flight_count--;
-    for (uint32_t i = 0; i < kernel->buffer_count; ++i) {
-        buffers[i]->in_flight_count--;
+    /* 9. Return Event or Synchronous Wait */
+    if (out_event) {
+        *out_event = event;
+        return AC_SUCCESS;
+    } else {
+        AcResult wait_res = ac_vk_event_wait(event, 5000000000ULL);
+        ac_vk_event_destroy(event);
+        return wait_res;
     }
-    ctx->in_flight_dispatches--;
 
-cleanup:
+cleanup_fence:
     if (fence != VK_NULL_HANDLE) {
         vkDestroyFence(ctx->device, fence, NULL);
     }
+cleanup_cmd:
     if (command_buffer != VK_NULL_HANDLE) {
         vkFreeCommandBuffers(ctx->device, ctx->command_pool, 1, &command_buffer);
     }
+cleanup_pool:
     if (descriptor_pool != VK_NULL_HANDLE) {
         vkDestroyDescriptorPool(ctx->device, descriptor_pool, NULL);
     }

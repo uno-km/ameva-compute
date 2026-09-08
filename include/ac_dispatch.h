@@ -1,6 +1,16 @@
 /**
  * @file ac_dispatch.h
  * @brief Explicit Vulkan Compute Kernel Dispatch
+ *
+ * Contract:
+ *   - Context Mismatch: Returns AC_ERR_CONTEXT_MISMATCH if kernel or any buffer
+ *     belongs to a different context than ctx.
+ *   - Pre-Submit Allocation: All host-side tracking and descriptor allocations complete
+ *     before queue submission.
+ *   - Fail-Safe Rollback: If vkQueueSubmit fails, all submission_outstanding_count
+ *     counters rollback to pre-submission values immediately.
+ *   - Output Safety: out_event is set to NULL on entry and only assigned upon full success.
+ *   - Workgroup Validation: Rejects group dimensions of 0 or multiplication overflow.
  */
 #ifndef AC_DISPATCH_H
 #define AC_DISPATCH_H

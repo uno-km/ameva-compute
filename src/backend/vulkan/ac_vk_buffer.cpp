@@ -58,10 +58,11 @@ AcResult ac_vk_buffer_create(
 
     vkGetBufferMemoryRequirements(ctx->device, buffer, &memReqs);
 
+    /* Persistently Mapped Host-Visible Buffer Contract: Both Host-Visible and Host-Coherent are required */
     required_props = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     memTypeIndex = find_memory_type(ctx->physical_device, memReqs.memoryTypeBits, required_props);
     if (memTypeIndex == 0xFFFFFFFFu) {
-        ret = AC_ERR_DEVICE_NOT_SUPPORTED;
+        ret = AC_ERR_FEATURE_NOT_SUPPORTED;
         goto cleanup;
     }
 
@@ -100,8 +101,9 @@ AcResult ac_vk_buffer_create(
         buf->size_bytes = size_bytes;
         buf->memory_property_flags = required_props;
         buf->owning_context = ctx;
-        buf->in_flight_count = 0;
+        buf->submission_outstanding_count = 0;
 
+        ctx->active_child_buffers++;
         *out_buf = buf;
         return AC_SUCCESS;
     }
@@ -124,7 +126,7 @@ AcResult ac_vk_buffer_destroy(AcVkBuffer* buf) {
         return AC_SUCCESS;
     }
 
-    if (buf->in_flight_count > 0) {
+    if (buf->submission_outstanding_count > 0) {
         return AC_ERR_DEVICE_BUSY;
     }
 
@@ -145,6 +147,10 @@ AcResult ac_vk_buffer_destroy(AcVkBuffer* buf) {
     if (buf->memory != VK_NULL_HANDLE) {
         vkFreeMemory(device, buf->memory, NULL);
         buf->memory = VK_NULL_HANDLE;
+    }
+
+    if (buf->owning_context->active_child_buffers > 0) {
+        buf->owning_context->active_child_buffers--;
     }
 
     buf->owning_context = NULL;

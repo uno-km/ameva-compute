@@ -127,7 +127,9 @@ AcResult ac_vk_context_create(AcVkContext** out_ctx) {
     ctx->queue_family_index = computeQueueFamilyIndex;
     ctx->device_properties = selectedProps;
     ctx->command_pool = commandPool;
-    ctx->in_flight_dispatches = 0;
+    ctx->active_child_buffers = 0;
+    ctx->active_child_kernels = 0;
+    ctx->submission_outstanding_count = 0;
 
     *out_ctx = ctx;
     return AC_SUCCESS;
@@ -138,7 +140,13 @@ AcResult ac_vk_context_destroy(AcVkContext* ctx) {
         return AC_SUCCESS;
     }
 
-    if (ctx->in_flight_dispatches > 0) {
+    /* Strict Hierarchy: Reject destruction if child buffers or kernels are still alive */
+    if (ctx->active_child_buffers > 0 || ctx->active_child_kernels > 0) {
+        return AC_ERR_RESOURCE_IN_USE;
+    }
+
+    /* Reject destruction if submissions are currently outstanding */
+    if (ctx->submission_outstanding_count > 0) {
         return AC_ERR_DEVICE_BUSY;
     }
 

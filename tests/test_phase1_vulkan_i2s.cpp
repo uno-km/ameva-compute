@@ -966,7 +966,7 @@ int main(void) {
 
     if (iter_failures == 0) {
         printf("  -> PASS: 100 / 100 dispatches completed without error (100-dispatch short-run stability check passed).\n");
-        printf("     Total Time: %.2f ms | Avg Latency: %.2f us / dispatch\n", elapsed_ms, avg_us);
+        printf("     Total Wall Time: %.2f ms | Avg Synchronous End-to-End Wall Latency: %.2f us / dispatch\n", elapsed_ms, avg_us);
     } else {
         printf("  -> FAIL: %d / 100 iterations failed or produced numerical drift!\n", iter_failures);
         total_failures++;

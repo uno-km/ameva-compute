@@ -121,8 +121,9 @@ AcResult ac_vk_kernel_create_spirv(
         k->push_constant_size = push_constant_size;
         k->buffer_count = buffer_count;
         k->owning_context = ctx;
-        k->in_flight_count = 0;
+        k->submission_outstanding_count = 0;
 
+        ctx->active_child_kernels++;
         *out_kernel = k;
         return AC_SUCCESS;
     }
@@ -148,7 +149,7 @@ AcResult ac_vk_kernel_destroy(AcVkKernel* kernel) {
         return AC_SUCCESS;
     }
 
-    if (kernel->in_flight_count > 0) {
+    if (kernel->submission_outstanding_count > 0) {
         return AC_ERR_DEVICE_BUSY;
     }
 
@@ -173,6 +174,10 @@ AcResult ac_vk_kernel_destroy(AcVkKernel* kernel) {
     if (kernel->shader_module != VK_NULL_HANDLE) {
         vkDestroyShaderModule(device, kernel->shader_module, NULL);
         kernel->shader_module = VK_NULL_HANDLE;
+    }
+
+    if (kernel->owning_context->active_child_kernels > 0) {
+        kernel->owning_context->active_child_kernels--;
     }
 
     kernel->owning_context = NULL;

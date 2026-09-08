@@ -3,6 +3,12 @@
  * @brief AMEVA-COMPUTE (AMUDA) Core Type Definitions and Status Codes
  *
  * Ground Truth Engineering: Zero-Silent-Fallback & Fail-Fast Doctrine.
+ *
+ * Thread Safety Specification:
+ *   AMUDA Phase 2 / 2.1 Core ABI is strictly single-thread-owned per context.
+ *   Concurrent API invocations on the same AcVkContext, AcVkBuffer, AcVkKernel,
+ *   or AcVkEvent instances without external synchronization are unsupported.
+ *   Multi-threaded workloads must instantiate separate AcVkContext instances.
  */
 
 #ifndef AC_TYPES_H
@@ -29,6 +35,8 @@ typedef enum {
     AC_ERR_DEVICE_NOT_SUPPORTED         = -104,
     AC_ERR_DRIVER_INIT_FAILED           = -105,
     AC_ERR_INVALID_ARGUMENT             = -106,
+    AC_ERR_CONTEXT_MISMATCH             = -107,
+    AC_ERR_FEATURE_NOT_SUPPORTED        = -108,
     
     /* Memory Management Errors (200-299) */
     AC_ERR_OUT_OF_HOST_MEMORY           = -201,
