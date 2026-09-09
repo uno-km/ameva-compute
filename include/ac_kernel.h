@@ -17,7 +17,7 @@
 #ifndef AC_KERNEL_H
 #define AC_KERNEL_H
 
-#include "ac_types.h"
+#include "ac_base.h"
 #include "ac_context.h"
 #include <vulkan/vulkan.h>
 

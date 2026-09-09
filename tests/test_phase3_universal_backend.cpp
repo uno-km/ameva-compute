@@ -604,9 +604,9 @@ int main(void) {
     printf("  -> Gate 9 PASS\n\n");
 
     // -------------------------------------------------------------------------
-    // Gate 10: Repeated 1,000-Cycle Lifecycle Stability & Strict Teardown Integrity
+    // Gate 10: 1,000-Cycle Buffer Lifecycle RSS Stability & Strict Teardown
     // -------------------------------------------------------------------------
-    printf("[Gate 10/10] Repeated 1,000-Cycle Lifecycle Stability & Strict Teardown...\n");
+    printf("[Gate 10/10] 1,000-Cycle Buffer Lifecycle RSS Stability & Strict Teardown...\n");
     ac_vk_kernel_destroy(vec_kernel);
 
     /* Measure RSS over 1,000 buffer allocation / destruction cycles */
@@ -622,7 +622,7 @@ int main(void) {
         ac_vk_buffer_destroy(test_buf);
     }
     long rss_final = get_process_rss_kb();
-    printf("  -> 1,000 Repeated Alloc/Free Cycles: VmRSS %ld KB -> %ld KB (Delta: %ld KB)\n",
+    printf("  -> 1,000 Repeated Buffer Alloc/Free Cycles: VmRSS %ld KB -> %ld KB (Delta: %ld KB)\n",
            rss_initial, rss_final, (rss_final >= 0 && rss_initial >= 0) ? (rss_final - rss_initial) : 0);
 
     /* Verify outstanding submission counters and child references are strictly 0 */

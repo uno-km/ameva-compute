@@ -10,7 +10,7 @@
 #ifndef AC_CONTEXT_H
 #define AC_CONTEXT_H
 
-#include "ac_types.h"
+#include "ac_base.h"
 #include <vulkan/vulkan.h>
 
 #ifdef __cplusplus

@@ -13,7 +13,7 @@
 #ifndef AC_BUFFER_H
 #define AC_BUFFER_H
 
-#include "ac_types.h"
+#include "ac_base.h"
 #include "ac_context.h"
 #include <vulkan/vulkan.h>
 

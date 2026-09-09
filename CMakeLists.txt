@@ -93,6 +93,7 @@ set(AC_VK_SOURCES
     src/backend/vulkan/ac_vk_dispatch.cpp
     src/backend/vulkan/ac_vk_event.cpp
     src/backend/vulkan/ac_vk_loader.cpp
+    src/runtime/ac_runtime.cpp
 )
 
 add_library(ac_vulkan_core STATIC ${AC_VK_SOURCES})
@@ -123,4 +124,10 @@ add_executable(test_phase3_universal_backend tests/test_phase3_universal_backend
 target_link_libraries(test_phase3_universal_backend ac_vulkan_core)
 if(UNIX AND NOT APPLE)
     target_link_libraries(test_phase3_universal_backend vulkan dl m)
+endif()
+
+add_executable(test_phase4_runtime_abi tests/test_phase4_runtime_abi.cpp)
+target_link_libraries(test_phase4_runtime_abi ac_vulkan_core)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_phase4_runtime_abi vulkan dl m)
 endif()

@@ -1,5 +1,5 @@
 #include "ac_buffer.h"
-#include "ac_types.h"
+#include "ac_base.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -114,7 +114,7 @@ AcResult ac_vk_buffer_create_explicit(
         goto cleanup;
     }
 
-    vk_res = vkMapMemory(ctx->device, memory, 0, size_bytes, 0, &mapped_ptr);
+    vk_res = vkMapMemory(ctx->device, memory, 0, memReqs.size, 0, &mapped_ptr);
     if (vk_res != VK_SUCCESS) {
         ret = AC_ERR_BUFFER_NOT_MAPPED;
         goto cleanup;

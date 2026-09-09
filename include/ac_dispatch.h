@@ -15,7 +15,7 @@
 #ifndef AC_DISPATCH_H
 #define AC_DISPATCH_H
 
-#include "ac_types.h"
+#include "ac_base.h"
 #include "ac_context.h"
 #include "ac_buffer.h"
 #include "ac_kernel.h"
