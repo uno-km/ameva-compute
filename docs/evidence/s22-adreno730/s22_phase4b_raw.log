@@ -28,10 +28,10 @@ AMUDA Phase 4B: Specialization Constants (Public C ABI 2.1.0)
 [Gate 9/10] Algorithmic Specialization (Fused Scale & Add)...
   -> Algorithmic specialization verified: c = a * 2.5 + b, 0/1000 mismatches (max_diff=0.000000e+00).
 [Gate 10/10] 1,000-Cycle Pipeline Lifecycle RSS Stability...
-  -> RSS: start=24620 KB, end=24616 KB, delta=-4 KB across 1000 pipeline cycles.
+  -> RSS: start=24604 KB, end=24592 KB, delta=-12 KB across 1000 pipeline cycles.
   -> Verifying RSS decision boundary and safety unit tests (8 cases)...
   -> Decision boundary and safety unit tests: 8/8 PASS.
-  -> 1,000회 lifecycle 반복 후 RSS는 4 KB 감소했다.
+  -> 1,000회 lifecycle 반복 후 RSS는 12 KB 감소했다.
   -> 정의된 RSS 증가 한도는 초과하지 않았다.
   -> 감소 원인은 이 측정만으로 특정하지 않는다.
   -> 1,000-cycle lifecycle memory stability verified.
@@ -39,3 +39,4 @@ AMUDA Phase 4B: Specialization Constants (Public C ABI 2.1.0)
 ======================================================================
 AMUDA Phase 4B (Public C ABI 2.1.0) Result: 10/10 Gates PASSED
 ======================================================================
+EXIT_CODE=0

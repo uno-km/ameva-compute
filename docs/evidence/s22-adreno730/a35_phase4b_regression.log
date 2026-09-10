@@ -1,12 +1,20 @@
 === A35 Phase 4B Regression Execution Metadata ===
-Device: Samsung Galaxy A35 (SM-A356N) / ARM Mali-G68 MP5
-Command: unset LD_LIBRARY_PATH && timeout 120s ./build-audit/test_phase4b_specialization
+Device: Samsung Galaxy A35 (SM-A356N)
+SoC: Samsung Exynos 1380
+GPU Model: ARM Mali-G68 MP5
+Vulkan vendorID: 0x13B5
+Vulkan deviceID: 0x00080001
+Vulkan driverVersion: 0x00260000
+Command: unset LD_LIBRARY_PATH && timeout 120s ./build-audit/test_phase4b_specialization ; rc=$? ; echo "EXIT_CODE=$rc" ; exit $rc
 Binary path: /data/data/com.termux/files/home/ameva-compute/build-audit/test_phase4b_specialization
 Binary SHA-256: cd23a57c879e0286b05e2389e008a583a487df67ebd0600fcb9b8e5ed2a68afe
+Binary Provenance: Compiled locally on A35 Termux environment; binary hash reflects local build environment/linker variations while source hash matches baseline.
+Source path: tests/test_phase4b_specialization.cpp
 Source SHA-256: 95cb71360fcc64c977c53e332ccecd4c141949cef7915ab39e39b1787814146c
+Source Provenance: 100% bit-for-bit match with commit 088c457eee5d880dc5efedcd9415c8fea0d503a9.
 Exit Status: 0
-Timeout status: Completed within 120s limit (Wall time ~5.2s)
-Gate 10 RSS result: RSS start=34952 KB, end=34948 KB, delta=-4 KB (Within limit, non-failing reduction)
+Timeout status: Completed within 120s limit (Wall latency ~5.1s)
+Gate 10 RSS result: RSS start=34940 KB, end=34936 KB, delta=-4 KB (Within limit, non-failing reduction)
 Decision tests: 8/8 PASS
 Final result: 10/10 Gates PASSED
 STDERR: (empty)
@@ -42,7 +50,7 @@ AMUDA Phase 4B: Specialization Constants (Public C ABI 2.1.0)
 [Gate 9/10] Algorithmic Specialization (Fused Scale & Add)...
   -> Algorithmic specialization verified: c = a * 2.5 + b, 0/1000 mismatches (max_diff=0.000000e+00).
 [Gate 10/10] 1,000-Cycle Pipeline Lifecycle RSS Stability...
-  -> RSS: start=34952 KB, end=34948 KB, delta=-4 KB across 1000 pipeline cycles.
+  -> RSS: start=34940 KB, end=34936 KB, delta=-4 KB across 1000 pipeline cycles.
   -> Verifying RSS decision boundary and safety unit tests (8 cases)...
   -> Decision boundary and safety unit tests: 8/8 PASS.
   -> 1,000회 lifecycle 반복 후 RSS는 4 KB 감소했다.
@@ -53,3 +61,4 @@ AMUDA Phase 4B: Specialization Constants (Public C ABI 2.1.0)
 ======================================================================
 AMUDA Phase 4B (Public C ABI 2.1.0) Result: 10/10 Gates PASSED
 ======================================================================
+EXIT_CODE=0

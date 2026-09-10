@@ -1,12 +1,20 @@
 === S25 Phase 4B Regression Execution Metadata ===
-Device: Samsung Galaxy S25 (SM-S931N) / Qualcomm Adreno 830
-Command: unset LD_LIBRARY_PATH && timeout 120s ./build-audit/test_phase4b_specialization
+Device: Samsung Galaxy S25 (SM-S931N)
+SoC: Qualcomm Snapdragon 8 Elite (SM8750)
+GPU Model: Qualcomm Adreno 830
+Vulkan vendorID: 0x5143
+Vulkan deviceID: 0x08300000
+Vulkan driverVersion: 0x80302000
+Command: unset LD_LIBRARY_PATH && timeout 120s ./build-audit/test_phase4b_specialization ; rc=$? ; echo "EXIT_CODE=$rc" ; exit $rc
 Binary path: /data/data/com.termux/files/home/ameva-compute/build-audit/test_phase4b_specialization
 Binary SHA-256: ff38807c5e9727c4af4656d324ee1c45f21426567dfcf2c80bdfa3284ab2e4c8
+Binary Provenance: Bit-for-bit identical to Galaxy S22 binary due to identical Clang 21.1.8 compiler toolchain and flags.
+Source path: tests/test_phase4b_specialization.cpp
 Source SHA-256: 95cb71360fcc64c977c53e332ccecd4c141949cef7915ab39e39b1787814146c
+Source Provenance: 100% bit-for-bit match with commit 088c457eee5d880dc5efedcd9415c8fea0d503a9.
 Exit Status: 0
-Timeout status: Completed within 120s limit (Wall time ~3.5s)
-Gate 10 RSS result: RSS start=36120 KB, end=35988 KB, delta=-132 KB (Within limit, non-failing reduction)
+Timeout status: Completed within 120s limit (Wall latency ~3.5s)
+Gate 10 RSS result: RSS start=35860 KB, end=35836 KB, delta=-24 KB (Within limit, non-failing reduction)
 Decision tests: 8/8 PASS
 Final result: 10/10 Gates PASSED
 STDERR: (empty)
@@ -42,10 +50,10 @@ AMUDA Phase 4B: Specialization Constants (Public C ABI 2.1.0)
 [Gate 9/10] Algorithmic Specialization (Fused Scale & Add)...
   -> Algorithmic specialization verified: c = a * 2.5 + b, 0/1000 mismatches (max_diff=0.000000e+00).
 [Gate 10/10] 1,000-Cycle Pipeline Lifecycle RSS Stability...
-  -> RSS: start=36120 KB, end=35988 KB, delta=-132 KB across 1000 pipeline cycles.
+  -> RSS: start=35860 KB, end=35836 KB, delta=-24 KB across 1000 pipeline cycles.
   -> Verifying RSS decision boundary and safety unit tests (8 cases)...
   -> Decision boundary and safety unit tests: 8/8 PASS.
-  -> 1,000회 lifecycle 반복 후 RSS는 132 KB 감소했다.
+  -> 1,000회 lifecycle 반복 후 RSS는 24 KB 감소했다.
   -> 정의된 RSS 증가 한도는 초과하지 않았다.
   -> 감소 원인은 이 측정만으로 특정하지 않는다.
   -> 1,000-cycle lifecycle memory stability verified.
@@ -53,3 +61,4 @@ AMUDA Phase 4B: Specialization Constants (Public C ABI 2.1.0)
 ======================================================================
 AMUDA Phase 4B (Public C ABI 2.1.0) Result: 10/10 Gates PASSED
 ======================================================================
+EXIT_CODE=0
