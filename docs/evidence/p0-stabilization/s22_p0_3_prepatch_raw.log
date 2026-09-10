@@ -8,5 +8,10 @@ Command: LD_LIBRARY_PATH=$PREFIX/opt/vendor/lib ./test_amuda_gguf_validation
 PREPATCH_VAL_EXIT_CODE=135
 
 Disposition:
-Fatal SIGBUS (Exit Code 135) caused by unaligned memory dereference and unbounded pointer advancement past mmap allocation boundary.
-Heap buffer overflow on ne[4] triggered when n_dims > 4.
+Pre-patch malformed GGUF execution terminated with SIGBUS-compatible exit code 135.
+The parser contained both unchecked mmap-boundary advancement and alignment-unsafe direct integer dereferences.
+The exact faulting instruction was not isolated.
+
+SIGBUS_REPRODUCED=true
+EXACT_FAULT_SITE=NOT_ISOLATED
+LIKELY_CAUSES=unchecked mapped-range access, alignment-unsafe reads

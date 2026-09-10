@@ -3,7 +3,8 @@
  * @brief Zero-Copy Bounded GGUF Model Parser & Tensor Binder
  *
  * Implements strict boundary checking, fail-closed validation,
- * and safe dimension parsing per AMEVA P0-3 stabilization standards.
+ * resource budget enforcement, and safe dimension parsing
+ * per AMEVA P0-3 stabilization standards.
  */
 
 #include "amuda_gguf.h"
@@ -17,10 +18,12 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 
-#define GGUF_MAX_METADATA_KV_COUNT 1000000ULL
-#define GGUF_MAX_TENSOR_COUNT      1000000ULL
-#define GGUF_MAX_STRING_LEN        65536ULL
-#define GGUF_MAX_RECURSION_DEPTH   16
+#define GGUF_MAX_METADATA_KV_COUNT         65536ULL
+#define GGUF_MAX_TENSOR_COUNT              65536ULL
+#define GGUF_MAX_TOTAL_METADATA_BYTES      (16 * 1024 * 1024ULL) /* 16 MB max for metadata section */
+#define GGUF_MAX_TOTAL_TENSOR_ALLOC_BYTES  (16 * 1024 * 1024ULL) /* 16 MB max for GgufTensor array */
+#define GGUF_MAX_STRING_LEN                65536ULL
+#define GGUF_MAX_RECURSION_DEPTH           16
 
 typedef struct {
     const uint8_t* cur;
@@ -28,8 +31,9 @@ typedef struct {
 } GgufReader;
 
 static inline void reader_init(GgufReader* r, const uint8_t* data, size_t size) {
+    if (!r) return;
     r->cur = data;
-    r->end = data + size;
+    r->end = (data && size <= (SIZE_MAX - (size_t)data)) ? (data + size) : NULL;
 }
 
 static inline size_t reader_remaining(const GgufReader* r) {
@@ -41,32 +45,19 @@ static inline bool reader_can_read(const GgufReader* r, size_t bytes) {
     return reader_remaining(r) >= bytes;
 }
 
-static inline __attribute__((unused)) bool reader_read_u8(GgufReader* r, uint8_t* val) {
-    if (!reader_can_read(r, 1)) return false;
-    *val = *r->cur++;
-    return true;
-}
-
-static inline __attribute__((unused)) bool reader_read_u16(GgufReader* r, uint16_t* val) {
-    if (!reader_can_read(r, 2)) return false;
-    *val = (uint16_t)r->cur[0] | ((uint16_t)r->cur[1] << 8);
-    r->cur += 2;
-    return true;
-}
-
-static inline __attribute__((unused)) bool reader_read_u32(GgufReader* r, uint32_t* val) {
+static inline bool reader_read_u32(GgufReader* r, uint32_t* val) {
     if (!reader_can_read(r, 4)) return false;
-    *val = (uint32_t)r->cur[0] |
-           ((uint32_t)r->cur[1] << 8) |
-           ((uint32_t)r->cur[2] << 16) |
-           ((uint32_t)r->cur[3] << 24);
+    *val = ((uint32_t)r->cur[0]) |
+           (((uint32_t)r->cur[1]) << 8) |
+           (((uint32_t)r->cur[2]) << 16) |
+           (((uint32_t)r->cur[3]) << 24);
     r->cur += 4;
     return true;
 }
 
-static inline __attribute__((unused)) bool reader_read_u64(GgufReader* r, uint64_t* val) {
+static inline bool reader_read_u64(GgufReader* r, uint64_t* val) {
     if (!reader_can_read(r, 8)) return false;
-    *val = ((uint64_t)r->cur[0]) |
+    *val = (((uint64_t)r->cur[0])) |
            (((uint64_t)r->cur[1]) << 8) |
            (((uint64_t)r->cur[2]) << 16) |
            (((uint64_t)r->cur[3]) << 24) |
@@ -78,27 +69,20 @@ static inline __attribute__((unused)) bool reader_read_u64(GgufReader* r, uint64
     return true;
 }
 
-static inline __attribute__((unused)) bool reader_read_f32(GgufReader* r, float* val) {
+static inline bool reader_read_f32(GgufReader* r, float* val) {
     uint32_t u32 = 0;
     if (!reader_read_u32(r, &u32)) return false;
     memcpy(val, &u32, sizeof(float));
     return true;
 }
 
-static inline __attribute__((unused)) bool reader_read_f64(GgufReader* r, double* val) {
-    uint64_t u64 = 0;
-    if (!reader_read_u64(r, &u64)) return false;
-    memcpy(val, &u64, sizeof(double));
-    return true;
-}
-
-static inline __attribute__((unused)) bool reader_skip(GgufReader* r, size_t bytes) {
+static inline bool reader_skip(GgufReader* r, size_t bytes) {
     if (!reader_can_read(r, bytes)) return false;
     r->cur += bytes;
     return true;
 }
 
-static inline __attribute__((unused)) bool reader_read_string(GgufReader* r, char* dst, size_t max_dst_len, uint64_t* out_len) {
+static inline bool reader_read_string(GgufReader* r, char* dst, size_t max_dst_len, uint64_t* out_len) {
     uint64_t slen = 0;
     if (!reader_read_u64(r, &slen)) return false;
     if (slen > GGUF_MAX_STRING_LEN || !reader_can_read(r, (size_t)slen)) return false;
@@ -112,7 +96,7 @@ static inline __attribute__((unused)) bool reader_read_string(GgufReader* r, cha
     return true;
 }
 
-static inline __attribute__((unused)) bool checked_mul_u64(uint64_t a, uint64_t b, uint64_t* out) {
+static inline bool checked_mul_u64(uint64_t a, uint64_t b, uint64_t* out) {
     if (a == 0 || b == 0) {
         *out = 0;
         return true;
@@ -124,7 +108,7 @@ static inline __attribute__((unused)) bool checked_mul_u64(uint64_t a, uint64_t 
     return true;
 }
 
-static inline __attribute__((unused)) bool checked_align_up(size_t val, size_t align, size_t* out) {
+static inline bool checked_align_up(size_t val, size_t align, size_t* out) {
     if (align == 0 || (align & (align - 1)) != 0) return false;
     size_t rem = val % align;
     if (rem == 0) {
@@ -339,7 +323,6 @@ AcResult ac_gguf_open(const char* file_path, GgufModel** out_model) {
 
     int fd = open(file_path, O_RDONLY);
     if (fd < 0) {
-        fprintf(stderr, "[AMUDA-GGUF] Failed to open file: %s\n", file_path);
         return AC_ERR_BINARY_CORRUPTED;
     }
 
@@ -352,7 +335,6 @@ AcResult ac_gguf_open(const char* file_path, GgufModel** out_model) {
 
     void* mmap_addr = mmap(NULL, file_size, PROT_READ, MAP_SHARED, fd, 0);
     if (mmap_addr == MAP_FAILED) {
-        perror("[AMUDA-GGUF] mmap failed");
         close(fd);
         return AC_ERR_OUT_OF_HOST_MEMORY;
     }
@@ -362,7 +344,6 @@ AcResult ac_gguf_open(const char* file_path, GgufModel** out_model) {
 
     uint32_t magic = 0;
     if (!reader_read_u32(&r, &magic) || magic != GGUF_MAGIC) {
-        fprintf(stderr, "[AMUDA-GGUF] Invalid GGUF magic: 0x%08X (expected 0x%08X)\n", magic, GGUF_MAGIC);
         munmap(mmap_addr, file_size);
         close(fd);
         return AC_ERR_BINARY_CORRUPTED;
@@ -370,7 +351,6 @@ AcResult ac_gguf_open(const char* file_path, GgufModel** out_model) {
 
     uint32_t version = 0;
     if (!reader_read_u32(&r, &version) || (version != 2 && version != 3)) {
-        fprintf(stderr, "[AMUDA-GGUF] Unsupported GGUF version: %u\n", version);
         munmap(mmap_addr, file_size);
         close(fd);
         return AC_ERR_DEVICE_NOT_SUPPORTED;
@@ -406,8 +386,14 @@ AcResult ac_gguf_open(const char* file_path, GgufModel** out_model) {
 
     uint64_t alignment = 32;
 
-    // Parse Metadata KV Pairs
+    // Parse Metadata KV Pairs with total metadata byte budget guard
     for (uint64_t i = 0; i < metadata_kv_count; i++) {
+        size_t current_meta_offset = (size_t)(r.cur - (const uint8_t*)mmap_addr);
+        if (current_meta_offset > GGUF_MAX_TOTAL_METADATA_BYTES) {
+            ac_gguf_close(model);
+            return AC_ERR_BINARY_CORRUPTED;
+        }
+
         char key[128] = {0};
         uint64_t klen = 0;
         if (!reader_read_string(&r, key, sizeof(key), &klen)) {
@@ -442,7 +428,6 @@ AcResult ac_gguf_open(const char* file_path, GgufModel** out_model) {
                 return AC_ERR_BINARY_CORRUPTED;
             }
         } else {
-            // Check arch-specific configurations
             char prefix[64];
             snprintf(prefix, sizeof(prefix), "%s.", model->config.arch);
             size_t plen = strlen(prefix);
@@ -540,9 +525,14 @@ AcResult ac_gguf_open(const char* file_path, GgufModel** out_model) {
         }
     }
 
-    // Allocate Tensors Array
+    // Allocate Tensors Array with memory budget guard
     if (tensor_count > 0) {
         if (tensor_count > SIZE_MAX / sizeof(GgufTensor)) {
+            ac_gguf_close(model);
+            return AC_ERR_OUT_OF_HOST_MEMORY;
+        }
+        size_t alloc_bytes = (size_t)tensor_count * sizeof(GgufTensor);
+        if (alloc_bytes > GGUF_MAX_TOTAL_TENSOR_ALLOC_BYTES) {
             ac_gguf_close(model);
             return AC_ERR_OUT_OF_HOST_MEMORY;
         }
@@ -569,8 +559,6 @@ AcResult ac_gguf_open(const char* file_path, GgufModel** out_model) {
 
         // Strict dimension bounds enforcement: 1 <= n_dims <= 4
         if (n_dims < 1 || n_dims > 4) {
-            fprintf(stderr, "[AMUDA-GGUF] Tensor '%s' invalid dimension count: %u (allowed: 1..4)\n",
-                    model->tensors[i].name, n_dims);
             ac_gguf_close(model);
             return AC_ERR_BINARY_CORRUPTED;
         }
@@ -631,8 +619,6 @@ AcResult ac_gguf_open(const char* file_path, GgufModel** out_model) {
         size_t tsz = model->tensors[i].size_bytes;
 
         if (toff > available_data_bytes || tsz > available_data_bytes - (size_t)toff) {
-            fprintf(stderr, "[AMUDA-GGUF] Tensor '%s' out of bounds: offset=%llu, size=%zu, available=%zu\n",
-                    model->tensors[i].name, (unsigned long long)toff, tsz, available_data_bytes);
             ac_gguf_close(model);
             return AC_ERR_BINARY_CORRUPTED;
         }

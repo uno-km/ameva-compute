@@ -1,0 +1,132 @@
+================================================================================
+AMEVA-COMPUTE P0-3 STABILIZATION & HARMONIZED AUDIT VERIFICATION REPORT
+================================================================================
+Target Subsystem   : AMUDA Native GGUF Parser (src/amuda/amuda_gguf.c, include/amuda_gguf.h)
+Target Device      : Samsung Galaxy S22 (SM-S901N) / Qualcomm Snapdragon 8 Gen 1 (Adreno 730)
+OS & Environment   : Android 14 / Termux aarch64 POSIX build environment
+Active Git Branch  : fix/p0-stabilization
+Remote Release Tag : HOLD (Strict adherence to release governance)
+Remote Git Push    : HOLD (Pending complete P0 defect resolution)
+================================================================================
+
+1. EXECUTIVE AUDIT DISPOSITION & VERIFICATION SUMMARY
+--------------------------------------------------------------------------------
+[DISPOSITION SUMMARY]
+  - Malformed & Synthetic Input Validation : 19 / 19 GATES PASSED (100%)
+  - Real GGUF Model Compatibility          : PENDING (Fixture absent on test target)
+  - Little-Endian Bit-Shift KAT (Gate 21)  : PASS (U32/U64 high-bit, all-FF, unaligned exact match)
+  - Dynamic FD Leak Check (Gate 22)        : PASS (100 iterations: init=3, final=3, delta=0)
+  - Dynamic RSS Memory Slope (Gate 23)     : PASS (200 iterations: init=2912 KB, final=2916 KB, delta=4 KB)
+  - Automated CTest Suite Execution        : 3 / 3 TESTS PASSED (100% PASS, 1.06s real time)
+      * amuda_dispatch_sync               : PASSED (1.42s)
+      * amuda_dispatch_validation         : PASSED (0.10s)
+      * amuda_gguf_validation             : PASSED (0.04s)
+  - Vulkan Phase 4B Regression Matrix      : 10 / 10 GATES PASSED (EXIT_CODE=0)
+  - Compiler Warning Count                 : 0 WARNINGS under -Wall -Wextra -Werror=return-type -O3 -fPIC
+  - Overall P0-3 Technical Disposition     : CONDITIONAL PASS (Awaiting target fixture for real model)
+
+2. PRE-PATCH DEFECT ISOLATION (ZERO-HYPE GROUND TRUTH)
+--------------------------------------------------------------------------------
+Pre-patch malformed GGUF execution terminated with SIGBUS-compatible exit code 135.
+The parser contained both unchecked mmap-boundary advancement and alignment-unsafe direct integer dereferences.
+The exact faulting instruction was not isolated.
+
+SIGBUS_REPRODUCED=true
+EXACT_FAULT_SITE=NOT_ISOLATED
+LIKELY_CAUSES=unchecked mapped-range access, alignment-unsafe reads
+
+Vulnerability Details in Unpatched Code:
+  1. Direct Memory Dereferences: Unaligned *(const uint64_t*)ptr and *(const uint32_t*)ptr casts on ARM64.
+  2. ne[4] Heap Buffer Overflow: GgufTensor defines uint64_t ne[4]. When n_dims > 4, loops clobbered
+     subsequent struct members and heap chunks.
+  3. Unchecked Range Advancement: Pointers advanced without verifying cur + size <= end.
+  4. ALIGN_UP Underflow: general.alignment == 0 caused division by zero and arithmetic wrapping.
+  5. Unbounded Memory Allocations: tensor_count and metadata_kv_count lacked sane element and byte limits.
+
+3. POST-PATCH ARCHITECTURE: GgufReader BOUNDED PARSER
+--------------------------------------------------------------------------------
+The parser was completely refactored with a stateful bounded reader architecture:
+  - Structure: GgufReader encapsulates cur and end pointers.
+  - Invariants: reader_can_read(bytes) enforces bytes <= (size_t)(r->end - r->cur).
+  - Explicit Unsigned Shifts: Every byte is cast to ((uint32_t)r->cur[i]) or ((uint64_t)r->cur[i])
+    prior to shifting, preventing signed integer promotion issues on high-bit words.
+  - Safe Math Helpers: checked_mul_u64 and checked_align_up guard against integer wrap-around.
+  - Safe Range Invariant: offset <= available && size <= available - offset prevents addition overflow.
+  - Zero Dead Code: Unused helper functions (reader_read_u8, reader_read_u16, reader_read_f64) were
+    eliminated. All remaining helpers are actively invoked in production parsing paths.
+  - Sane Resource Budgets:
+      * GGUF_MAX_METADATA_KV_COUNT        : 65,536 entries
+      * GGUF_MAX_TENSOR_COUNT             : 65,536 entries
+      * GGUF_MAX_TOTAL_METADATA_BYTES     : 16 MB max for metadata section
+      * GGUF_MAX_TOTAL_TENSOR_ALLOC_BYTES : 16 MB max for GgufTensor array
+      * GGUF_MAX_STRING_LEN               : 65,536 bytes
+      * GGUF_MAX_RECURSION_DEPTH          : 16 levels
+  - Fail-Closed Guarantees: ac_gguf_open cleans up tensors, unmaps memory (munmap), closes fd,
+    and sets *out_model = NULL on every failure condition.
+
+4. STATIC CODE GREP AUDIT
+--------------------------------------------------------------------------------
+Command 1: grep -E '\*\s*\(\s*const\s+(u?int|float|double|char)' src/amuda/amuda_gguf.c
+Result   : 0 MATCHES (Zero direct cast dereferences)
+
+Command 2: grep -E 'ptr\s*\+=' src/amuda/amuda_gguf.c
+Result   : 0 MATCHES (Zero unchecked raw pointer increments)
+
+Command 3: grep -E '(ptr|cursor)' src/amuda/amuda_gguf.c
+Result   : 0 MATCHES (Zero legacy pointer variables)
+
+5. COMPREHENSIVE 23-GATE TEST MATRIX (S22 HARDWARE EXECUTION)
+--------------------------------------------------------------------------------
+[GATE 01] TRUNCATED_HEADER_REJECTED                  : PASS (Rejected file size < 24 bytes, model=NULL)
+[GATE 02] TRUNCATED_METADATA_COUNT_REJECTED          : PASS (Rejected EOF at metadata start)
+[GATE 03] TRUNCATED_METADATA_KEY_REJECTED            : PASS (Rejected key len exceeding EOF)
+[GATE 04] TRUNCATED_TENSOR_NAME_REJECTED             : PASS (Rejected tensor name exceeding EOF)
+[GATE 05] NDIMS_ZERO_REJECTED                        : PASS (Rejected n_dims == 0)
+[GATE 06] NDIMS_FIVE_REJECTED                        : PASS (Rejected n_dims == 5 (>4 buffer boundary))
+[GATE 07] NDIMS_UINT32_MAX_REJECTED                  : PASS (Rejected n_dims == UINT32_MAX)
+[GATE 08] TRUNCATED_DIMENSION_ARRAY_REJECTED         : PASS (Rejected truncated ne[] array)
+[GATE 09] ZERO_DIMENSION_REJECTED                    : PASS (Rejected dimension value 0)
+[GATE 10] DIMENSION_PRODUCT_OVERFLOW_REJECTED        : PASS (Rejected uint64 overflow in shape)
+[GATE 11] UNKNOWN_TENSOR_TYPE_REJECTED               : PASS (Rejected unsupported tensor type 9999)
+[GATE 12] ALIGNMENT_ZERO_REJECTED                    : PASS (Rejected general.alignment == 0)
+[GATE 13] ALIGNMENT_NON_POWER_OF_TWO_REJECTED        : PASS (Rejected non-power-of-2 alignment)
+[GATE 14] ALIGN_UP_OVERFLOW_REJECTED                 : PASS (Rejected alignment arithmetic overflow)
+[GATE 15] TENSOR_OFFSET_OUT_OF_RANGE_REJECTED        : PASS (Rejected tensor offset > file size)
+[GATE 16] TENSOR_END_OUT_OF_RANGE_REJECTED           : PASS (Rejected offset + size > file size)
+[GATE 17] TENSOR_COUNT_ALLOCATION_OVERFLOW_REJECTED  : PASS (Rejected overflowing tensor_count)
+[GATE 18] METADATA_COUNT_LIMIT_REJECTED              : PASS (Rejected metadata_kv_count > 64K)
+[GATE 19] VALID_MINIMAL_SYNTHETIC_GGUF_ACCEPTED      : PASS (Synthesized minimal GGUF parsed with accurate data)
+[GATE 20] VALID_REAL_GGUF_COMPATIBILITY              : FAIL (PENDING: Fixture absent on test target)
+[GATE 21] READ_LE_BYTE_SHIFT_KAT                     : PASS (U32/U64 high-bit, all-FF, unaligned exact match)
+[GATE 22] REPEATED_MALFORMED_OPEN_NO_FD_GROWTH       : PASS (100 iterations: init=3, final=3, delta=0)
+[GATE 23] REPEATED_MALFORMED_OPEN_NO_RSS_SLOPE       : PASS (200 iterations: init=2912 KB, final=2916 KB, delta=4 KB)
+
+6. REAL GGUF PROVENANCE & DEVICE STATUS
+--------------------------------------------------------------------------------
+Local Development Fixture:
+  - Path        : C:\Users\GAME\Desktop\uno-km\dev\dist_wheels\bitnet-2b-ggml-model-i2_s.gguf
+  - File Size   : 6,291,456 bytes
+  - SHA256 Hash : 342d80ca158d052374e642c19666371295edb851ea58812653e2130c3ec3b434
+  - Header Info : Magic=0x46554747 (GGUF), Version=3, TensorCount=332, KVCount=24
+  - Note        : Truncated slice (ends at byte 6,291,456 during tokenizer merge table parsing).
+
+Target Device Status (Galaxy S22 Termux):
+  - Path        : /data/data/com.termux/files/home/.cache/termux-bitnet/models/bitnet-2b-ggml-model-i2_s.gguf
+  - Existence   : Not present on device filesystem.
+  - Disposition : REAL GGUF compatibility is marked as PENDING per strict truthfulness protocol.
+    It will be validated upon deployment of the full 2GB model fixture to the device.
+
+7. REPOSITORY AND COMMIT INTEGRITY
+--------------------------------------------------------------------------------
+Commit Hash   : 42cd737 (Subsequent refinement committed in working tree)
+Commit Scope  : Production source (src/amuda/amuda_gguf.c), Test suite (tests/test_amuda_gguf_validation.c),
+                Build system (CMakeLists.txt), Evidence bundle (docs/evidence/p0-stabilization/).
+Untracked Check: git ls-files --error-unmatch ameva_compute_consolidated.md returned NOT MATCHED.
+                 The consolidated codebase markdown is strictly ignored via .gitignore.
+
+8. EVIDENCE BUNDLE FILE CHECKSUMS (docs/evidence/p0-stabilization/)
+--------------------------------------------------------------------------------
+Verification Command: Get-FileHash against SHA256SUMS
+Outcome              : TOTAL_MISMATCHES = 0 (All checksums 100% verified)
+Bundle File Count    : 10 files (9 evidence artifacts + 1 SHA256SUMS index)
+================================================================================

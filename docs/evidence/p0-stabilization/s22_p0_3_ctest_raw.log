@@ -1,5 +1,11 @@
 UpdateCTestConfiguration  from :/data/data/com.termux/files/home/ameva-compute/build-audit/DartConfiguration.tcl
-Parse Config file:/data/data/com.termux/files/home/ameva-compute/build-audit/DartConfiguration.tcl
+Parse Cache file: /data/data/com.termux/files/home/ameva-compute/build-audit/CMakeCache.txt
+   Site: localhost
+   Build name: Linux-aarch64
+Add coverage exclude regular expressions.
+SetCTestConfiguration:CMakeCommand:/data/data/com.termux/files/usr/bin/cmake
+SetCTestConfiguration:MakeCommand:/data/data/com.termux/files/usr/bin/cmake --build . --config "${CTEST_CONFIGURATION_TYPE}"
+SetCTestConfiguration:CTestCommand:/data/data/com.termux/files/usr/bin/ctest
 Test project /data/data/com.termux/files/home/ameva-compute/build-audit
 Constructing a list of tests
 Done constructing a list of tests
@@ -15,47 +21,8 @@ test 1
 1: Environment variables: 
 1:  LD_LIBRARY_PATH=/data/data/com.termux/files/usr/opt/vendor/lib:
 1: Test timeout computed to be: 1500
-1: WARNING: linker: library "/vendor/lib64/libOpenCL.so" ("/vendor/lib64/libOpenCL.so") needed or dlopened by "/data/data/com.termux/files/home/ameva-compute/build-audit/test_amuda_dispatch_sync" is not accessible for the namespace: [name="(default)", ld_library_paths="/data/data/com.termux/files/usr/opt/vendor/lib", default_library_paths="/system/lib64:/system_ext/lib64", permitted_paths="/system/lib64/drm:/system/lib64/extractors:/system/lib64/hw:/system_ext/lib64:/system/framework:/system/app:/system/priv-app:/system_ext/framework:/system_ext/app:/system_ext/priv-app:/vendor/framework:/vendor/app:/vendor/priv-app:/system/vendor/framework:/system/vendor/app:/system/vendor/priv-app:/odm/framework:/odm/app:/odm/priv-app:/oem/app:/product/framework:/product/app:/product/priv-app:/data:/mnt/expand:/apex/com.android.runtime/lib64/bionic:/system/lib64/bootstrap"]
-1: WARNING: linker: library "/system/vendor/lib64/libOpenCL.so" ("/vendor/lib64/libOpenCL.so") needed or dlopened by "/data/data/com.termux/files/home/ameva-compute/build-audit/test_amuda_dispatch_sync" is not accessible for the namespace: [name="(default)", ld_library_paths="/data/data/com.termux/files/usr/opt/vendor/lib", default_library_paths="/system/lib64:/system_ext/lib64", permitted_paths="/system/lib64/drm:/system/lib64/extractors:/system/lib64/hw:/system_ext/lib64:/system/framework:/system/app:/system/priv-app:/system_ext/framework:/system_ext/app:/system_ext/priv-app:/vendor/framework:/vendor/app:/vendor/priv-app:/system/vendor/framework:/system/vendor/app:/system/vendor/priv-app:/odm/framework:/odm/app:/odm/priv-app:/oem/app:/product/framework:/product/app:/product/priv-app:/data:/mnt/expand:/apex/com.android.runtime/lib64/bionic:/system/lib64/bootstrap"]
-1: ===================================================================
-1: [P0-2A AUDIT] Enhanced Synchronous Dispatch Contract & Queue Probing (8 Gates)
-1: ===================================================================
-1: [PASS] Context: QUALCOMM Adreno(TM) (QUALCOMM, 4 CUs, max_wg=1024)
-1: 
-1: [Gate 1/8] NON_NULL_EVENT_REMAINS_ASYNC...
-1:   [INFO] Async launch returned in 1098 us, ev=0xb400007c67a320d0
-1:   [INFO] Event wait duration: 36610 us (GPU kernel duration: 8047 us)
-1:   [PASS] Async dispatch verified: host returns while command in-flight.
-1: 
-1: [Gate 2/8] NULL_EVENT_SMALL_WORKLOAD_COMPLETES (64x64x64)...
-1:   [PASS] Small workload returned AC_SUCCESS.
-1: 
-1: [Gate 3/8] NULL_EVENT_LONG_WORKLOAD_BLOCKS & RESIDUAL QUEUE PROBE (1024x1024x1024)...
-1:   [BENCHMARK] Baseline 1024x1024 GPU duration (median of 3): 64211 us (64211, 64214, 64211)
-1:   [MEASUREMENT] ac_ops_gemm_fp32(out_event=NULL) host duration (median of 3): 70793 us (68975, 282076, 70793)
-1:   [PROBE] Residual clFinish() duration immediately after return: 18 us (25, 15, 18)
-1:   [RATIO] Host/GPU timing ratio: 1.103
-1:   [PASS] STRICT SYNCHRONOUS: Host blocked until GPU finished (ratio=1.103 >= 0.80, residual=18 us < 500 us)
-1: 
-1: [Gate 4/8] NULL_EVENT_NO_IMPLICIT_BLOCKING_READ...
-1:   [PASS] Timing measurement above did not invoke ac_buffer_sync_to_host() or clEnqueueMapBuffer.
-1: 
-1: [Gate 5/8] NULL_EVENT_RESULT_VISIBLE_AFTER_RETURN...
-1:   [PASS] Numerical output 100% validated (2048.0f), mismatches=0
-1: 
-1: [Gate 6/8] SYNC_ENQUEUE_FAILURE_DOES_NOT_WAIT...
-1:   [PASS] Enqueue failure rejected immediately in 1 us without waiting (res=-401)
-1: 
-1: [Gate 7/8] SYNC_WAIT_FAILURE_POLICY_DEFINED...
-1:   [PASS] Error mapping verified: wait errors are never lost or converted to fake timeouts.
-1: 
-1: [Gate 8/8] ASYNC_FAIL_CLOSED_CLEAR_OUT_EVENT...
-1:   [PASS] out_event cleared to NULL on failure
-1: 
-1: ===================================================================
-1: [RESULT] P0-2A ALL 8 GATES PASSED (Strict Synchronous Contract Verified)
-1: ===================================================================
-1/3 Test #1: amuda_dispatch_sync ..............   Passed    0.95 sec
+1: [RESULT] P0-2A ALL 8 GATES PASSED (100% COMPLIANCE)
+1/3 Test #1: amuda_dispatch_sync ..............   Passed    1.42 sec
 test 2
     Start 2: amuda_dispatch_validation
 
@@ -64,73 +31,7 @@ test 2
 2: Environment variables: 
 2:  LD_LIBRARY_PATH=/data/data/com.termux/files/usr/opt/vendor/lib:
 2: Test timeout computed to be: 1500
-2: WARNING: linker: library "/vendor/lib64/libOpenCL.so" ("/vendor/lib64/libOpenCL.so") needed or dlopened by "/data/data/com.termux/files/home/ameva-compute/build-audit/test_amuda_dispatch_validation" is not accessible for the namespace: [name="(default)", ld_library_paths="/data/data/com.termux/files/usr/opt/vendor/lib", default_library_paths="/system/lib64:/system_ext/lib64", permitted_paths="/system/lib64/drm:/system/lib64/extractors:/system/lib64/hw:/system_ext/lib64:/system/framework:/system/app:/system/priv-app:/system_ext/framework:/system_ext/app:/system_ext/priv-app:/vendor/framework:/vendor/app:/vendor/priv-app:/system/vendor/framework:/system/vendor/app:/system/vendor/priv-app:/odm/framework:/odm/app:/odm/priv-app:/oem/app:/product/framework:/product/app:/product/priv-app:/data:/mnt/expand:/apex/com.android.runtime/lib64/bionic:/system/lib64/bootstrap"]
-2: WARNING: linker: library "/system/vendor/lib64/libOpenCL.so" ("/vendor/lib64/libOpenCL.so") needed or dlopened by "/data/data/com.termux/files/home/ameva-compute/build-audit/test_amuda_dispatch_validation" is not accessible for the namespace: [name="(default)", ld_library_paths="/data/data/com.termux/files/usr/opt/vendor/lib", default_library_paths="/system/lib64:/system_ext/lib64", permitted_paths="/system/lib64/drm:/system/lib64/extractors:/system/lib64/hw:/system_ext/lib64:/system/framework:/system/app:/system/priv-app:/system_ext/framework:/system_ext/app:/system_ext/priv-app:/vendor/framework:/vendor/app:/vendor/priv-app:/system/vendor/framework:/system/vendor/app:/system/vendor/priv-app:/odm/framework:/odm/app:/odm/priv-app:/oem/app:/product/framework:/product/app:/product/priv-app:/data:/mnt/expand:/apex/com.android.runtime/lib64/bionic:/system/lib64/bootstrap"]
-2: ===================================================================
-2: [P0-2B AUDIT] Comprehensive Input Validation & Fail-Closed Contract (28 Gates)
-2: ===================================================================
-2: [PASS] Context: QUALCOMM Adreno(TM) (QUALCOMM, 4 CUs, max_wg=1024)
-2: 
-2: [Gate 1/28] GEMM_REJECTS_NONPOSITIVE_M...
-2:   [PASS] Rejected non-positive M (res=-303, ev=NULL)
-2: [Gate 2/28] GEMM_REJECTS_NONPOSITIVE_N...
-2:   [PASS] Rejected non-positive N (res=-303, ev=NULL)
-2: [Gate 3/28] GEMM_REJECTS_NONPOSITIVE_K...
-2:   [PASS] Rejected non-positive K (res=-303, ev=NULL)
-2: [Gate 4/28] LAUNCH_REJECTS_ZERO_GRID_X...
-2:   [PASS] Rejected zero grid.x (res=-402, ev=NULL)
-2: [Gate 5/28] LAUNCH_REJECTS_ZERO_GRID_Y...
-2:   [PASS] Rejected zero grid.y (res=-402, ev=NULL)
-2: [Gate 6/28] LAUNCH_REJECTS_ZERO_GRID_Z...
-2:   [PASS] Rejected zero grid.z (res=-402, ev=NULL)
-2: [Gate 7/28] LAUNCH_CLEARS_OUT_EVENT_ON_FAILURE...
-2:   [PASS] Cleared out_event to NULL on failure (res=-101)
-2: [Gate 8/28] ELEMENT_COUNT_OVERFLOW (OVERFLOW_SITE=checked_mul)...
-2:   [PASS] OVERFLOW_SITE=checked_mul rejected (res=-502, ev=NULL)
-2: [Gate 9/28] GRID_TIMES_BLOCK_OVERFLOW (OVERFLOW_SITE=global_size)...
-2:   [PASS] OVERFLOW_SITE=global_size rejected (res=-502, ev=NULL)
-2: [Gate 10/28] BUFFER_TOO_SMALL_WITHOUT_OVERFLOW (OVERFLOW_SITE=buffer_required_bytes)...
-2:   [PASS] OVERFLOW_SITE=buffer_required_bytes correctly identified (res=-206, ev=NULL)
-2: [Gate 11/28] DISPATCH_BUDGET_EXCEEDED_WITHOUT_OVERFLOW (OVERFLOW_SITE=dispatch_budget)...
-2:   [PASS] OVERFLOW_SITE=dispatch_budget correctly identified (res=-401, ev=NULL)
-2: [Gate 12/28] GEMM_REJECTS_UNDERSIZED_A...
-2:   [PASS] Undersized A rejected
-2: [Gate 13/28] GEMM_REJECTS_UNDERSIZED_B...
-2:   [PASS] Undersized B rejected
-2: [Gate 14/28] GEMM_REJECTS_UNDERSIZED_C...
-2:   [PASS] Undersized C rejected
-2: [Gate 15/28] BITNET_I2_REJECTS_INVALID_DIMENSIONS...
-2:   [PASS] Invalid dimension rejected
-2: [Gate 16/28] BITNET_I2_CLEARS_OUT_EVENT...
-2:   [PASS] out_event cleared on failure
-2: [Gate 17/28] BITNET_REJECTS_UNDERSIZED_PACKED_WEIGHT...
-2:   [PASS] Undersized weight rejected
-2: [Gate 18/28] BITNET_I2S_EXACT_REJECTS_INVALID_DIMENSIONS...
-2:   [PASS] Invalid dimension rejected
-2: [Gate 19/28] BITNET_I2S_EXACT_CLEARS_OUT_EVENT...
-2:   [PASS] out_event cleared on failure
-2: [Gate 20/28] RMSNORM_REJECTS_INVALID_DIMENSIONS...
-2:   [PASS] Invalid dimension rejected
-2: [Gate 21/28] RMSNORM_CLEARS_OUT_EVENT...
-2:   [PASS] out_event cleared on failure
-2: [Gate 22/28] RMSNORM_REJECTS_UNDERSIZED_INPUT...
-2:   [PASS] Undersized input rejected
-2: [Gate 23/28] SWIGLU_REJECTS_INVALID_DIMENSIONS...
-2:   [PASS] Invalid dimension rejected
-2: [Gate 24/28] SWIGLU_CLEARS_OUT_EVENT...
-2:   [PASS] out_event cleared on failure
-2: [Gate 25/28] SWIGLU_REJECTS_UNDERSIZED_INPUT...
-2:   [PASS] Undersized input rejected
-2: [Gate 26/28] ROPE_REJECTS_INVALID_DIMENSIONS...
-2:   [PASS] Invalid dimension rejected
-2: [Gate 27/28] ROPE_CLEARS_OUT_EVENT...
-2:   [PASS] out_event cleared on failure
-2: [Gate 28/28] ROPE_REJECTS_UNDERSIZED_INPUT...
-2:   [PASS] Undersized input rejected
-2: 
-2: ===================================================================
 2: [RESULT] P0-2B ALL 28 VALIDATION GATES PASSED (100% COMPLIANCE)
-2: ===================================================================
 2/3 Test #2: amuda_dispatch_validation ........   Passed    0.10 sec
 test 3
     Start 3: amuda_gguf_validation
@@ -140,42 +41,15 @@ test 3
 3: Environment variables: 
 3:  LD_LIBRARY_PATH=/data/data/com.termux/files/usr/opt/vendor/lib:
 3: Test timeout computed to be: 1500
-3: [AMUDA-GGUF] Tensor 'bad_dim_tensor' invalid dimension count: 0 (allowed: 1..4)
-3: [AMUDA-GGUF] Tensor 'overflow_tensor' invalid dimension count: 5 (allowed: 1..4)
-3: [AMUDA-GGUF] Tensor 'huge_dims' invalid dimension count: 4294967295 (allowed: 1..4)
-3: [AMUDA-GGUF] Tensor 'oob_offset' out of bounds: offset=1048576, size=16, available=0
-3: [AMUDA-GGUF] Tensor 'oob_end' out of bounds: offset=0, size=4096, available=0
-3: ===================================================================
-3:   AMUDA GGUF Bounded Reader & Parser Hardening Validation Suite    
-3:   Total 20 Boundary & Malformed Injection Gates                    
-3: ===================================================================
-3: [GATE 01] TRUNCATED_HEADER_REJECTED              : PASS (Rejected file size < 24 bytes)
-3: [GATE 02] TRUNCATED_METADATA_COUNT_REJECTED      : PASS (Rejected EOF at metadata start)
-3: [GATE 03] TRUNCATED_METADATA_KEY_REJECTED        : PASS (Rejected key len exceeding EOF)
-3: [GATE 04] TRUNCATED_TENSOR_NAME_REJECTED         : PASS (Rejected tensor name exceeding EOF)
-3: [GATE 05] NDIMS_ZERO_REJECTED                    : PASS (Rejected n_dims == 0)
-3: [GATE 06] NDIMS_FIVE_REJECTED                    : PASS (Rejected n_dims == 5 (>4 buffer boundary))
-3: [GATE 07] NDIMS_UINT32_MAX_REJECTED              : PASS (Rejected n_dims == UINT32_MAX)
-3: [GATE 08] TRUNCATED_DIMENSION_ARRAY_REJECTED     : PASS (Rejected truncated ne[] array)
-3: [GATE 09] ZERO_DIMENSION_REJECTED                : PASS (Rejected dimension value 0)
-3: [GATE 10] DIMENSION_PRODUCT_OVERFLOW_REJECTED    : PASS (Rejected uint64 overflow in shape)
-3: [GATE 11] UNKNOWN_TENSOR_TYPE_REJECTED           : PASS (Rejected unsupported tensor type 9999)
-3: [GATE 12] ALIGNMENT_ZERO_REJECTED                : PASS (Rejected general.alignment == 0)
-3: [GATE 13] ALIGNMENT_NON_POWER_OF_TWO_REJECTED    : PASS (Rejected non-power-of-2 alignment)
-3: [GATE 14] ALIGN_UP_OVERFLOW_REJECTED             : PASS (Rejected alignment arithmetic overflow)
-3: [GATE 15] TENSOR_OFFSET_OUT_OF_RANGE_REJECTED    : PASS (Rejected tensor offset > file size)
-3: [GATE 16] TENSOR_END_OUT_OF_RANGE_REJECTED       : PASS (Rejected offset + size > file size)
-3: [GATE 17] TENSOR_COUNT_ALLOCATION_OVERFLOW_REJECTED : PASS (Rejected overflowing tensor_count)
-3: [GATE 18] METADATA_COUNT_LIMIT_REJECTED          : PASS (Rejected metadata_kv_count > 1M)
-3: [GATE 19] VALID_MINIMAL_GGUF_ACCEPTED            : PASS (Synthesized valid GGUF parsed with accurate data)
-3: [GATE 20] VALID_REAL_GGUF_ACCEPTED               : PASS (Real model not found on local path, synthetic pass verified)
-3: 
-3: ===================================================================
-3:   SUMMARY: 20 / 20 GATES PASSED
-3: ===================================================================
-3/3 Test #3: amuda_gguf_validation ............   Passed    0.03 sec
+3:   [DISPOSITION SUMMARY]
+3:   Malformed and synthetic validation : 19 / 19 PASS
+3:   Real GGUF compatibility             : PENDING (Fixture absent on target)
+3:   Bit-shift KAT verification          : PASS
+3:   FD Leak verification (100 cycles)   : PASS
+3:   RSS Stability (200 cycles)          : PASS
+3/3 Test #3: amuda_gguf_validation ............   Passed    0.04 sec
 
 100% tests passed, 0 tests failed out of 3
 
-Total Test time (real) =   1.09 sec
-
+Total Test time (real) =   1.06 sec
+CTEST_EXIT_CODE=0
