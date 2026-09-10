@@ -77,6 +77,17 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(test_amuda_layer_exact dl m)
 endif()
 
+add_executable(test_amuda_dispatch_sync tests/test_amuda_dispatch_sync.c)
+target_link_libraries(test_amuda_dispatch_sync amuda_static)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_amuda_dispatch_sync dl m)
+endif()
+
+include(CTest)
+enable_testing()
+add_test(NAME amuda_dispatch_sync COMMAND test_amuda_dispatch_sync)
+set_tests_properties(amuda_dispatch_sync PROPERTIES ENVIRONMENT "LD_LIBRARY_PATH=/data/data/com.termux/files/usr/opt/vendor/lib:$ENV{LD_LIBRARY_PATH}")
+
 add_executable(amuda_cli tools/amuda_cli.c)
 target_link_libraries(amuda_cli amuda_static)
 if(UNIX AND NOT APPLE)

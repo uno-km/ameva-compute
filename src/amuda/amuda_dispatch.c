@@ -251,6 +251,26 @@ AcResult ac_kernel_free(AcContext* ctx, AcKernel* kernel) {
     return AC_SUCCESS;
 }
 
+static inline AcResult map_cl_wait_error(cl_int err) {
+    switch (err) {
+        case CL_SUCCESS:
+            return AC_SUCCESS;
+        case -30: /* CL_INVALID_VALUE */
+        case -58: /* CL_INVALID_EVENT */
+            return AC_ERR_INVALID_ARGUMENT;
+        case -34: /* CL_INVALID_CONTEXT */
+            return AC_ERR_CONTEXT_MISMATCH;
+        case -14: /* CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST */
+            return AC_ERR_DRIVER_CRASH_OR_LOST;
+        case -4:  /* CL_OUT_OF_HOST_MEMORY */
+            return AC_ERR_OUT_OF_HOST_MEMORY;
+        case -5:  /* CL_OUT_OF_RESOURCES */
+            return AC_ERR_OUT_OF_DEVICE_MEMORY;
+        default:
+            return AC_ERR_DRIVER_CRASH_OR_LOST;
+    }
+}
+
 AcResult ac_launch(
     AcContext* ctx,
     AcKernel*  kernel,
@@ -261,6 +281,9 @@ AcResult ac_launch(
     size_t*    arg_sizes,
     AcEvent**  out_event
 ) {
+    if (out_event) {
+        *out_event = NULL;
+    }
     if (!ctx) return AC_ERR_INVALID_CONTEXT;
     if (!kernel || !kernel->kernel) return AC_ERR_NULL_POINTER;
 
@@ -300,7 +323,7 @@ AcResult ac_launch(
         (size_t)block.z
     };
 
-    /* 4. Enqueue Non-blocking Kernel Launch */
+    /* 4. Enqueue Kernel Launch with Guaranteed Native Event */
     cl_event native_ev = NULL;
     cl_int err = g_clEnqueueNDRangeKernel((cl_command_queue)ctx->command_queue,
                                           (cl_kernel)kernel->kernel,
@@ -310,19 +333,44 @@ AcResult ac_launch(
                                           local_size,
                                           0,
                                           NULL,
-                                          out_event ? &native_ev : NULL);
+                                          &native_ev);
 
-    if (err != CL_SUCCESS) {
+    if (err != CL_SUCCESS || !native_ev) {
         return AC_ERR_DRIVER_CRASH_OR_LOST;
     }
 
-    if (out_event && native_ev) {
+    /* 5. Handle Asynchronous vs Synchronous Dispatch Contracts */
+    if (out_event) {
+        /* Asynchronous mode: transfer ownership to caller via AcEvent */
         AcEvent* ev = (AcEvent*)calloc(1, sizeof(AcEvent));
+        if (!ev) {
+            if (g_clReleaseEvent) g_clReleaseEvent(native_ev);
+            return AC_ERR_OUT_OF_HOST_MEMORY;
+        }
         ev->native_event = native_ev;
         *out_event = ev;
-    }
+        return AC_SUCCESS;
+    } else {
+        /* Synchronous mode: block until execution completes, then release native event */
+        if (!g_clWaitForEvents) {
+            if (g_clReleaseEvent) g_clReleaseEvent(native_ev);
+            return AC_ERR_DRIVER_SYMBOL_MISSING;
+        }
+        cl_int wait_err = g_clWaitForEvents(1, (const cl_event*)&native_ev);
+        cl_int rel_err = CL_SUCCESS;
+        if (g_clReleaseEvent) {
+            rel_err = g_clReleaseEvent(native_ev);
+        }
 
-    return AC_SUCCESS;
+        /* Priority: wait failure > release failure */
+        if (wait_err != CL_SUCCESS) {
+            return map_cl_wait_error(wait_err);
+        }
+        if (rel_err != CL_SUCCESS) {
+            return AC_ERR_DRIVER_CRASH_OR_LOST;
+        }
+        return AC_SUCCESS;
+    }
 }
 
 AcResult ac_event_wait(AcContext* ctx, AcEvent* event) {
@@ -334,7 +382,7 @@ AcResult ac_event_wait(AcContext* ctx, AcEvent* event) {
 
     cl_int err = g_clWaitForEvents(1, (const cl_event*)&event->native_event);
     if (err != CL_SUCCESS) {
-        return AC_ERR_LAUNCH_TIMEOUT;
+        return map_cl_wait_error(err);
     }
 
     if (g_clGetEventProfilingInfo) {
