@@ -1,0 +1,67 @@
+﻿======================================================================
+AMUDA 2.0 Phase 3: Universal Backend & Cross-Device Hardware Test
+======================================================================
+
+[Gate 1/10] Hardware Diagnostic & Capabilities Inspection...
+  -> Physical GPU Selected: Adreno (TM) 730 (Vendor: 0x5143, Device: 0x7030001)
+  -> Driver Version: 0x80267062, API Version: 1.1.128
+  -> Non-Coherent Atom Size: 1 bytes
+  -> Timestamp Compute Support: TRUE, Valid Bits: 48, Period: 52.08 ns/tick
+  -> Gate 1 PASS
+
+[Gate 2/10] Universal AcKernelMetadata & Hash Authentication (BitNet GEMV I2_S)...
+  -> Kernel 'bitnet_gemv_i2s' created with SHA-256: 6d6a55fe2beb5291333c36280b2326e34d7470f29635b9d5e271c2e17463504a
+  -> BitNet GEMV I2_S Decoding (256/256 weights): Mismatches: 0/256, Max Error: 0.00e+00
+  -> Gate 2 PASS
+
+[Gate 3/10] Universal Vector-Add Kernel (vector_add.spv, N=256, alpha=2.5f)...
+  -> Vector Add (N=256): Mismatches: 0/256, Max Error: 0.00e+00
+  -> Gate 3 PASS
+
+[Gate 4/10] Residual In-Place Vector Addition (x += alpha * y)...
+  -> Residual In-Place (N=512): Mismatches: 0/512, Max Error: 0.00e+00
+  -> Gate 4 PASS
+
+[Gate 5/10] Arbitrary Non-Power-of-2 Sizes & Tail Boundaries...
+  -> Tail N=37 (Groups=1): Mismatch=0, Canary Corrupted=0
+  -> Tail N=255 (Groups=1): Mismatch=0, Canary Corrupted=0
+  -> Tail N=1023 (Groups=4): Mismatch=0, Canary Corrupted=0
+  -> Tail N=4099 (Groups=17): Mismatch=0, Canary Corrupted=0
+  -> Gate 5 PASS
+
+[Gate 6/10] IEEE-754 Special Floating-Point Values Preservation...
+  -> [0] 5 + Inf = inf (isinf: 1)
+  -> [1] 5 + (-Inf) = -inf (isinf: 1)
+  -> [6] 1 + NaN = nan (isnan: 1)
+  -> [7] 42 + 8 = 50.000000 (expected: 50.0)
+  -> Gate 6 PASS
+
+[Gate 7/10] Memory Management & Physical Non-Coherent Verification...
+  -> Default Allocated Buffer Properties:
+     Memory Type Index: 6 | Property Flags: 0x0006 | is_coherent: TRUE
+     Logical Size: 4096 bytes | Physical Driver Allocation: 4096 bytes
+  -> [SKIP] NON_COHERENT_NOT_AVAILABLE: Device does not offer non-coherent host-visible memory type.
+  -> Gate 7 PASS
+
+[Gate 8/10] Fine-Grained GPU Timestamp Command Interval vs Host Wall Latency...
+  -> Avg Synchronous End-to-End Wall Latency: 396094 ns (396.094 µs, 0.396 ms)
+  -> GPU timestamp command interval duration: 10937 ns (10.937 µs, 0.011 ms)
+     (Measured between TOP_OF_PIPE and BOTTOM_OF_PIPE pipeline stages)
+  -> GPU Command Interval Active Ratio: 2.76% of host wall time
+  -> Gate 8 PASS
+
+[Gate 9/10] Metadata Validation Failures (Corrupted Hash & Unsupported Features)...
+  -> Corrupted Hash Rejection: Validated (Returned -304)
+  -> Unsupported Feature Mask Rejection: Validated (Returned -108)
+  -> Gate 9 PASS
+
+[Gate 10/10] 1,000-Cycle Buffer Lifecycle RSS Stability & Strict Teardown...
+  -> 1,000 Repeated Buffer Alloc/Free Cycles: VmRSS 27256 KB -> 27256 KB (Delta: 0 KB)
+  -> Internal Counters Check: active_child_buffers=0, active_child_kernels=0, submissions=0
+  -> Context Teardown: Cleanup completed with internal counters 0 (Returned 0)
+  -> Gate 10 PASS
+
+======================================================================
+AMUDA 2.0 Phase 3 Verification Gates: 10 / 10 Passed
+Storage-Buffer Compute Pipeline Status: VERIFIED PASS
+======================================================================

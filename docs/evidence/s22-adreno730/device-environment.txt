@@ -1,0 +1,61 @@
+﻿=== Galaxy S22 Environment Inventory ===
+
+[uname]
+Linux localhost 5.10.236-android12-9-31998796-abS901NKSS9GZH3 #1 SMP PREEMPT Tue Aug 18 23:31:01 UTC 2026 aarch64 Android
+
+[ro.product.model]
+SM-S901N
+
+[ro.product.device]
+r0q
+
+[ro.soc.model]
+SM8450
+
+[ro.hardware]
+qcom
+
+[ro.board.platform]
+taro
+
+[ro.build.version.release]
+16
+
+[ro.build.version.sdk]
+36
+
+[ro.product.cpu.abi]
+arm64-v8a
+
+[node]
+
+
+[clang]
+clang version 21.1.8
+Target: aarch64-unknown-linux-android30
+Thread model: posix
+InstalledDir: /data/data/com.termux/files/usr/bin
+
+[cmake]
+cmake version 4.3.4
+
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+
+[make]
+GNU Make 4.4.1
+
+[lld]
+LLD 21.1.8 (compatible with GNU linkers)
+
+[system_vulkan]
+-rw-r--r--. 1 root root 236304 Jan  1  2022 /system/lib64/libvulkan.so
+
+[vendor_vulkan]
+-rw-r--r--. 1 root root 4044904 Jan  1  2021 /vendor/lib64/hw/vulkan.adreno.so
+
+[dev_dri]
+total 0
+c????????? ? ? ? ?            ? card0
+c????????? ? ? ? ?            ? renderD128
+
+[dev_mali]

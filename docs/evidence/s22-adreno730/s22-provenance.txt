@@ -1,0 +1,32 @@
+=== S22 BINARY & SOURCE PROVENANCE ===
+[PROBE SOURCE SHA256]
+bbd31c64a6c839cff86187a4cec9e8f453c93aec2b9975169083f2a056bdb93c  /data/data/com.termux/files/home/official_vulkan_probe_full.cpp
+[PROBE BINARY SHA256 (NATIVE S22 BUILD)]
+c2d561dea563e3e903cd11ec378a461fee2dcb8497bf5dbd13cb7a1494006cf7  /data/data/com.termux/files/home/official_vulkan_probe_full_s22
+[PROBE BINARY ELF HEADER]
+  Class:                             ELF64
+  OS/ABI:                            UNIX - System V
+  Type:                              DYN (Shared object file)
+  Machine:                           AArch64
+[PROBE BINARY DYNAMIC TAGS (DT_NEEDED / RUNPATH)]
+  0x000000000000001d (RUNPATH)         Library runpath: [/data/data/com.termux/files/usr/bin/../../usr/lib]
+  0x0000000000000001 (NEEDED)          Shared library: [libdl.so]
+  0x0000000000000001 (NEEDED)          Shared library: [libc++_shared.so]
+  0x0000000000000001 (NEEDED)          Shared library: [libm.so]
+  0x0000000000000001 (NEEDED)          Shared library: [libc.so]
+[PHASE 4B TEST SOURCE SHA256]
+95cb71360fcc64c977c53e332ccecd4c141949cef7915ab39e39b1787814146c  /data/data/com.termux/files/home/ameva-compute/tests/test_phase4b_specialization.cpp
+[PHASE 4B TEST BINARY SHA256 (S22 BUILD)]
+ff38807c5e9727c4af4656d324ee1c45f21426567dfcf2c80bdfa3284ab2e4c8  /data/data/com.termux/files/home/ameva-compute/build-phase4c-audit/test_phase4b_specialization
+[PHASE 4B TEST BINARY DYNAMIC TAGS]
+  0x000000000000001d (RUNPATH)         Library runpath: [/data/data/com.termux/files/usr/bin/../../usr/lib]
+  0x0000000000000001 (NEEDED)          Shared library: [libvulkan.so]
+  0x0000000000000001 (NEEDED)          Shared library: [libdl.so]
+  0x0000000000000001 (NEEDED)          Shared library: [libm.so]
+  0x0000000000000001 (NEEDED)          Shared library: [libc++_shared.so]
+  0x0000000000000001 (NEEDED)          Shared library: [libc.so]
+[TOOLCHAIN INFO]
+clang version 21.1.8
+Target: aarch64-unknown-linux-android30
+Thread model: posix
+InstalledDir: /data/data/com.termux/files/usr/bin

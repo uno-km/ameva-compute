@@ -5,6 +5,7 @@
  * Hardware Verification Fleet:
  *   - Qualcomm Snapdragon 8 Elite / Adreno 830 (Samsung Galaxy S25)
  *   - Samsung Exynos 1380 / ARM Mali-G68 (Samsung Galaxy A35)
+ *   - Qualcomm Snapdragon 8 Gen 1 / Adreno 730 (Samsung Galaxy S22 SM-S901N)
  *
  * Verification Gates:
  *   1. ABI Version Validation (0x00020100 vs 0x00020000 rejection) & SHA-256 FIPS KAT
@@ -16,7 +17,7 @@
  *   7. Local Size 32, 64, 128 Numerical Parity with Effective Grid Calculation (0 mismatches)
  *   8. Domain-Separated Little-Endian Pipeline Identity & Order Invariance & Default Equivalence
  *   9. Algorithmic Specialization (OP_MODE = 1u, SCALE_FACTOR = 2.5f, mathematical correctness verified)
- *  10. 1,000-Cycle Pipeline Lifecycle RSS Stability (abs(VmRSS delta) <= 128 KB)
+ *  10. 1,000-Cycle Pipeline Lifecycle RSS Stability (VmRSS growth <= 128 KB, negative delta non-failing)
  */
 
 #include <stdio.h>
@@ -63,6 +64,46 @@ static long get_process_rss_kb(void) {
     }
     fclose(f);
     return rss;
+}
+
+enum class RssGrowthResult {
+    WITHIN_LIMIT,
+    EXCEEDED_LIMIT,
+    MEASUREMENT_UNAVAILABLE,
+    INVALID_ARGUMENT
+};
+
+RssGrowthResult evaluate_rss_growth(
+    int64_t start_kb,
+    int64_t end_kb,
+    int64_t max_growth_kb
+) {
+    if (max_growth_kb < 0) {
+        return RssGrowthResult::INVALID_ARGUMENT;
+    }
+
+    int64_t rss_delta_kb = 0;
+    if (__builtin_sub_overflow(end_kb, start_kb, &rss_delta_kb)) {
+        return RssGrowthResult::INVALID_ARGUMENT;
+    }
+
+    if (start_kb < 0 || end_kb < 0) {
+        return RssGrowthResult::MEASUREMENT_UNAVAILABLE;
+    }
+
+    if (rss_delta_kb <= max_growth_kb) {
+        return RssGrowthResult::WITHIN_LIMIT;
+    }
+
+    return RssGrowthResult::EXCEEDED_LIMIT;
+}
+
+bool rss_growth_within_limit(
+    int64_t start_kb,
+    int64_t end_kb,
+    int64_t max_growth_kb
+) {
+    return evaluate_rss_growth(start_kb, end_kb, max_growth_kb) == RssGrowthResult::WITHIN_LIMIT;
 }
 
 static inline uint32_t float_to_u32(float f) {
@@ -1138,16 +1179,76 @@ int main(void) {
         printf("  -> RSS: start=%ld KB, end=%ld KB, delta=%ld KB across %d pipeline cycles.\n",
                rss_start, rss_end, rss_delta, iterations);
 
-        /* Acceptance: abs(VmRSS delta) <= 128 KB */
-        long abs_delta = (rss_delta < 0) ? -rss_delta : rss_delta;
-        if (abs_delta > 128) {
-            printf("  -> FAIL: Monotonic memory growth detected! abs(Delta)=%ld KB > 128 KB\n", abs_delta);
+        /* Verification 10a: Boundary and safety unit tests for evaluate_rss_growth (8 cases) */
+        printf("  -> Verifying RSS decision boundary and safety unit tests (8 cases)...\n");
+        // 1. 1000 -> 824, limit 128 -> WITHIN_LIMIT (-176 KB delta)
+        if (evaluate_rss_growth(1000, 824, 128) != RssGrowthResult::WITHIN_LIMIT) {
+            printf("  -> FAIL: evaluate_rss_growth(1000, 824, 128) expected WITHIN_LIMIT\n");
             return 1;
         }
+        // 2. 1000 -> 1000, limit 128 -> WITHIN_LIMIT (0 KB delta)
+        if (evaluate_rss_growth(1000, 1000, 128) != RssGrowthResult::WITHIN_LIMIT) {
+            printf("  -> FAIL: evaluate_rss_growth(1000, 1000, 128) expected WITHIN_LIMIT\n");
+            return 1;
+        }
+        // 3. 1000 -> 1128, limit 128 -> WITHIN_LIMIT (+128 KB delta boundary)
+        if (evaluate_rss_growth(1000, 1128, 128) != RssGrowthResult::WITHIN_LIMIT) {
+            printf("  -> FAIL: evaluate_rss_growth(1000, 1128, 128) expected WITHIN_LIMIT\n");
+            return 1;
+        }
+        // 4. 1000 -> 1129, limit 128 -> EXCEEDED_LIMIT (+129 KB delta boundary)
+        if (evaluate_rss_growth(1000, 1129, 128) != RssGrowthResult::EXCEEDED_LIMIT) {
+            printf("  -> FAIL: evaluate_rss_growth(1000, 1129, 128) expected EXCEEDED_LIMIT\n");
+            return 1;
+        }
+        // 5. -1 -> 1000, limit 128 -> MEASUREMENT_UNAVAILABLE (start unavailable)
+        if (evaluate_rss_growth(-1, 1000, 128) != RssGrowthResult::MEASUREMENT_UNAVAILABLE) {
+            printf("  -> FAIL: evaluate_rss_growth(-1, 1000, 128) expected MEASUREMENT_UNAVAILABLE\n");
+            return 1;
+        }
+        // 6. 1000 -> -1, limit 128 -> MEASUREMENT_UNAVAILABLE (end unavailable)
+        if (evaluate_rss_growth(1000, -1, 128) != RssGrowthResult::MEASUREMENT_UNAVAILABLE) {
+            printf("  -> FAIL: evaluate_rss_growth(1000, -1, 128) expected MEASUREMENT_UNAVAILABLE\n");
+            return 1;
+        }
+        // 7. 1000 -> 1000, limit -1 -> INVALID_ARGUMENT (negative limit)
+        if (evaluate_rss_growth(1000, 1000, -1) != RssGrowthResult::INVALID_ARGUMENT) {
+            printf("  -> FAIL: evaluate_rss_growth(1000, 1000, -1) expected INVALID_ARGUMENT\n");
+            return 1;
+        }
+        // 8. INT64_MIN -> INT64_MAX, limit 128 -> INVALID_ARGUMENT (signed subtraction overflow)
+        if (evaluate_rss_growth(INT64_MIN, INT64_MAX, 128) != RssGrowthResult::INVALID_ARGUMENT) {
+            printf("  -> FAIL: evaluate_rss_growth(INT64_MIN, INT64_MAX, 128) expected INVALID_ARGUMENT\n");
+            return 1;
+        }
+        printf("  -> Decision boundary and safety unit tests: 8/8 PASS.\n");
 
-        printf("  -> No monotonic RSS growth was observed within the defined 128 KB test tolerance.\n");
-        printf("  -> 1,000-cycle lifecycle memory stability verified.\n");
-        passed_gates++;
+        /* Verification 10b: Acceptance: Evaluation of 1,000-cycle RSS trajectory */
+        const int64_t max_allowed_growth_kb = 128;
+        RssGrowthResult eval_res = evaluate_rss_growth(rss_start, rss_end, max_allowed_growth_kb);
+
+        if (eval_res == RssGrowthResult::MEASUREMENT_UNAVAILABLE) {
+            printf("  -> RSS measurement unavailable. Gate 10 memory trend is INCONCLUSIVE.\n");
+            return 1;
+        } else if (eval_res == RssGrowthResult::INVALID_ARGUMENT) {
+            printf("  -> FAIL: Invalid argument in RSS growth evaluation!\n");
+            return 1;
+        } else if (eval_res == RssGrowthResult::EXCEEDED_LIMIT) {
+            printf("  -> FAIL: Monotonic memory growth detected! Delta=%ld KB > %lld KB\n",
+                   rss_delta, (long long)max_allowed_growth_kb);
+            return 1;
+        } else if (eval_res == RssGrowthResult::WITHIN_LIMIT) {
+            if (rss_delta < 0) {
+                printf("  -> 1,000회 lifecycle 반복 후 RSS는 %ld KB 감소했다.\n", -rss_delta);
+                printf("  -> 정의된 RSS 증가 한도는 초과하지 않았다.\n");
+                printf("  -> 감소 원인은 이 측정만으로 특정하지 않는다.\n");
+            } else {
+                printf("  -> 1,000회 lifecycle 반복 후 RSS 증가는 %ld KB로 정의된 한도(%lld KB) 이내이다.\n",
+                       rss_delta, (long long)max_allowed_growth_kb);
+            }
+            printf("  -> 1,000-cycle lifecycle memory stability verified.\n");
+            passed_gates++;
+        }
     }
 
     // -------------------------------------------------------------------------

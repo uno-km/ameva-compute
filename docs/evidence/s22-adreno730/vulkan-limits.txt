@@ -1,0 +1,27 @@
+=== OFFICIAL VULKAN DEVICE LIMITS PROBE ===
+PhysicalDeviceIndex: 0
+deviceName: Adreno (TM) 730
+vendorID: 0x5143
+deviceID: 0x7030001
+deviceType: INTEGRATED_GPU (1)
+driverVersion: 0x80267062
+apiVersion: 1.1.128 (0x00401080)
+maxComputeWorkGroupCount: [65535, 65535, 65535]
+maxComputeWorkGroupSize: [1024, 1024, 64]
+maxComputeWorkGroupInvocations: 1024
+nonCoherentAtomSize: 1 bytes
+timestampPeriod: 52.083332 ns/tick
+queueFamily count: 2
+  QueueFamily[0]: flags=0x001B (compute=TRUE, timestampValidBits=48)
+  QueueFamily[1]: flags=0x0008 (compute=FALSE, timestampValidBits=48)
+memoryTypeCount: 9
+  MemoryType[0]: heapIndex=0, flags=0x0001 (hostVisible=0, hostCoherent=0)
+  MemoryType[1]: heapIndex=0, flags=0x0001 (hostVisible=0, hostCoherent=0)
+  MemoryType[2]: heapIndex=0, flags=0x0001 (hostVisible=0, hostCoherent=0)
+  MemoryType[3]: heapIndex=0, flags=0x000B (hostVisible=1, hostCoherent=0)
+  MemoryType[4]: heapIndex=0, flags=0x0007 (hostVisible=1, hostCoherent=1)
+  MemoryType[5]: heapIndex=0, flags=0x0007 (hostVisible=1, hostCoherent=1)
+  MemoryType[6]: heapIndex=0, flags=0x000F (hostVisible=1, hostCoherent=1)
+  MemoryType[7]: heapIndex=1, flags=0x0021 (hostVisible=0, hostCoherent=0)
+  MemoryType[8]: heapIndex=0, flags=0x0011 (hostVisible=0, hostCoherent=0)
+=== PROBE COMPLETE ===
