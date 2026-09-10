@@ -602,33 +602,35 @@ AcResult ac_gguf_open(const char* file_path, GgufModel** out_model) {
         }
     }
 
-    // Align to data offset
-    size_t current_offset = (size_t)(r.cur - (const uint8_t*)mmap_addr);
-    size_t data_base_offset = 0;
-    if (!checked_align_up(current_offset, (size_t)alignment, &data_base_offset)) {
-        ac_gguf_close(model);
-        return AC_ERR_BINARY_CORRUPTED;
-    }
-    if (data_base_offset > file_size) {
-        ac_gguf_close(model);
-        return AC_ERR_BINARY_CORRUPTED;
-    }
-
-    size_t available_data_bytes = file_size - data_base_offset;
-    const uint8_t* data_base = (const uint8_t*)mmap_addr + data_base_offset;
-
-    // Direct pointer binding with strict bounds checks:
-    // Invariant: offset <= available && size <= available - offset
-    for (uint64_t i = 0; i < tensor_count; i++) {
-        uint64_t toff = model->tensors[i].offset;
-        size_t tsz = model->tensors[i].size_bytes;
-
-        if (toff > available_data_bytes || tsz > available_data_bytes - (size_t)toff) {
+    if (tensor_count > 0) {
+        // Align to data offset
+        size_t current_offset = (size_t)(r.cur - (const uint8_t*)mmap_addr);
+        size_t data_base_offset = 0;
+        if (!checked_align_up(current_offset, (size_t)alignment, &data_base_offset)) {
+            ac_gguf_close(model);
+            return AC_ERR_BINARY_CORRUPTED;
+        }
+        if (data_base_offset > file_size) {
             ac_gguf_close(model);
             return AC_ERR_BINARY_CORRUPTED;
         }
 
-        model->tensors[i].data_ptr = (void*)(data_base + toff);
+        size_t available_data_bytes = file_size - data_base_offset;
+        const uint8_t* data_base = (const uint8_t*)mmap_addr + data_base_offset;
+
+        // Direct pointer binding with strict bounds checks:
+        // Invariant: offset <= available && size <= available - offset
+        for (uint64_t i = 0; i < tensor_count; i++) {
+            uint64_t toff = model->tensors[i].offset;
+            size_t tsz = model->tensors[i].size_bytes;
+
+            if (toff > available_data_bytes || tsz > available_data_bytes - (size_t)toff) {
+                ac_gguf_close(model);
+                return AC_ERR_BINARY_CORRUPTED;
+            }
+
+            model->tensors[i].data_ptr = (void*)(data_base + toff);
+        }
     }
 
     *out_model = model;

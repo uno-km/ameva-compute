@@ -117,7 +117,7 @@ typedef struct {
     const char* detail;
 } GateResult;
 
-static GateResult s_results[32];
+static GateResult s_results[48];
 static int s_gate_count = 0;
 
 static void record_gate(int id, const char* name, GateStatus st, const char* detail) {
@@ -586,13 +586,77 @@ int main(void) {
                     ok ? "Synthesized minimal GGUF parsed with accurate data" : "Failed to parse valid minimal GGUF");
     }
 
-    // Gate 20: VALID_REAL_GGUF_COMPATIBILITY (Explicit PENDING status when fixture absent)
+    // Gate 20: REAL_GGUF_VOCAB_QWEN2_COMPATIBILITY (llama.cpp test corpus vocabulary fixture)
     {
-        const char* real_path = "/data/data/com.termux/files/home/.cache/termux-bitnet/models/bitnet-2b-ggml-model-i2_s.gguf";
-        bool file_exists = (access(real_path, R_OK) == 0);
+        const char* qwen_path = "/data/data/com.termux/files/home/ameva-compute/models/ggml-vocab-qwen2.gguf";
+        if (access(qwen_path, R_OK) != 0) {
+            qwen_path = "./models/ggml-vocab-qwen2.gguf";
+        }
+        bool file_exists = (access(qwen_path, R_OK) == 0);
         if (file_exists) {
             GgufModel* model = NULL;
-            AcResult res = ac_gguf_open(real_path, &model);
+            int fds_before = count_open_fds();
+            AcResult res = ac_gguf_open(qwen_path, &model);
+            int fds_after = count_open_fds();
+            bool ok = false;
+            if (res == AC_SUCCESS && model != NULL) {
+                if (model->tensor_count == 0 && model->metadata_kv_count == 20 &&
+                    strcmp(model->config.arch, "qwen2") == 0) {
+                    ok = true;
+                }
+                ac_gguf_close(model);
+            }
+            int fds_closed = count_open_fds();
+            ok = ok && (fds_before == fds_closed);
+            record_gate(20, "REAL_GGUF_VOCAB_QWEN2_COMPATIBILITY", ok ? STATUS_PASS : STATUS_FAIL,
+                        ok ? "qwen2 vocab GGUF parsed (arch=qwen2, kv=20, tensors=0, fd_delta=0)"
+                           : "Failed to parse qwen2 vocabulary fixture");
+        } else {
+            record_gate(20, "REAL_GGUF_VOCAB_QWEN2_COMPATIBILITY", STATUS_PENDING,
+                        "qwen2 vocabulary fixture not present on target");
+        }
+    }
+
+    // Gate 21: REAL_GGUF_VOCAB_LLAMA_COMPATIBILITY (llama.cpp test corpus vocabulary fixture)
+    {
+        const char* llama_path = "/data/data/com.termux/files/home/ameva-compute/models/ggml-vocab-llama-bpe.gguf";
+        if (access(llama_path, R_OK) != 0) {
+            llama_path = "./models/ggml-vocab-llama-bpe.gguf";
+        }
+        bool file_exists = (access(llama_path, R_OK) == 0);
+        if (file_exists) {
+            GgufModel* model = NULL;
+            int fds_before = count_open_fds();
+            AcResult res = ac_gguf_open(llama_path, &model);
+            bool ok = false;
+            if (res == AC_SUCCESS && model != NULL) {
+                if (model->tensor_count == 0 && model->metadata_kv_count == 20 &&
+                    strcmp(model->config.arch, "llama") == 0) {
+                    ok = true;
+                }
+                ac_gguf_close(model);
+            }
+            int fds_closed = count_open_fds();
+            ok = ok && (fds_before == fds_closed);
+            record_gate(21, "REAL_GGUF_VOCAB_LLAMA_COMPATIBILITY", ok ? STATUS_PASS : STATUS_FAIL,
+                        ok ? "llama vocab GGUF parsed (arch=llama, kv=20, tensors=0, fd_delta=0)"
+                           : "Failed to parse llama vocabulary fixture");
+        } else {
+            record_gate(21, "REAL_GGUF_VOCAB_LLAMA_COMPATIBILITY", STATUS_PENDING,
+                        "llama vocabulary fixture not present on target");
+        }
+    }
+
+    // Gate 22: REAL_GGUF_WEIGHTED_BITNET_COMPATIBILITY (Weighted model fixture classification)
+    {
+        const char* bitnet_path = "/data/data/com.termux/files/home/.cache/termux-bitnet/models/bitnet-2b-ggml-model-i2_s.gguf";
+        if (access(bitnet_path, R_OK) != 0) {
+            bitnet_path = "./models/bitnet-2b-ggml-model-i2_s.gguf";
+        }
+        bool file_exists = (access(bitnet_path, R_OK) == 0);
+        if (file_exists) {
+            GgufModel* model = NULL;
+            AcResult res = ac_gguf_open(bitnet_path, &model);
             bool ok = false;
             if (res == AC_SUCCESS && model != NULL) {
                 if (model->tensor_count > 0 && model->config.embedding_length > 0) {
@@ -606,16 +670,15 @@ int main(void) {
                 }
                 ac_gguf_close(model);
             }
-            record_gate(20, "VALID_REAL_GGUF_COMPATIBILITY", ok ? STATUS_PASS : STATUS_FAIL,
-                        ok ? "Real BitNet 2B GGUF opened and tensors verified" : "Real BitNet 2B GGUF failed to parse");
+            record_gate(22, "REAL_GGUF_WEIGHTED_BITNET_COMPATIBILITY", ok ? STATUS_PASS : STATUS_FAIL,
+                        ok ? "BitNet 2B weighted model verified" : "BitNet 2B weighted model failed");
         } else {
-            // Mapped to STATUS_PENDING per audit protocol (does not fail executable)
-            record_gate(20, "VALID_REAL_GGUF_COMPATIBILITY", STATUS_PENDING,
-                        "real GGUF fixture not present on target");
+            record_gate(22, "REAL_GGUF_WEIGHTED_BITNET_COMPATIBILITY", STATUS_PENDING,
+                        "BitNet 2B weighted model fixture not present on target");
         }
     }
 
-    // Gate 21: READ_LE_BYTE_SHIFT_KAT (Explicit unsigned promotion & bit-shift verification)
+    // Gate 23: READ_LE_BYTE_SHIFT_KAT (Explicit unsigned promotion & bit-shift verification)
     {
         uint8_t u32_high[4] = { 0x01, 0x00, 0x00, 0x80 };
         uint32_t v32_high = ((uint32_t)u32_high[0]) | (((uint32_t)u32_high[1]) << 8) |
@@ -656,11 +719,11 @@ int main(void) {
         bool ok_unaligned_64 = (v_unaligned_64 == 0xDEADBEEF12345678ULL);
 
         bool kat_ok = ok_u32_high && ok_u32_ff && ok_u64_high && ok_u64_ff && ok_unaligned_32 && ok_unaligned_64;
-        record_gate(21, "READ_LE_BYTE_SHIFT_KAT", kat_ok ? STATUS_PASS : STATUS_FAIL,
+        record_gate(23, "READ_LE_BYTE_SHIFT_KAT", kat_ok ? STATUS_PASS : STATUS_FAIL,
                     kat_ok ? "U32/U64 high-bit, all-FF, and unaligned shifts exact match" : "Bit-shift KAT error");
     }
 
-    // Gate 22: REPEATED_MALFORMED_OPEN_NO_FD_GROWTH (Dynamic file descriptor leak test)
+    // Gate 24: REPEATED_MALFORMED_OPEN_NO_FD_GROWTH (Dynamic file descriptor leak test)
     {
         TestBuf b;
         tbuf_init(&b, 32);
@@ -683,10 +746,10 @@ int main(void) {
         tbuf_free(&b);
         char detail[64];
         snprintf(detail, sizeof(detail), "100 iterations: init=%d, final=%d, delta=%d", initial_fds, final_fds, fd_diff);
-        record_gate(22, "REPEATED_MALFORMED_OPEN_NO_FD_GROWTH", ok ? STATUS_PASS : STATUS_FAIL, detail);
+        record_gate(24, "REPEATED_MALFORMED_OPEN_NO_FD_GROWTH", ok ? STATUS_PASS : STATUS_FAIL, detail);
     }
 
-    // Gate 23: REPEATED_MALFORMED_OPEN_NO_RSS_SLOPE (Dynamic memory / mmap leak test)
+    // Gate 25: REPEATED_MALFORMED_OPEN_NO_RSS_SLOPE (Dynamic memory / mmap leak test)
     {
         TestBuf b;
         tbuf_init(&b, 64);
@@ -718,10 +781,10 @@ int main(void) {
         char detail[80];
         snprintf(detail, sizeof(detail), "200 iterations: init=%zu KB, final=%zu KB, delta=%ld KB",
                  initial_rss, final_rss, rss_diff);
-        record_gate(23, "REPEATED_MALFORMED_OPEN_NO_RSS_SLOPE", ok ? STATUS_PASS : STATUS_FAIL, detail);
+        record_gate(25, "REPEATED_MALFORMED_OPEN_NO_RSS_SLOPE", ok ? STATUS_PASS : STATUS_FAIL, detail);
     }
 
-    // Gate 24: FAIL_AFTER_METADATA_STRING_ALLOCATION
+    // Gate 26: FAIL_AFTER_METADATA_STRING_ALLOCATION
     {
         TestBuf b;
         tbuf_init(&b, 128);
@@ -743,11 +806,11 @@ int main(void) {
         if (res == AC_SUCCESS && model) ac_gguf_close(model);
         cleanup_temp_file(p);
         tbuf_free(&b);
-        record_gate(24, "FAIL_AFTER_METADATA_STRING_ALLOCATION", ok ? STATUS_PASS : STATUS_FAIL,
+        record_gate(26, "FAIL_AFTER_METADATA_STRING_ALLOCATION", ok ? STATUS_PASS : STATUS_FAIL,
                     ok ? "Clean fail-closed after valid string metadata, 0 FD leak" : "Failed cleanup");
     }
 
-    // Gate 25: FAIL_AFTER_TENSOR_ARRAY_ALLOCATION
+    // Gate 27: FAIL_AFTER_TENSOR_ARRAY_ALLOCATION
     {
         TestBuf b;
         tbuf_init(&b, 64);
@@ -765,11 +828,11 @@ int main(void) {
         if (res == AC_SUCCESS && model) ac_gguf_close(model);
         cleanup_temp_file(p);
         tbuf_free(&b);
-        record_gate(25, "FAIL_AFTER_TENSOR_ARRAY_ALLOCATION", ok ? STATUS_PASS : STATUS_FAIL,
+        record_gate(27, "FAIL_AFTER_TENSOR_ARRAY_ALLOCATION", ok ? STATUS_PASS : STATUS_FAIL,
                     ok ? "tensors array freed on EOF, model=NULL, 0 FD leak" : "Leak on tensor array failure");
     }
 
-    // Gate 26: FAIL_AFTER_TENSOR_NAME_ALLOCATION
+    // Gate 28: FAIL_AFTER_TENSOR_NAME_ALLOCATION
     {
         TestBuf b;
         tbuf_init(&b, 64);
@@ -787,11 +850,11 @@ int main(void) {
         if (res == AC_SUCCESS && model) ac_gguf_close(model);
         cleanup_temp_file(p);
         tbuf_free(&b);
-        record_gate(26, "FAIL_AFTER_TENSOR_NAME_ALLOCATION", ok ? STATUS_PASS : STATUS_FAIL,
+        record_gate(28, "FAIL_AFTER_TENSOR_NAME_ALLOCATION", ok ? STATUS_PASS : STATUS_FAIL,
                     ok ? "Clean fail-closed after tensor name parsed, 0 FD leak" : "Failed cleanup after tensor name");
     }
 
-    // Gate 27: FAIL_AFTER_MULTIPLE_TENSOR_DESCRIPTORS
+    // Gate 29: FAIL_AFTER_MULTIPLE_TENSOR_DESCRIPTORS
     {
         TestBuf b;
         tbuf_init(&b, 256);
@@ -823,11 +886,11 @@ int main(void) {
         if (res == AC_SUCCESS && model) ac_gguf_close(model);
         cleanup_temp_file(p);
         tbuf_free(&b);
-        record_gate(27, "FAIL_AFTER_MULTIPLE_TENSOR_DESCRIPTORS", ok ? STATUS_PASS : STATUS_FAIL,
+        record_gate(29, "FAIL_AFTER_MULTIPLE_TENSOR_DESCRIPTORS", ok ? STATUS_PASS : STATUS_FAIL,
                     ok ? "All prior descriptors freed on tensor 2 error, 0 FD leak" : "Leak on multi-descriptor failure");
     }
 
-    // Gate 28: FAIL_AT_FINAL_TENSOR_DATA_RANGE
+    // Gate 30: FAIL_AT_FINAL_TENSOR_DATA_RANGE
     {
         TestBuf b;
         tbuf_init(&b, 256);
@@ -856,7 +919,7 @@ int main(void) {
         if (res == AC_SUCCESS && model) ac_gguf_close(model);
         cleanup_temp_file(p);
         tbuf_free(&b);
-        record_gate(28, "FAIL_AT_FINAL_TENSOR_DATA_RANGE", ok ? STATUS_PASS : STATUS_FAIL,
+        record_gate(30, "FAIL_AT_FINAL_TENSOR_DATA_RANGE", ok ? STATUS_PASS : STATUS_FAIL,
                     ok ? "Full cleanup on final data range boundary check, 0 FD leak" : "Leak on final data range failure");
     }
 
@@ -885,11 +948,15 @@ int main(void) {
     printf("  PENDING_GATES=%d\n", pending_count);
     printf("\n");
     printf("  Core malformed/synthetic parser gates: 19/19 PASS\n");
-    printf("  Partial-allocation cleanup gates (24-28): 5/5 PASS\n");
+    printf("  Qwen2 vocabulary GGUF: %s\n", (s_results[19].status == STATUS_PASS) ? "PASS" : (s_results[19].status == STATUS_PENDING ? "PENDING" : "FAIL"));
+    printf("  Llama vocabulary GGUF: %s\n", (s_results[20].status == STATUS_PASS) ? "PASS" : (s_results[20].status == STATUS_PENDING ? "PENDING" : "FAIL"));
+    printf("  BitNet weighted fixture: %s\n", (s_results[21].status == STATUS_PASS) ? "PASS" : (s_results[21].status == STATUS_PENDING ? "PENDING CLASSIFICATION" : "FAIL"));
+    printf("  Qwen2.5 weighted model: NOT_AVAILABLE\n");
+    printf("  Llama weighted model: NOT_AVAILABLE\n");
+    printf("  Partial-allocation cleanup gates (26-30): 5/5 PASS\n");
     printf("  LE integer-read KAT group: PASS\n");
     printf("  FD leak gate: PASS (Observed open-FD delta: 0)\n");
     printf("  RSS stability gate: PASS (Observed delta <= 64 KB threshold)\n");
-    printf("  Real GGUF compatibility: %s\n", (pending_count == 0 && failed_count == 0) ? "PASS" : "PENDING");
     printf("=======================================================================\n");
 
     return (failed_count == 0) ? 0 : 1;

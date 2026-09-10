@@ -23,28 +23,33 @@
 [GATE 17] TENSOR_COUNT_ALLOCATION_OVERFLOW_REJECTED  : PASS (Rejected overflowing tensor_count)
 [GATE 18] METADATA_COUNT_LIMIT_REJECTED              : PASS (Rejected metadata_kv_count > 64K)
 [GATE 19] VALID_MINIMAL_SYNTHETIC_GGUF_ACCEPTED      : PASS (Synthesized minimal GGUF parsed with accurate data)
-[GATE 20] VALID_REAL_GGUF_COMPATIBILITY              : PENDING (real GGUF fixture not present on target)
-[GATE 21] READ_LE_BYTE_SHIFT_KAT                     : PASS (U32/U64 high-bit, all-FF, and unaligned shifts exact match)
-[GATE 22] REPEATED_MALFORMED_OPEN_NO_FD_GROWTH       : PASS (100 iterations: init=3, final=3, delta=0)
-[GATE 23] REPEATED_MALFORMED_OPEN_NO_RSS_SLOPE       : PASS (200 iterations: init=2836 KB, final=2840 KB, delta=4 KB)
-[GATE 24] FAIL_AFTER_METADATA_STRING_ALLOCATION      : PASS (Clean fail-closed after valid string metadata, 0 FD leak)
-[GATE 25] FAIL_AFTER_TENSOR_ARRAY_ALLOCATION         : PASS (tensors array freed on EOF, model=NULL, 0 FD leak)
-[GATE 26] FAIL_AFTER_TENSOR_NAME_ALLOCATION          : PASS (Clean fail-closed after tensor name parsed, 0 FD leak)
-[GATE 27] FAIL_AFTER_MULTIPLE_TENSOR_DESCRIPTORS     : PASS (All prior descriptors freed on tensor 2 error, 0 FD leak)
-[GATE 28] FAIL_AT_FINAL_TENSOR_DATA_RANGE            : PASS (Full cleanup on final data range boundary check, 0 FD leak)
+[GATE 20] REAL_GGUF_VOCAB_QWEN2_COMPATIBILITY        : PASS (qwen2 vocab GGUF parsed (arch=qwen2, kv=20, tensors=0, fd_delta=0))
+[GATE 21] REAL_GGUF_VOCAB_LLAMA_COMPATIBILITY        : PASS (llama vocab GGUF parsed (arch=llama, kv=20, tensors=0, fd_delta=0))
+[GATE 22] REAL_GGUF_WEIGHTED_BITNET_COMPATIBILITY    : PENDING (BitNet 2B weighted model fixture not present on target)
+[GATE 23] READ_LE_BYTE_SHIFT_KAT                     : PASS (U32/U64 high-bit, all-FF, and unaligned shifts exact match)
+[GATE 24] REPEATED_MALFORMED_OPEN_NO_FD_GROWTH       : PASS (100 iterations: init=3, final=3, delta=0)
+[GATE 25] REPEATED_MALFORMED_OPEN_NO_RSS_SLOPE       : PASS (200 iterations: init=2916 KB, final=2920 KB, delta=4 KB)
+[GATE 26] FAIL_AFTER_METADATA_STRING_ALLOCATION      : PASS (Clean fail-closed after valid string metadata, 0 FD leak)
+[GATE 27] FAIL_AFTER_TENSOR_ARRAY_ALLOCATION         : PASS (tensors array freed on EOF, model=NULL, 0 FD leak)
+[GATE 28] FAIL_AFTER_TENSOR_NAME_ALLOCATION          : PASS (Clean fail-closed after tensor name parsed, 0 FD leak)
+[GATE 29] FAIL_AFTER_MULTIPLE_TENSOR_DESCRIPTORS     : PASS (All prior descriptors freed on tensor 2 error, 0 FD leak)
+[GATE 30] FAIL_AT_FINAL_TENSOR_DATA_RANGE            : PASS (Full cleanup on final data range boundary check, 0 FD leak)
 
 =======================================================================
   [FINAL GATE CALIBRATION METRICS]
-  EXECUTED_GATES=27
-  PASSED_GATES=27
+  EXECUTED_GATES=29
+  PASSED_GATES=29
   FAILED_GATES=0
   PENDING_GATES=1
 
   Core malformed/synthetic parser gates: 19/19 PASS
-  Partial-allocation cleanup gates (24-28): 5/5 PASS
+  Qwen2 vocabulary GGUF: PASS
+  Llama vocabulary GGUF: PASS
+  BitNet weighted fixture: PENDING CLASSIFICATION
+  Qwen2.5 weighted model: NOT_AVAILABLE
+  Llama weighted model: NOT_AVAILABLE
+  Partial-allocation cleanup gates (26-30): 5/5 PASS
   LE integer-read KAT group: PASS
   FD leak gate: PASS (Observed open-FD delta: 0)
   RSS stability gate: PASS (Observed delta <= 64 KB threshold)
-  Real GGUF compatibility: PENDING
 =======================================================================
-VAL_EXIT_CODE=0
