@@ -250,6 +250,16 @@ AcResult ac_ops_bitnet_gemv_i2(
     if (M <= 0 || K <= 0) return AC_ERR_KERNEL_ARG_INVALID;
     if (K % 4 != 0) return AC_ERR_INVALID_BUFFER_SIZE;
 
+    // Buffer capacity validation
+    uint64_t req_x = (uint64_t)K * sizeof(float);
+    uint64_t req_w = (uint64_t)M * ((uint64_t)K / 4);
+    uint64_t req_scales = (uint64_t)M * sizeof(float);
+    uint64_t req_y = (uint64_t)M * sizeof(float);
+    if (x->size_bytes < req_x || W_packed->size_bytes < req_w ||
+        scales->size_bytes < req_scales || y->size_bytes < req_y) {
+        return AC_ERR_INVALID_BUFFER_SIZE;
+    }
+
     ac_buffer_sync_to_device(ctx, x);
     ac_buffer_sync_to_device(ctx, W_packed);
     ac_buffer_sync_to_device(ctx, scales);
@@ -298,6 +308,14 @@ AcResult ac_ops_bitnet_gemv_i2_s_exact(
     if (M <= 0 || K <= 0) return AC_ERR_KERNEL_ARG_INVALID;
     if (K % 128 != 0) return AC_ERR_KERNEL_ARG_INVALID;
 
+    // Buffer capacity validation
+    uint64_t req_x = (uint64_t)K * sizeof(float);
+    uint64_t req_w = (uint64_t)M * ((uint64_t)K / 4);
+    uint64_t req_y = (uint64_t)M * sizeof(float);
+    if (x->size_bytes < req_x || W_packed->size_bytes < req_w || y->size_bytes < req_y) {
+        return AC_ERR_INVALID_BUFFER_SIZE;
+    }
+
     ac_buffer_sync_to_device(ctx, x);
     ac_buffer_sync_to_device(ctx, W_packed);
     ac_buffer_sync_to_device(ctx, y);
@@ -345,6 +363,14 @@ AcResult ac_ops_rmsnorm(
     if (!ctx || !x || !weight || !y) return AC_ERR_NULL_POINTER;
     if (num_rows <= 0 || hidden_dim <= 0) return AC_ERR_KERNEL_ARG_INVALID;
 
+    // Buffer capacity validation
+    uint64_t req_x = (uint64_t)num_rows * (uint64_t)hidden_dim * sizeof(float);
+    uint64_t req_w = (uint64_t)hidden_dim * sizeof(float);
+    uint64_t req_y = req_x;
+    if (x->size_bytes < req_x || weight->size_bytes < req_w || y->size_bytes < req_y) {
+        return AC_ERR_INVALID_BUFFER_SIZE;
+    }
+
     ac_buffer_sync_to_device(ctx, x);
     ac_buffer_sync_to_device(ctx, weight);
     ac_buffer_sync_to_device(ctx, y);
@@ -387,6 +413,12 @@ AcResult ac_ops_swiglu(
     }
     if (!ctx || !gate || !up || !y) return AC_ERR_NULL_POINTER;
     if (num_elements <= 0) return AC_ERR_KERNEL_ARG_INVALID;
+
+    // Buffer capacity validation
+    uint64_t req_bytes = (uint64_t)num_elements * sizeof(float);
+    if (gate->size_bytes < req_bytes || up->size_bytes < req_bytes || y->size_bytes < req_bytes) {
+        return AC_ERR_INVALID_BUFFER_SIZE;
+    }
 
     ac_buffer_sync_to_device(ctx, gate);
     ac_buffer_sync_to_device(ctx, up);
@@ -432,6 +464,13 @@ AcResult ac_ops_rope(
     if (!ctx || !qk || !cos_sin) return AC_ERR_NULL_POINTER;
     if (seq_len <= 0 || num_heads <= 0 || head_dim <= 0) return AC_ERR_KERNEL_ARG_INVALID;
     if (head_dim % 2 != 0) return AC_ERR_INVALID_BUFFER_SIZE;
+
+    // Buffer capacity validation
+    uint64_t req_qk = (uint64_t)seq_len * (uint64_t)num_heads * (uint64_t)head_dim * sizeof(float);
+    uint64_t req_cs = (uint64_t)seq_len * (uint64_t)head_dim * sizeof(float);
+    if (qk->size_bytes < req_qk || cos_sin->size_bytes < req_cs) {
+        return AC_ERR_INVALID_BUFFER_SIZE;
+    }
 
     ac_buffer_sync_to_device(ctx, qk);
     ac_buffer_sync_to_device(ctx, cos_sin);

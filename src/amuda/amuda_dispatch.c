@@ -327,7 +327,7 @@ AcResult ac_launch(
     uint64_t global_x = (uint64_t)grid.x * (uint64_t)block.x;
     uint64_t global_y = (uint64_t)grid.y * (uint64_t)block.y;
     uint64_t global_z = (uint64_t)grid.z * (uint64_t)block.z;
-    if (global_x > SIZE_MAX || global_y > SIZE_MAX || global_z > SIZE_MAX) {
+    if (global_x > UINT32_MAX || global_y > UINT32_MAX || global_z > UINT32_MAX) {
         return AC_ERR_NUMERICAL_OVERFLOW;
     }
 
@@ -355,6 +355,9 @@ AcResult ac_launch(
                                           &native_ev);
 
     if (err != CL_SUCCESS || !native_ev) {
+        if (native_ev && g_clReleaseEvent) {
+            g_clReleaseEvent(native_ev);
+        }
         return AC_ERR_DRIVER_CRASH_OR_LOST;
     }
 
