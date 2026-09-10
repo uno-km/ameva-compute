@@ -18,10 +18,15 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 
+/*
+ * These are AMEVA implementation limits, not limits imposed by the GGUF specification.
+ * Calibrated to support large vocabulary tokenizers (up to 256K tokens) and up to 64K tensors
+ * while establishing hard upper bounds against heap exhaustion on mobile hardware.
+ */
 #define GGUF_MAX_METADATA_KV_COUNT         65536ULL
 #define GGUF_MAX_TENSOR_COUNT              65536ULL
-#define GGUF_MAX_TOTAL_METADATA_BYTES      (16 * 1024 * 1024ULL) /* 16 MB max for metadata section */
-#define GGUF_MAX_TOTAL_TENSOR_ALLOC_BYTES  (16 * 1024 * 1024ULL) /* 16 MB max for GgufTensor array */
+#define GGUF_MAX_TOTAL_METADATA_BYTES      (64 * 1024 * 1024ULL) /* 64 MB budget for tokenizer tables */
+#define GGUF_MAX_TOTAL_TENSOR_ALLOC_BYTES  (32 * 1024 * 1024ULL) /* 32 MB budget for tensor descriptors */
 #define GGUF_MAX_STRING_LEN                65536ULL
 #define GGUF_MAX_RECURSION_DEPTH           16
 
