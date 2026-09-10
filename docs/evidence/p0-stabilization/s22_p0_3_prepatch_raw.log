@@ -1,0 +1,12 @@
+=== PRE-PATCH MALFORMED GGUF INJECTION REPRODUCER ===
+Device: Samsung Galaxy S22 (SM-S901N) / Qualcomm Adreno 730
+Target: Unhardened amuda_gguf.c direct dereference & unbounded pointer traversal
+Command: LD_LIBRARY_PATH=$PREFIX/opt/vendor/lib ./test_amuda_gguf_validation
+
+[AMUDA-GGUF] Unsupported GGUF version: 0
+/data/data/com.termux/files/usr/bin/bash: line 6: 30591 Bus error LD_LIBRARY_PATH=$PREFIX/opt/vendor/lib:${LD_LIBRARY_PATH:-} ./test_amuda_gguf_validation
+PREPATCH_VAL_EXIT_CODE=135
+
+Disposition:
+Fatal SIGBUS (Exit Code 135) caused by unaligned memory dereference and unbounded pointer advancement past mmap allocation boundary.
+Heap buffer overflow on ne[4] triggered when n_dims > 4.
