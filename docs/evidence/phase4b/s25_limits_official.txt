@@ -1,0 +1,11 @@
+=== OFFICIAL VULKAN DEVICE LIMITS PROBE ===
+PhysicalDeviceIndex: 0
+deviceName: Adreno (TM) 830
+vendorID: 0x5143
+deviceID: 0x44050001
+driverVersion: 0x80320040
+apiVersion: 1.3.284 (0x0040311C)
+maxComputeWorkGroupCount: [65535, 65535, 65535]
+maxComputeWorkGroupSize: [1024, 1024, 1024]
+maxComputeWorkGroupInvocations: 1024
+=== PROBE COMPLETE ===

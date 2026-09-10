@@ -786,8 +786,17 @@ AcResult ac_runtime_dispatch(AcContext* ctx, const AcLaunchDesc* desc, AcEvent**
     if (desc->kernel->owning_context != ctx) {
         return AC_ERR_CONTEXT_MISMATCH;
     }
+    /* Workgroup dimensions and runtime safety budget validation */
     if (desc->grid_dim.x == 0 || desc->grid_dim.y == 0 || desc->grid_dim.z == 0) {
         return AC_ERR_INVALID_WORK_GROUP_SIZE;
+    }
+    AcResult budget_res = ac_validate_dispatch_budget(
+        desc->grid_dim,
+        AC_MAX_SAFE_GROUPS_PER_AXIS,
+        AC_MAX_SAFE_TOTAL_GROUPS
+    );
+    if (budget_res != AC_SUCCESS) {
+        return budget_res;
     }
 
     if (desc->buffer_count > 0 && !desc->buffers) {

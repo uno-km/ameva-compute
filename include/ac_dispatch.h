@@ -25,6 +25,65 @@
 extern "C" {
 #endif
 
+/**
+ * @brief Maximum safe compute workgroups per axis (X, Y, or Z).
+ * Default: 1,048,576 (2^20).
+ *
+ * Rationale:
+ * Mobile GPU architectures (e.g. ARM Mali-G68) report theoretical hardware maximums
+ * up to UINT32_MAX (4,294,967,295). Submitting unconstrained workloads to physical
+ * queues leads to GPU driver lockups, kernel TDRs, and process hangs.
+ * Setting a defensive per-axis limit of 1,048,576 accommodates massive 1D and 2D
+ * compute grids (e.g., 1024x1024 tiles or 67M float elements at local_size=64)
+ * while rejecting runaway or corrupted grid parameters before hardware submission.
+ */
+#define AC_MAX_SAFE_GROUPS_PER_AXIS   1048576u
+#define AC_MAX_SAFE_DISPATCH_GROUPS_X AC_MAX_SAFE_GROUPS_PER_AXIS
+
+/**
+ * @brief Maximum safe total workgroups across all dimensions (X * Y * Z).
+ * Default: 16,777,216 (2^24).
+ *
+ * Rationale:
+ * Restricts total 3D workgroup product to prevent memory bandwidth starvation,
+ * device queue timeout, and integer arithmetic overflow.
+ */
+#define AC_MAX_SAFE_TOTAL_GROUPS      16777216ull
+
+/**
+ * @brief Pure function to validate compute dispatch grid dimensions against device hardware limits.
+ *
+ * @param grid Requested 3D dispatch grid dimensions.
+ * @param max_group_count Physical device workgroup limits (maxComputeWorkGroupCount[3]).
+ * @return AC_SUCCESS on valid grid, AC_ERR_INVALID_WORK_GROUP_SIZE if zero or exceeding device limit,
+ *         AC_ERR_NUMERICAL_OVERFLOW if total workgroups exceed 32-bit uint capacity.
+ */
+AcResult ac_validate_dispatch_grid(
+    const AcDim3 grid,
+    const uint32_t max_group_count[3]
+);
+
+/**
+ * @brief Pure function to validate compute dispatch grid dimensions against AMEVA runtime safety budget.
+ *
+ * Validates that:
+ *   1. No axis is zero (grid.x == 0 || grid.y == 0 || grid.z == 0).
+ *   2. No single axis exceeds max_safe_groups_per_axis (checked uniformly on X, Y, and Z).
+ *   3. 64-bit multiplication does not overflow.
+ *   4. Total workgroups (grid.x * grid.y * grid.z) does not exceed max_safe_total_groups.
+ *
+ * @param grid Requested 3D dispatch grid dimensions.
+ * @param max_safe_groups_per_axis Maximum allowed workgroups per axis (0 disables check).
+ * @param max_safe_total_groups Maximum allowed total workgroups (0 disables check).
+ * @return AC_SUCCESS on valid budget, AC_ERR_INVALID_WORK_GROUP_SIZE if zero or exceeding budget,
+ *         AC_ERR_NUMERICAL_OVERFLOW on 64-bit product overflow.
+ */
+AcResult ac_validate_dispatch_budget(
+    const AcDim3 grid,
+    uint32_t max_safe_groups_per_axis,
+    uint64_t max_safe_total_groups
+);
+
 AcResult ac_vk_dispatch(
     AcVkContext* ctx,
     AcVkKernel* kernel,

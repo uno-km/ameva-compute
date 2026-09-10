@@ -1,0 +1,62 @@
+=== Galaxy S25 Phase 4A Runtime ABI ===
+Binary: build-audit/test_phase4_runtime_abi
+Command: cd ~/ameva-compute && unset LD_LIBRARY_PATH && timeout 120s ./build-audit/test_phase4_runtime_abi
+Exit Status: 0
+
+--- STDOUT ---
+======================================================================
+AMUDA 2.0 Phase 4A: Public Opaque C Runtime ABI Test Suite
+======================================================================
+
+[Gate 1/10] Public ABI Contract & Strict Descriptor Validation...
+  -> Verified: Bad ABI version, struct size, flags, and null checks strictly rejected with output NULL.
+  -> Gate 1 PASS
+
+[Gate 2/10] Context Lifecycle & Active Children Rejection...
+  -> Active child buffer blocks context teardown: Verified (AC_ERR_RESOURCE_IN_USE)
+  -> Clean context destruction after child release: Verified (AC_SUCCESS)
+  -> Gate 2 PASS
+
+[Gate 3/10] Active Event Lifespan Tracking & Context Teardown Rejection (UAF Guard)...
+  -> Waited but unretired public Event blocks context teardown: Verified (AC_ERR_RESOURCE_IN_USE)
+  -> Clean context destruction after event release: Verified (AC_SUCCESS)
+  -> Gate 3 PASS
+
+[Gate 4/10] Buffer Usage Flags Validation & Safe Output Getters...
+  -> Buffer Getters: Logical=4096 B, Allocation=4096 B, is_coherent=1
+  -> Buffer flags, zero checks, and getters verified.
+  -> Gate 4 PASS
+
+[Gate 5/10] Kernel Descriptor & Metadata Defensive Validation...
+  -> Kernel metadata null checks, alignment, duplicate binding, and hash rejection verified.
+  -> Gate 5 PASS
+
+[Gate 6/10] Cross-Context Ownership Isolation & Launch Defensive Checks...
+  -> Cross-context isolation and defensive launch checks verified.
+  -> Gate 6 PASS
+
+[Gate 7/10] BitNet GEMV I2_S Compute Dispatch via Public Opaque ABI...
+  -> BitNet GEMV I2_S (256/256 weights): Mismatches: 0/256, Max Error: 0.00e+00
+  -> Gate 7 PASS
+
+[Gate 8/10] Event Synchronization & Hardware Timing Query...
+  -> Host Synchronous Wall Latency: 332552 ns (332.552 µs, 0.333 ms)
+  -> GPU Timestamp Command Interval: 8385 ns (8.385 µs, 0.008 ms)
+  -> Event Double-Wait Idempotency: Verified (Returned AC_SUCCESS)
+  -> Gate 8 PASS
+
+[Gate 9/10] Synchronous Dispatch Mode Contract (Vector-Add, out_event == NULL)...
+  -> Synchronous Vector-Add Parity (N=256, alpha=2.5f): Mismatches: 0/256, Max Error: 0.00e+00
+  -> Gate 9 PASS
+
+[Gate 10/10] 1,000-Cycle Buffer Lifecycle RSS Stability via Public ABI...
+  -> 1,000 Repeated Buffer Alloc/Free Cycles: VmRSS 35148 KB -> 35148 KB (Delta: 0 KB)
+  -> Context Teardown: Completed cleanly via public ABI (Returned AC_SUCCESS)
+  -> Gate 10 PASS
+
+======================================================================
+AMUDA 2.0 Phase 4A Verification Gates: 10 / 10 Passed
+Public Opaque C ABI Runtime Status: VERIFIED PASS
+======================================================================
+
+--- STDERR ---

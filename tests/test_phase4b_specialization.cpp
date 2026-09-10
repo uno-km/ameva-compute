@@ -26,6 +26,7 @@
 #include <math.h>
 
 #include "ac_runtime.h"
+#include "ac_dispatch.h"
 #include "../src/shaders/vector_add_spec_spv.h"
 #include "../src/backend/vulkan/ac_vk_sha256.h"
 
@@ -558,11 +559,11 @@ int main(void) {
     }
 
     // -------------------------------------------------------------------------
-    // Gate 6: Device Workgroup Limit Enforcement
+    // Gate 6: Device Workgroup Limit & Dispatch Budget Enforcement
     // -------------------------------------------------------------------------
-    printf("[Gate 6/10] Device Workgroup Limit Enforcement...\n");
+    printf("[Gate 6/10] Device Workgroup Limit & Dispatch Budget Enforcement...\n");
     {
-        /* 6.1 Create a schema where local_size_x max is high (e.g. 65536) */
+        /* 6.1 Device size limit validation (oversized local size rejected) */
         AcSpecConstantSchemaEntry wide_schema[1] = {
             { 0, AC_SPEC_CONSTANT_U32, 64, 1, 65536, 1 }
         };
@@ -570,7 +571,6 @@ int main(void) {
         meta_wide.specialization_schema_count = 1;
         meta_wide.specialization_schemas = wide_schema;
 
-        /* Caller requests 65536 which exceeds maxComputeWorkGroupSize on Mobile Vulkan GPUs */
         AcSpecConstant huge_spec[1] = {
             { 0, AC_SPEC_CONSTANT_U32, 65536 }
         };
@@ -589,8 +589,88 @@ int main(void) {
             printf("  -> FAIL: Over-limit workgroup size not rejected! (res=%d, ptr=%p)\n", res, (void*)bad_kernel);
             return 1;
         }
+        printf("  -> 6.1 Device size limit validation (oversized local size rejected): PASS\n");
 
-        /* 6.2 Safe ceil division arithmetic overflow check */
+        /* 6.2 Device count limit validation (injected Adreno & Mali limit unit tests) */
+        {
+            /* Injected Adreno-style limit (65535) */
+            const uint32_t adreno_limits[3] = { 65535u, 65535u, 65535u };
+            if (ac_validate_dispatch_grid((AcDim3){ 65536u, 1u, 1u }, adreno_limits) != AC_ERR_INVALID_WORK_GROUP_SIZE) {
+                printf("  -> FAIL: Injected Adreno limit (65536 > 65535) not rejected!\n");
+                return 1;
+            }
+            if (ac_validate_dispatch_grid((AcDim3){ 65535u, 1u, 1u }, adreno_limits) != AC_SUCCESS) {
+                printf("  -> FAIL: Injected Adreno limit (65535 <= 65535) not accepted!\n");
+                return 1;
+            }
+
+            /* Injected Mali-style limit (UINT32_MAX) */
+            const uint32_t mali_limits[3] = { UINT32_MAX, UINT32_MAX, UINT32_MAX };
+            if (ac_validate_dispatch_grid((AcDim3){ UINT32_MAX, 1u, 1u }, mali_limits) != AC_SUCCESS) {
+                printf("  -> FAIL: Injected Mali limit (UINT32_MAX <= UINT32_MAX) not accepted!\n");
+                return 1;
+            }
+            if (ac_validate_dispatch_grid((AcDim3){ 1000u, 1u, 1u }, mali_limits) != AC_SUCCESS) {
+                printf("  -> FAIL: Injected Mali limit (1000) not accepted!\n");
+                return 1;
+            }
+        }
+        printf("  -> 6.2 Device count limit validation (injected Adreno & Mali limit unit tests): PASS\n");
+
+        /* 6.3 Zero-axis validation */
+        {
+            const uint32_t limits[3] = { 65535u, 65535u, 65535u };
+            if (ac_validate_dispatch_grid((AcDim3){ 0, 1, 1 }, limits) != AC_ERR_INVALID_WORK_GROUP_SIZE ||
+                ac_validate_dispatch_grid((AcDim3){ 1, 0, 1 }, limits) != AC_ERR_INVALID_WORK_GROUP_SIZE ||
+                ac_validate_dispatch_grid((AcDim3){ 1, 1, 0 }, limits) != AC_ERR_INVALID_WORK_GROUP_SIZE) {
+                printf("  -> FAIL: Zero-axis dispatch not rejected by ac_validate_dispatch_grid!\n");
+                return 1;
+            }
+        }
+        printf("  -> 6.3 Zero-axis validation (x=0, y=0, z=0 rejected): PASS\n");
+
+        /* 6.4 Runtime dispatch-budget validation */
+        {
+            /* Exceeding single axis budget on X */
+            if (ac_validate_dispatch_budget((AcDim3){ AC_MAX_SAFE_GROUPS_PER_AXIS + 1, 1, 1 },
+                                           AC_MAX_SAFE_GROUPS_PER_AXIS, AC_MAX_SAFE_TOTAL_GROUPS) != AC_ERR_INVALID_WORK_GROUP_SIZE) {
+                printf("  -> FAIL: Over-budget group_x not rejected!\n");
+                return 1;
+            }
+            /* Exceeding single axis budget on Y */
+            if (ac_validate_dispatch_budget((AcDim3){ 1, AC_MAX_SAFE_GROUPS_PER_AXIS + 1, 1 },
+                                           AC_MAX_SAFE_GROUPS_PER_AXIS, AC_MAX_SAFE_TOTAL_GROUPS) != AC_ERR_INVALID_WORK_GROUP_SIZE) {
+                printf("  -> FAIL: Over-budget group_y not rejected!\n");
+                return 1;
+            }
+            /* Exceeding single axis budget on Z */
+            if (ac_validate_dispatch_budget((AcDim3){ 1, 1, AC_MAX_SAFE_GROUPS_PER_AXIS + 1 },
+                                           AC_MAX_SAFE_GROUPS_PER_AXIS, AC_MAX_SAFE_TOTAL_GROUPS) != AC_ERR_INVALID_WORK_GROUP_SIZE) {
+                printf("  -> FAIL: Over-budget group_z not rejected!\n");
+                return 1;
+            }
+            /* Exceeding total budget (2048 * 2048 * 8 = 33554432 > 16777216) */
+            if (ac_validate_dispatch_budget((AcDim3){ 2048, 2048, 8 },
+                                           AC_MAX_SAFE_GROUPS_PER_AXIS, AC_MAX_SAFE_TOTAL_GROUPS) != AC_ERR_INVALID_WORK_GROUP_SIZE) {
+                printf("  -> FAIL: Over-budget total groups not rejected!\n");
+                return 1;
+            }
+            /* 64-bit product overflow detection */
+            if (ac_validate_dispatch_budget((AcDim3){ 0xFFFFFFFFu, 0xFFFFFFFFu, 2 },
+                                           0, AC_MAX_SAFE_TOTAL_GROUPS) != AC_ERR_NUMERICAL_OVERFLOW) {
+                printf("  -> FAIL: 64-bit multiplication overflow not detected!\n");
+                return 1;
+            }
+            /* Valid budget */
+            if (ac_validate_dispatch_budget((AcDim3){ 1024, 1, 1 },
+                                           AC_MAX_SAFE_GROUPS_PER_AXIS, AC_MAX_SAFE_TOTAL_GROUPS) != AC_SUCCESS) {
+                printf("  -> FAIL: Safe budget rejected!\n");
+                return 1;
+            }
+        }
+        printf("  -> 6.4 Runtime dispatch-budget validation (uniform 3-axis & total budget): PASS\n");
+
+        /* 6.5 Safe ceil division arithmetic overflow check */
         uint32_t safe_group = 0;
         CHECK_AC(compute_safe_grid_x(1000, 64, &safe_group));
         if (safe_group != 16) {
@@ -598,54 +678,94 @@ int main(void) {
             return 1;
         }
         CHECK_AC_ERR(compute_safe_grid_x(1000, 0, &safe_group), AC_ERR_INVALID_WORK_GROUP_SIZE);
+        printf("  -> 6.5 Safe ceil-div overflow validation (division by zero and bounds): PASS\n");
 
-        /* 6.3 Workgroup count limit validation during dispatch */
-        AcKernelDesc valid_kdesc = {};
-        valid_kdesc.abi_version = AC_ABI_VERSION;
-        valid_kdesc.struct_size = (uint32_t)sizeof(AcKernelDesc);
-        valid_kdesc.spirv_code = kVectorAddSpecSpv;
-        valid_kdesc.code_size_bytes = kVectorAddSpecSpvByteSize;
-        valid_kdesc.metadata = &kDefaultMetadata;
-        valid_kdesc.specialization_count = 0;
-        valid_kdesc.specializations = NULL;
+        /* 6.6 End-to-end runtime rejection via ac_runtime_dispatch (Zero axis & over-budget) */
+        {
+            struct AcContextInternal {
+                uint32_t magic;
+                uint32_t abi_version;
+                int backend_kind;
+                AcVkContext* vk_ctx;
+                uint32_t active_child_buffers;
+                uint32_t active_child_kernels;
+                uint32_t active_child_events;
+            };
+            struct AcContextInternal* ictx = (struct AcContextInternal*)ctx;
+            uint32_t sub_before = ictx->vk_ctx->submission_outstanding_count;
+            uint32_t events_before = ictx->active_child_events;
 
-        AcKernel* valid_kernel = NULL;
-        CHECK_AC(ac_runtime_kernel_create(ctx, &valid_kdesc, &valid_kernel));
+            AcKernelDesc valid_kdesc = {};
+            valid_kdesc.abi_version = AC_ABI_VERSION;
+            valid_kdesc.struct_size = (uint32_t)sizeof(AcKernelDesc);
+            valid_kdesc.spirv_code = kVectorAddSpecSpv;
+            valid_kdesc.code_size_bytes = kVectorAddSpecSpvByteSize;
+            valid_kdesc.metadata = &kDefaultMetadata;
+            valid_kdesc.specialization_count = 0;
+            valid_kdesc.specializations = NULL;
 
-        AcBufferDesc bdesc = {};
-        bdesc.abi_version = AC_ABI_VERSION;
-        bdesc.struct_size = (uint32_t)sizeof(AcBufferDesc);
-        bdesc.size_bytes = 1024 * sizeof(float);
-        bdesc.usage = AC_BUFFER_USAGE_STORAGE;
-        bdesc.force_non_coherent = 0;
+            AcKernel* valid_kernel = NULL;
+            CHECK_AC(ac_runtime_kernel_create(ctx, &valid_kdesc, &valid_kernel));
 
-        AcBuffer *b_a = NULL, *b_b = NULL, *b_c = NULL;
-        CHECK_AC(ac_runtime_buffer_create(ctx, &bdesc, &b_a));
-        CHECK_AC(ac_runtime_buffer_create(ctx, &bdesc, &b_b));
-        CHECK_AC(ac_runtime_buffer_create(ctx, &bdesc, &b_c));
+            AcBufferDesc bdesc = {};
+            bdesc.abi_version = AC_ABI_VERSION;
+            bdesc.struct_size = (uint32_t)sizeof(AcBufferDesc);
+            bdesc.size_bytes = 1024 * sizeof(float);
+            bdesc.usage = AC_BUFFER_USAGE_STORAGE;
+            bdesc.force_non_coherent = 0;
 
-        AcBuffer* bufs[3] = { b_a, b_b, b_c };
-        uint32_t push_const[1] = { 1024 };
+            AcBuffer *b_a = NULL, *b_b = NULL, *b_c = NULL;
+            CHECK_AC(ac_runtime_buffer_create(ctx, &bdesc, &b_a));
+            CHECK_AC(ac_runtime_buffer_create(ctx, &bdesc, &b_b));
+            CHECK_AC(ac_runtime_buffer_create(ctx, &bdesc, &b_c));
 
-        /* Dispatch with group_x exceeding maxComputeWorkGroupCount (0xFFFFFFFF) */
-        AcLaunchDesc ldesc = {};
-        ldesc.abi_version = AC_ABI_VERSION;
-        ldesc.struct_size = (uint32_t)sizeof(AcLaunchDesc);
-        ldesc.kernel = valid_kernel;
-        ldesc.buffer_count = 3;
-        ldesc.buffers = bufs;
-        ldesc.push_constants = push_const;
-        ldesc.push_constants_size = sizeof(push_const);
-        ldesc.grid_dim = (AcDim3){ 0xFFFFFFFFu, 1, 1 };
+            AcBuffer* bufs[3] = { b_a, b_b, b_c };
+            uint32_t push_const[1] = { 1024 };
 
-        CHECK_AC_ERR(ac_runtime_dispatch(ctx, &ldesc, NULL), AC_ERR_INVALID_WORK_GROUP_SIZE);
+            AcLaunchDesc ldesc = {};
+            ldesc.abi_version = AC_ABI_VERSION;
+            ldesc.struct_size = (uint32_t)sizeof(AcLaunchDesc);
+            ldesc.kernel = valid_kernel;
+            ldesc.buffer_count = 3;
+            ldesc.buffers = bufs;
+            ldesc.push_constants = push_const;
+            ldesc.push_constants_size = sizeof(push_const);
 
-        CHECK_AC(ac_runtime_buffer_destroy(b_a));
-        CHECK_AC(ac_runtime_buffer_destroy(b_b));
-        CHECK_AC(ac_runtime_buffer_destroy(b_c));
-        CHECK_AC(ac_runtime_kernel_destroy(valid_kernel));
+            /* Test zero dimension rejection through runtime dispatch */
+            ldesc.grid_dim = (AcDim3){ 0, 1, 1 };
+            CHECK_AC_ERR(ac_runtime_dispatch(ctx, &ldesc, NULL), AC_ERR_INVALID_WORK_GROUP_SIZE);
 
-        printf("  -> Hardware workgroup limits strictly enforced (size limit, count limit, ceil-div overflow guard).\n");
+            /* Test over-budget rejection through runtime dispatch (submission counter unchanged, event not created) */
+            ldesc.grid_dim = (AcDim3){ AC_MAX_SAFE_GROUPS_PER_AXIS + 1, 1, 1 };
+            AcEvent* uncreated_event = (AcEvent*)0xDEADBEEF;
+            AcResult dispatch_res = ac_runtime_dispatch(ctx, &ldesc, &uncreated_event);
+            if (dispatch_res != AC_ERR_INVALID_WORK_GROUP_SIZE) {
+                printf("  -> FAIL: Over-budget dispatch did not return AC_ERR_INVALID_WORK_GROUP_SIZE! (res=%d)\n", dispatch_res);
+                return 1;
+            }
+            if (uncreated_event != (AcEvent*)0xDEADBEEF && uncreated_event != NULL) {
+                printf("  -> FAIL: Event pointer altered upon rejected dispatch!\n");
+                return 1;
+            }
+            if (ictx->vk_ctx->submission_outstanding_count != sub_before) {
+                printf("  -> FAIL: Submission counter altered during pre-submission rejection! (before=%u, after=%u)\n",
+                       sub_before, ictx->vk_ctx->submission_outstanding_count);
+                return 1;
+            }
+            if (ictx->active_child_events != events_before) {
+                printf("  -> FAIL: Active child events altered during rejection! (before=%u, after=%u)\n",
+                       events_before, ictx->active_child_events);
+                return 1;
+            }
+
+            CHECK_AC(ac_runtime_buffer_destroy(b_a));
+            CHECK_AC(ac_runtime_buffer_destroy(b_b));
+            CHECK_AC(ac_runtime_buffer_destroy(b_c));
+            CHECK_AC(ac_runtime_kernel_destroy(valid_kernel));
+        }
+        printf("  -> 6.6 Runtime dispatch E2E integration rejection (submission counter unchanged, event not created): PASS\n");
+
+        printf("  -> Hardware workgroup limits and runtime safety budgets strictly enforced across heterogeneous targets.\n");
         passed_gates++;
     }
 

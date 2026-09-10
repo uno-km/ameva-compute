@@ -13,6 +13,58 @@ static uint64_t get_time_ns(void) {
 
 extern "C" {
 
+AcResult ac_validate_dispatch_grid(
+    const AcDim3 grid,
+    const uint32_t max_group_count[3]
+) {
+    if (grid.x == 0 || grid.y == 0 || grid.z == 0) {
+        return AC_ERR_INVALID_WORK_GROUP_SIZE;
+    }
+    if (!max_group_count) {
+        return AC_ERR_NULL_POINTER;
+    }
+    if (grid.x > max_group_count[0] ||
+        grid.y > max_group_count[1] ||
+        grid.z > max_group_count[2]) {
+        return AC_ERR_INVALID_WORK_GROUP_SIZE;
+    }
+    uint64_t total_groups = (uint64_t)grid.x * (uint64_t)grid.y * (uint64_t)grid.z;
+    if (total_groups == 0 || total_groups > 0xFFFFFFFFULL) {
+        return AC_ERR_NUMERICAL_OVERFLOW;
+    }
+    return AC_SUCCESS;
+}
+
+AcResult ac_validate_dispatch_budget(
+    const AcDim3 grid,
+    uint32_t max_safe_groups_per_axis,
+    uint64_t max_safe_total_groups
+) {
+    if (grid.x == 0 || grid.y == 0 || grid.z == 0) {
+        return AC_ERR_INVALID_WORK_GROUP_SIZE;
+    }
+    if (max_safe_groups_per_axis > 0) {
+        if (grid.x > max_safe_groups_per_axis ||
+            grid.y > max_safe_groups_per_axis ||
+            grid.z > max_safe_groups_per_axis) {
+            return AC_ERR_INVALID_WORK_GROUP_SIZE;
+        }
+    }
+    /* Safe 64-bit product overflow detection */
+    if ((uint64_t)grid.x > 0 && (uint64_t)grid.y > 0xFFFFFFFFFFFFFFFFULL / (uint64_t)grid.x) {
+        return AC_ERR_NUMERICAL_OVERFLOW;
+    }
+    uint64_t xy = (uint64_t)grid.x * (uint64_t)grid.y;
+    if (xy > 0 && (uint64_t)grid.z > 0xFFFFFFFFFFFFFFFFULL / xy) {
+        return AC_ERR_NUMERICAL_OVERFLOW;
+    }
+    uint64_t total_groups = xy * (uint64_t)grid.z;
+    if (max_safe_total_groups > 0 && total_groups > max_safe_total_groups) {
+        return AC_ERR_INVALID_WORK_GROUP_SIZE;
+    }
+    return AC_SUCCESS;
+}
+
 AcResult ac_vk_dispatch(
     AcVkContext* ctx,
     AcVkKernel* kernel,
@@ -77,24 +129,13 @@ AcResult ac_vk_dispatch(
     if (push_constants_size != kernel->push_constant_size) {
         return AC_ERR_KERNEL_ARG_INVALID;
     }
-    /* Workgroup dimensions validation */
-    if (group_x == 0 || group_y == 0 || group_z == 0) {
-        return AC_ERR_INVALID_WORK_GROUP_SIZE;
-    }
-    /* Workgroup count device limit validation */
+
+    /* Workgroup dimensions and hardware limit validation via pure function */
     {
-        const VkPhysicalDeviceLimits* limits = &ctx->device_properties.limits;
-        if (group_x > limits->maxComputeWorkGroupCount[0] ||
-            group_y > limits->maxComputeWorkGroupCount[1] ||
-            group_z > limits->maxComputeWorkGroupCount[2]) {
-            return AC_ERR_INVALID_WORK_GROUP_SIZE;
-        }
-    }
-    /* Multiplication overflow validation */
-    {
-        uint64_t total_groups = (uint64_t)group_x * (uint64_t)group_y * (uint64_t)group_z;
-        if (total_groups == 0 || total_groups > 0xFFFFFFFFULL) {
-            return AC_ERR_NUMERICAL_OVERFLOW;
+        AcDim3 grid = { group_x, group_y, group_z };
+        AcResult grid_res = ac_validate_dispatch_grid(grid, ctx->device_properties.limits.maxComputeWorkGroupCount);
+        if (grid_res != AC_SUCCESS) {
+            return grid_res;
         }
     }
 
