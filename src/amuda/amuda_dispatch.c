@@ -293,9 +293,21 @@ AcResult ac_launch(
     }
 
     /* 1. Dimension Validation & Quirk Enforcement */
+    if (grid.x == 0 || grid.y == 0 || grid.z == 0) {
+        return AC_ERR_INVALID_WORK_ITEM_DIMS;
+    }
+    if (block.x == 0 || block.y == 0 || block.z == 0) {
+        return AC_ERR_INVALID_WORK_GROUP_SIZE;
+    }
+
     uint64_t total_threads = (uint64_t)block.x * block.y * block.z;
     if (total_threads == 0 || total_threads > ctx->max_work_group_size) {
         return AC_ERR_INVALID_WORK_GROUP_SIZE;
+    }
+    if (block.x > ctx->max_work_item_sizes[0] ||
+        block.y > ctx->max_work_item_sizes[1] ||
+        block.z > ctx->max_work_item_sizes[2]) {
+        return AC_ERR_INVALID_WORK_ITEM_DIMS;
     }
 
     /* Mali Quirk: Prevent loadstride_b = 0 infinite loop */
@@ -312,10 +324,17 @@ AcResult ac_launch(
     }
 
     /* 3. 3D Grid/Block to OpenCL Global/Local Size Mapping */
+    uint64_t global_x = (uint64_t)grid.x * (uint64_t)block.x;
+    uint64_t global_y = (uint64_t)grid.y * (uint64_t)block.y;
+    uint64_t global_z = (uint64_t)grid.z * (uint64_t)block.z;
+    if (global_x > SIZE_MAX || global_y > SIZE_MAX || global_z > SIZE_MAX) {
+        return AC_ERR_NUMERICAL_OVERFLOW;
+    }
+
     size_t global_size[3] = {
-        (size_t)grid.x * block.x,
-        (size_t)grid.y * block.y,
-        (size_t)grid.z * block.z
+        (size_t)global_x,
+        (size_t)global_y,
+        (size_t)global_z
     };
     size_t local_size[3] = {
         (size_t)block.x,

@@ -181,7 +181,24 @@ AcResult ac_ops_gemm_fp32(
     AcBuffer* C,
     AcEvent** out_event
 ) {
+    if (out_event) {
+        *out_event = NULL;
+    }
     if (!ctx || !A || !B || !C) return AC_ERR_NULL_POINTER;
+    if (M <= 0 || N <= 0 || K <= 0) return AC_ERR_KERNEL_ARG_INVALID;
+
+    /* Dimension sanity and arithmetic overflow checks */
+    if ((uint64_t)M > 0x10000000ULL || (uint64_t)N > 0x10000000ULL || (uint64_t)K > 0x10000000ULL) {
+        return AC_ERR_NUMERICAL_OVERFLOW;
+    }
+
+    uint64_t req_a = (uint64_t)M * (uint64_t)K * sizeof(float);
+    uint64_t req_b = (uint64_t)K * (uint64_t)N * sizeof(float);
+    uint64_t req_c = (uint64_t)M * (uint64_t)N * sizeof(float);
+
+    if (A->size_bytes < req_a || B->size_bytes < req_b || C->size_bytes < req_c) {
+        return AC_ERR_INVALID_BUFFER_SIZE;
+    }
 
     // Synchronize host writes to device DRAM
     ac_buffer_sync_to_device(ctx, A);
@@ -194,8 +211,8 @@ AcResult ac_ops_gemm_fp32(
 
     // 2D Workgroup Grid
     uint32_t block_dim = 16;
-    uint32_t grid_x = (N + block_dim - 1) / block_dim;
-    uint32_t grid_y = (M + block_dim - 1) / block_dim;
+    uint32_t grid_x = ((uint32_t)N + block_dim - 1) / block_dim;
+    uint32_t grid_y = ((uint32_t)M + block_dim - 1) / block_dim;
 
     void* args[8] = {
         &M, &N, &K, &alpha,
@@ -226,7 +243,11 @@ AcResult ac_ops_bitnet_gemv_i2(
     AcBuffer* y,
     AcEvent** out_event
 ) {
+    if (out_event) {
+        *out_event = NULL;
+    }
     if (!ctx || !x || !W_packed || !scales || !y) return AC_ERR_NULL_POINTER;
+    if (M <= 0 || K <= 0) return AC_ERR_KERNEL_ARG_INVALID;
     if (K % 4 != 0) return AC_ERR_INVALID_BUFFER_SIZE;
 
     ac_buffer_sync_to_device(ctx, x);
@@ -239,7 +260,7 @@ AcResult ac_ops_bitnet_gemv_i2(
     if (res != AC_SUCCESS) return res;
 
     uint32_t block_size = 64;
-    uint32_t grid_size = (M + block_size - 1) / block_size;
+    uint32_t grid_size = ((uint32_t)M + block_size - 1) / block_size;
 
     void* args[6] = {
         &M, &K,
@@ -270,7 +291,11 @@ AcResult ac_ops_bitnet_gemv_i2_s_exact(
     AcBuffer* y,
     AcEvent** out_event
 ) {
+    if (out_event) {
+        *out_event = NULL;
+    }
     if (!ctx || !x || !W_packed || !y) return AC_ERR_NULL_POINTER;
+    if (M <= 0 || K <= 0) return AC_ERR_KERNEL_ARG_INVALID;
     if (K % 128 != 0) return AC_ERR_KERNEL_ARG_INVALID;
 
     ac_buffer_sync_to_device(ctx, x);
@@ -282,7 +307,7 @@ AcResult ac_ops_bitnet_gemv_i2_s_exact(
     if (res != AC_SUCCESS) return res;
 
     uint32_t block_size = 64;
-    uint32_t grid_size = (M + block_size - 1) / block_size;
+    uint32_t grid_size = ((uint32_t)M + block_size - 1) / block_size;
 
     void* args[6] = {
         &M, &K,
@@ -314,7 +339,11 @@ AcResult ac_ops_rmsnorm(
     AcBuffer* y,
     AcEvent** out_event
 ) {
+    if (out_event) {
+        *out_event = NULL;
+    }
     if (!ctx || !x || !weight || !y) return AC_ERR_NULL_POINTER;
+    if (num_rows <= 0 || hidden_dim <= 0) return AC_ERR_KERNEL_ARG_INVALID;
 
     ac_buffer_sync_to_device(ctx, x);
     ac_buffer_sync_to_device(ctx, weight);
@@ -325,7 +354,7 @@ AcResult ac_ops_rmsnorm(
     if (res != AC_SUCCESS) return res;
 
     uint32_t block_size = 64;
-    uint32_t grid_size = (num_rows + block_size - 1) / block_size;
+    uint32_t grid_size = ((uint32_t)num_rows + block_size - 1) / block_size;
 
     void* args[6] = {
         &num_rows, &hidden_dim, &eps,
@@ -353,7 +382,11 @@ AcResult ac_ops_swiglu(
     AcBuffer* y,
     AcEvent** out_event
 ) {
+    if (out_event) {
+        *out_event = NULL;
+    }
     if (!ctx || !gate || !up || !y) return AC_ERR_NULL_POINTER;
+    if (num_elements <= 0) return AC_ERR_KERNEL_ARG_INVALID;
 
     ac_buffer_sync_to_device(ctx, gate);
     ac_buffer_sync_to_device(ctx, up);
@@ -364,7 +397,7 @@ AcResult ac_ops_swiglu(
     if (res != AC_SUCCESS) return res;
 
     uint32_t block_size = 64;
-    uint32_t grid_size = (num_elements + block_size - 1) / block_size;
+    uint32_t grid_size = ((uint32_t)num_elements + block_size - 1) / block_size;
 
     void* args[4] = {
         &num_elements,
@@ -393,7 +426,11 @@ AcResult ac_ops_rope(
     AcBuffer* cos_sin,
     AcEvent** out_event
 ) {
+    if (out_event) {
+        *out_event = NULL;
+    }
     if (!ctx || !qk || !cos_sin) return AC_ERR_NULL_POINTER;
+    if (seq_len <= 0 || num_heads <= 0 || head_dim <= 0) return AC_ERR_KERNEL_ARG_INVALID;
     if (head_dim % 2 != 0) return AC_ERR_INVALID_BUFFER_SIZE;
 
     ac_buffer_sync_to_device(ctx, qk);
@@ -407,7 +444,7 @@ AcResult ac_ops_rope(
     int total_pairs = seq_len * num_heads * half_dim;
 
     uint32_t block_size = 64;
-    uint32_t grid_size = (total_pairs + block_size - 1) / block_size;
+    uint32_t grid_size = ((uint32_t)total_pairs + block_size - 1) / block_size;
 
     void* args[5] = {
         &total_pairs, &num_heads, &half_dim,
