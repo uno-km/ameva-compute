@@ -11,10 +11,10 @@
  *   - Active Child Tracking: Context destruction is rejected if child buffers, kernels,
  *     or events remain alive.
  *
- * ABI Contract Specification (AMUDA 2.0.0):
- *   In AC_ABI_VERSION 0x00020000, all descriptor struct_size fields require an
+ * ABI Contract Specification (AMUDA 2.1.0):
+ *   In AC_ABI_VERSION 0x00020100, all descriptor struct_size fields require an
  *   exact size match (desc->struct_size == sizeof(DescriptorType)).
- *   Backward-compatible partial-size extension or minor ABI evolution is not yet provided.
+ *   Specialization constants are fully integrated into kernel metadata and descriptors.
  */
 
 #ifndef AC_RUNTIME_H
@@ -73,6 +73,7 @@ typedef struct {
     AcShaderStage stage_flags;
 } AcRuntimeBindingDesc;
 
+
 /**
  * @brief Public Kernel Metadata Descriptor
  */
@@ -85,6 +86,8 @@ typedef struct {
     AcDim3 local_size;
     uint32_t required_features;
     const char* expected_spirv_sha256;
+    uint32_t specialization_schema_count;
+    const AcSpecConstantSchemaEntry* specialization_schemas;
 } AcKernelRuntimeMetadata;
 
 /* ========================================================================= */
@@ -121,6 +124,8 @@ typedef struct {
     const uint32_t* spirv_code; /* Pointer to 32-bit aligned SPIR-V bytecode words */
     size_t code_size_bytes;     /* Byte size of SPIR-V code (must be multiple of 4) */
     const AcKernelRuntimeMetadata* metadata;
+    uint32_t specialization_count;
+    const AcSpecConstant* specializations;
 } AcKernelDesc;
 
 /**
@@ -269,6 +274,34 @@ AcResult ac_runtime_kernel_create(
  */
 AcResult ac_runtime_kernel_destroy(
     AcKernel* kernel
+);
+
+#define AC_PIPELINE_IDENTITY_SHA256_HEX_SIZE 65u
+
+/**
+ * @brief Retrieve deterministic canonical pipeline identity SHA-256 hex string.
+ *
+ * @param kernel Kernel handle.
+ * @param out_hex Destination buffer (must be at least 65 bytes).
+ * @param out_hex_size Size of out_hex buffer.
+ * @return AC_SUCCESS on success, AC_ERR_INVALID_ARGUMENT if out_hex_size < 65, error code on failure.
+ */
+AcResult ac_runtime_kernel_get_pipeline_identity(
+    const AcKernel* kernel,
+    char* out_hex,
+    size_t out_hex_size
+);
+
+/**
+ * @brief Retrieve effective workgroup local size after specialization overrides.
+ *
+ * @param kernel Kernel handle.
+ * @param out_local_size Output pointer for effective local dimensions.
+ * @return AC_SUCCESS on success, error code on failure.
+ */
+AcResult ac_runtime_kernel_get_effective_local_size(
+    const AcKernel* kernel,
+    AcDim3* out_local_size
 );
 
 /* ========================================================================= */

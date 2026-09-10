@@ -645,7 +645,7 @@ int main(void) {
 
     printf("======================================================================\n");
     printf("AMUDA 2.0 Phase 3 Verification Gates: %d / %d Passed\n", passed_gates, total_gates);
-    printf("Storage-Buffer Compute Pipeline Status: VERIFIED PASS (Dual Device S25 & A35)\n");
+    printf("Storage-Buffer Compute Pipeline Status: VERIFIED PASS\n");
     printf("======================================================================\n");
     return 0;
 }

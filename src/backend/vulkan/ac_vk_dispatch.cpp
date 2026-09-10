@@ -81,6 +81,15 @@ AcResult ac_vk_dispatch(
     if (group_x == 0 || group_y == 0 || group_z == 0) {
         return AC_ERR_INVALID_WORK_GROUP_SIZE;
     }
+    /* Workgroup count device limit validation */
+    {
+        const VkPhysicalDeviceLimits* limits = &ctx->device_properties.limits;
+        if (group_x > limits->maxComputeWorkGroupCount[0] ||
+            group_y > limits->maxComputeWorkGroupCount[1] ||
+            group_z > limits->maxComputeWorkGroupCount[2]) {
+            return AC_ERR_INVALID_WORK_GROUP_SIZE;
+        }
+    }
     /* Multiplication overflow validation */
     {
         uint64_t total_groups = (uint64_t)group_x * (uint64_t)group_y * (uint64_t)group_z;

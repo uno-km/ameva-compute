@@ -425,8 +425,8 @@ int main(void) {
         AcKernel* bad_k = (AcKernel*)0xDEADBEEF;
 
         /* 5.1 Null spirv_code */
-        AcKernelRuntimeMetadata meta = {"vector_add", "main", 0, NULL, 0, {256, 1, 1}, 0, kVectorAddSpvSha256};
-        AcKernelDesc k_desc = {AC_ABI_VERSION, sizeof(AcKernelDesc), NULL, 1024, &meta};
+        AcKernelRuntimeMetadata meta = {"vector_add", "main", 0, NULL, 0, {256, 1, 1}, 0, kVectorAddSpvSha256, 0, NULL};
+        AcKernelDesc k_desc = {AC_ABI_VERSION, sizeof(AcKernelDesc), NULL, 1024, &meta, 0, NULL};
         AcResult res = ac_runtime_kernel_create(ctx, &k_desc, &bad_k);
         if (res != AC_ERR_NULL_POINTER || bad_k != NULL) {
             printf("  -> FAIL: Null spirv_code not rejected! (res=%d, ptr=%p)\n", res, (void*)bad_k);
@@ -518,8 +518,8 @@ int main(void) {
             {1, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE},
             {2, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE}
         };
-        AcKernelRuntimeMetadata meta = {"vector_add", "main", 3, v_bindings, 0, {256, 1, 1}, 0, kVectorAddSpvSha256};
-        AcKernelDesc k_desc = {AC_ABI_VERSION, sizeof(AcKernelDesc), kVectorAddSpv, kVectorAddSpvByteSize, &meta};
+        AcKernelRuntimeMetadata meta = {"vector_add", "main", 3, v_bindings, 0, {256, 1, 1}, 0, kVectorAddSpvSha256, 0, NULL};
+        AcKernelDesc k_desc = {AC_ABI_VERSION, sizeof(AcKernelDesc), kVectorAddSpv, kVectorAddSpvByteSize, &meta, 0, NULL};
         AcKernel* kernelA = NULL;
         CHECK_AC(ac_runtime_kernel_create(ctxA, &k_desc, &kernelA));
 
@@ -624,7 +624,7 @@ int main(void) {
         i2s_meta.local_size = {32, 4, 1};
         i2s_meta.expected_spirv_sha256 = kBitnetGemvI2SSpvSha256;
 
-        AcKernelDesc k_desc = {AC_ABI_VERSION, sizeof(AcKernelDesc), kBitnetGemvI2SSpv, kBitnetGemvI2SSpvByteSize, &i2s_meta};
+        AcKernelDesc k_desc = {AC_ABI_VERSION, sizeof(AcKernelDesc), kBitnetGemvI2SSpv, kBitnetGemvI2SSpvByteSize, &i2s_meta, 0, NULL};
         CHECK_AC(ac_runtime_kernel_create(ctx, &k_desc, &i2s_kernel));
 
         AcBufferDesc b_desc_w = {AC_ABI_VERSION, sizeof(AcBufferDesc), 96, AC_BUFFER_USAGE_STORAGE, 0};
@@ -753,7 +753,7 @@ int main(void) {
         v_meta.local_size = {256, 1, 1};
         v_meta.expected_spirv_sha256 = kVectorAddSpvSha256;
 
-        AcKernelDesc k_desc = {AC_ABI_VERSION, sizeof(AcKernelDesc), kVectorAddSpv, kVectorAddSpvByteSize, &v_meta};
+        AcKernelDesc k_desc = {AC_ABI_VERSION, sizeof(AcKernelDesc), kVectorAddSpv, kVectorAddSpvByteSize, &v_meta, 0, NULL};
         AcKernel* vec_kernel = NULL;
         CHECK_AC(ac_runtime_kernel_create(ctx, &k_desc, &vec_kernel));
 

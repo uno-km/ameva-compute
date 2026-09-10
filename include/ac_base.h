@@ -21,7 +21,11 @@ extern "C" {
 /**
  * @brief AMUDA ABI Version Specification (Major.Minor.Patch -> 0xMMNNPP00)
  */
-#define AC_ABI_VERSION 0x00020000
+#define AC_ABI_VERSION_MAJOR 2u
+#define AC_ABI_VERSION_MINOR 1u
+#define AC_ABI_VERSION_PATCH 0u
+
+#define AC_ABI_VERSION 0x00020100u
 
 /**
  * @brief Supported Hardware Compute Backend Targets
@@ -30,6 +34,38 @@ typedef uint32_t AcBackendKind;
 
 #define AC_BACKEND_UNKNOWN ((AcBackendKind)0u)
 #define AC_BACKEND_VULKAN  ((AcBackendKind)1u)
+
+/**
+ * @brief Specialization Constant Types
+ */
+typedef uint32_t AcSpecConstantType;
+#define AC_SPEC_CONSTANT_U32 ((AcSpecConstantType)0u)
+#define AC_SPEC_CONSTANT_I32 ((AcSpecConstantType)1u)
+#define AC_SPEC_CONSTANT_F32 ((AcSpecConstantType)2u)
+
+/**
+ * @brief Specialization Constant Value Override
+ */
+typedef struct {
+    uint32_t constant_id;
+    AcSpecConstantType type;
+    uint32_t value_bits; /* Bit-preserving 32-bit payload */
+} AcSpecConstant;
+
+/**
+ * @brief Specialization Constant Metadata Schema Entry
+ */
+typedef struct {
+    uint32_t constant_id;
+    AcSpecConstantType type;
+    uint32_t default_value_bits;
+    uint32_t min_value_bits;
+    uint32_t max_value_bits;
+    uint32_t overrides_local_size_axis; /* 0: None, 1: X, 2: Y, 3: Z */
+} AcSpecConstantSchemaEntry;
+
+#define AC_PIPELINE_IDENTITY_SCHEMA_VERSION 1u
+#define AC_PIPELINE_IDENTITY_SHA256_HEX_SIZE 65u
 
 /**
  * @brief Strict Status and Error Codes (Zero Silent Failures)

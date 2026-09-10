@@ -15,6 +15,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <math.h>
+#include "../backend/vulkan/ac_vk_sha256.h"
 
 #define AC_MAGIC_CONTEXT 0xAC010001
 #define AC_MAGIC_BUFFER  0xAC010002
@@ -297,6 +299,60 @@ AcResult ac_runtime_buffer_invalidate(AcBuffer* buf, size_t offset, size_t size_
 }
 
 /* ========================================================================= */
+/* Specialization Bounds & Encoding Utilities                                */
+/* ========================================================================= */
+
+static inline void write_le32(uint8_t out[4], uint32_t val) {
+    out[0] = (uint8_t)(val & 0xFF);
+    out[1] = (uint8_t)((val >> 8) & 0xFF);
+    out[2] = (uint8_t)((val >> 16) & 0xFF);
+    out[3] = (uint8_t)((val >> 24) & 0xFF);
+}
+
+static bool validate_spec_bounds(
+    AcSpecConstantType type,
+    uint32_t value_bits,
+    uint32_t min_bits,
+    uint32_t max_bits
+) {
+    switch (type) {
+    case AC_SPEC_CONSTANT_U32:
+        return value_bits >= min_bits && value_bits <= max_bits;
+
+    case AC_SPEC_CONSTANT_I32: {
+        int32_t value;
+        int32_t min_value;
+        int32_t max_value;
+
+        memcpy(&value, &value_bits, sizeof(value));
+        memcpy(&min_value, &min_bits, sizeof(min_value));
+        memcpy(&max_value, &max_bits, sizeof(max_value));
+
+        return value >= min_value && value <= max_value;
+    }
+
+    case AC_SPEC_CONSTANT_F32: {
+        float value;
+        float min_value;
+        float max_value;
+
+        memcpy(&value, &value_bits, sizeof(value));
+        memcpy(&min_value, &min_bits, sizeof(min_value));
+        memcpy(&max_value, &max_bits, sizeof(max_value));
+
+        return isfinite(value) &&
+               isfinite(min_value) &&
+               isfinite(max_value) &&
+               value >= min_value &&
+               value <= max_value;
+    }
+
+    default:
+        return false;
+    }
+}
+
+/* ========================================================================= */
 /* Kernel Management Implementation                                          */
 /* ========================================================================= */
 
@@ -323,6 +379,12 @@ AcResult ac_runtime_kernel_create(AcContext* ctx, const AcKernelDesc* desc, AcKe
         return AC_ERR_INVALID_ARGUMENT;
     }
     if (!desc->metadata) {
+        return AC_ERR_NULL_POINTER;
+    }
+    if (desc->specialization_count > 16) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (desc->specialization_count > 0 && !desc->specializations) {
         return AC_ERR_NULL_POINTER;
     }
 
@@ -366,6 +428,224 @@ AcResult ac_runtime_kernel_create(AcContext* ctx, const AcKernelDesc* desc, AcKe
         }
     }
 
+    /* Verify schema declarations */
+    if (rmeta->specialization_schema_count > 16) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (rmeta->specialization_schema_count > 0 && !rmeta->specialization_schemas) {
+        return AC_ERR_NULL_POINTER;
+    }
+    for (uint32_t i = 0; i < rmeta->specialization_schema_count; ++i) {
+        const AcSpecConstantSchemaEntry* s_i = &rmeta->specialization_schemas[i];
+        if (s_i->type > AC_SPEC_CONSTANT_F32) {
+            return AC_ERR_INVALID_ARGUMENT; /* Invalid schema type */
+        }
+        for (uint32_t j = i + 1; j < rmeta->specialization_schema_count; ++j) {
+            if (s_i->constant_id == rmeta->specialization_schemas[j].constant_id) {
+                return AC_ERR_INVALID_ARGUMENT; /* Duplicate schema constant ID */
+            }
+            if (s_i->overrides_local_size_axis != 0 &&
+                s_i->overrides_local_size_axis == rmeta->specialization_schemas[j].overrides_local_size_axis) {
+                return AC_ERR_INVALID_ARGUMENT; /* Duplicate local-size axis override */
+            }
+        }
+        /* Validate min <= max based on type */
+        bool min_max_valid = false;
+        switch (s_i->type) {
+        case AC_SPEC_CONSTANT_U32:
+            min_max_valid = (s_i->min_value_bits <= s_i->max_value_bits);
+            break;
+        case AC_SPEC_CONSTANT_I32: {
+            int32_t min_v, max_v;
+            memcpy(&min_v, &s_i->min_value_bits, sizeof(min_v));
+            memcpy(&max_v, &s_i->max_value_bits, sizeof(max_v));
+            min_max_valid = (min_v <= max_v);
+            break;
+        }
+        case AC_SPEC_CONSTANT_F32: {
+            float min_v, max_v;
+            memcpy(&min_v, &s_i->min_value_bits, sizeof(min_v));
+            memcpy(&max_v, &s_i->max_value_bits, sizeof(max_v));
+            min_max_valid = isfinite(min_v) && isfinite(max_v) && (min_v <= max_v);
+            break;
+        }
+        default:
+            min_max_valid = false;
+            break;
+        }
+        if (!min_max_valid) {
+            return AC_ERR_INVALID_ARGUMENT; /* min > max or non-finite */
+        }
+        /* Validate default is within [min, max] */
+        if (!validate_spec_bounds(s_i->type, s_i->default_value_bits, s_i->min_value_bits, s_i->max_value_bits)) {
+            return AC_ERR_INVALID_ARGUMENT; /* Default out of bounds */
+        }
+        /* Validate local-size axis range */
+        if (s_i->overrides_local_size_axis > 3) {
+            return AC_ERR_INVALID_ARGUMENT; /* Invalid axis */
+        }
+        /* Local-size axis override constraints */
+        if (s_i->overrides_local_size_axis != 0) {
+            if (s_i->type != AC_SPEC_CONSTANT_U32) {
+                return AC_ERR_INVALID_ARGUMENT; /* Local size override must be U32 */
+            }
+            if (s_i->default_value_bits == 0 || s_i->min_value_bits == 0) {
+                return AC_ERR_INVALID_ARGUMENT; /* Local size must be >= 1 */
+            }
+            /* Runtime-enforced invariant: schema default must match metadata.local_size */
+            if (s_i->overrides_local_size_axis == 1 && s_i->default_value_bits != rmeta->local_size.x) {
+                return AC_ERR_INVALID_ARGUMENT;
+            }
+            if (s_i->overrides_local_size_axis == 2 && s_i->default_value_bits != rmeta->local_size.y) {
+                return AC_ERR_INVALID_ARGUMENT;
+            }
+            if (s_i->overrides_local_size_axis == 3 && s_i->default_value_bits != rmeta->local_size.z) {
+                return AC_ERR_INVALID_ARGUMENT;
+            }
+        }
+    }
+
+    /* Verify caller specialization overrides */
+    for (uint32_t i = 0; i < desc->specialization_count; ++i) {
+        if (desc->specializations[i].type > AC_SPEC_CONSTANT_F32) {
+            return AC_ERR_INVALID_ARGUMENT; /* Unknown type */
+        }
+        for (uint32_t j = i + 1; j < desc->specialization_count; ++j) {
+            if (desc->specializations[i].constant_id == desc->specializations[j].constant_id) {
+                return AC_ERR_INVALID_ARGUMENT; /* Duplicate constant ID */
+            }
+        }
+        const AcSpecConstantSchemaEntry* matched = NULL;
+        for (uint32_t s = 0; s < rmeta->specialization_schema_count; ++s) {
+            if (rmeta->specialization_schemas[s].constant_id == desc->specializations[i].constant_id) {
+                matched = &rmeta->specialization_schemas[s];
+                break;
+            }
+        }
+        if (!matched) {
+            return AC_ERR_KERNEL_ARG_INVALID; /* Undeclared constant ID */
+        }
+        if (desc->specializations[i].type != matched->type) {
+            return AC_ERR_INVALID_ARGUMENT; /* Type mismatch */
+        }
+        if (matched->overrides_local_size_axis != 0 && desc->specializations[i].value_bits == 0) {
+            return AC_ERR_INVALID_ARGUMENT; /* Caller override for local size cannot be 0 */
+        }
+        if (!validate_spec_bounds(matched->type, desc->specializations[i].value_bits, matched->min_value_bits, matched->max_value_bits)) {
+            return AC_ERR_INVALID_ARGUMENT; /* Caller value out of bounds or invalid float (NaN/Inf) */
+        }
+    }
+
+    if (rmeta->specialization_schema_count == 0 && desc->specialization_count > 0) {
+        return AC_ERR_KERNEL_ARG_INVALID;
+    }
+
+    /* Build Effective Specialization Set */
+    AcSpecConstant canonical_specs[16] = {};
+    AcDim3 effective_local_size = rmeta->local_size;
+
+    for (uint32_t k = 0; k < rmeta->specialization_schema_count; ++k) {
+        const AcSpecConstantSchemaEntry* schema = &rmeta->specialization_schemas[k];
+        uint32_t val = schema->default_value_bits;
+        for (uint32_t c = 0; c < desc->specialization_count; ++c) {
+            if (desc->specializations[c].constant_id == schema->constant_id) {
+                val = desc->specializations[c].value_bits;
+                break;
+            }
+        }
+
+        canonical_specs[k].constant_id = schema->constant_id;
+        canonical_specs[k].type = schema->type;
+        canonical_specs[k].value_bits = val;
+
+        if (schema->overrides_local_size_axis == 1) {
+            effective_local_size.x = val;
+        } else if (schema->overrides_local_size_axis == 2) {
+            effective_local_size.y = val;
+        } else if (schema->overrides_local_size_axis == 3) {
+            effective_local_size.z = val;
+        }
+    }
+
+    /* Sort canonical_specs strictly by constant_id ascending */
+    for (uint32_t i = 0; i < rmeta->specialization_schema_count; ++i) {
+        for (uint32_t j = i + 1; j < rmeta->specialization_schema_count; ++j) {
+            if (canonical_specs[i].constant_id > canonical_specs[j].constant_id) {
+                AcSpecConstant tmp = canonical_specs[i];
+                canonical_specs[i] = canonical_specs[j];
+                canonical_specs[j] = tmp;
+            }
+        }
+    }
+
+    /* Calculate deterministic binary-serialized pipeline identity hash */
+    char pipeline_identity[AC_PIPELINE_IDENTITY_SHA256_HEX_SIZE] = {};
+    {
+        AcSha256Ctx id_ctx;
+        ac_sha256_init(&id_ctx);
+
+        /* 1. Domain separator (exactly 18 bytes) */
+        static const uint8_t kPipelineIdentityDomain[] = {
+            'A', 'M', 'E', 'V', 'A', '-',
+            'P', 'I', 'P', 'E', 'L', 'I', 'N', 'E',
+            '-', 'I', 'D', '\0'
+        };
+        static_assert(sizeof(kPipelineIdentityDomain) == 18,
+            "Pipeline identity domain must be 18 bytes");
+        ac_sha256_update(&id_ctx, kPipelineIdentityDomain, sizeof(kPipelineIdentityDomain));
+
+        /* 2. Identity schema version as LE32 */
+        uint8_t le[4];
+        write_le32(le, AC_PIPELINE_IDENTITY_SCHEMA_VERSION);
+        ac_sha256_update(&id_ctx, le, 4);
+
+        /* 3. SPIR-V SHA-256 raw digest (32 bytes) */
+        uint8_t spv_raw_hash[32];
+        AcSha256Ctx spv_ctx;
+        ac_sha256_init(&spv_ctx);
+        ac_sha256_update(&spv_ctx, (const uint8_t*)desc->spirv_code, desc->code_size_bytes);
+        ac_sha256_final(&spv_ctx, spv_raw_hash);
+        ac_sha256_update(&id_ctx, spv_raw_hash, 32);
+
+        /* 4. Entry point length as LE32 + UTF-8 bytes */
+        if (!rmeta->entry_point) {
+            return AC_ERR_NULL_POINTER;
+        }
+        size_t ep_len_sz = strlen(rmeta->entry_point);
+        if (ep_len_sz == 0 || ep_len_sz > UINT32_MAX) {
+            return AC_ERR_INVALID_ARGUMENT;
+        }
+        uint32_t ep_len = (uint32_t)ep_len_sz;
+        write_le32(le, ep_len);
+        ac_sha256_update(&id_ctx, le, 4);
+        ac_sha256_update(&id_ctx, (const uint8_t*)rmeta->entry_point, ep_len);
+
+        /* 5. Canonical specialization count as LE32 */
+        uint32_t spec_count = rmeta->specialization_schema_count;
+        if (spec_count > 16) {
+            return AC_ERR_INVALID_ARGUMENT;
+        }
+        write_le32(le, spec_count);
+        ac_sha256_update(&id_ctx, le, 4);
+
+        /* 6. Canonical entries (constant_id, type, value_bits as LE32) */
+        for (uint32_t i = 0; i < spec_count; ++i) {
+            write_le32(le, canonical_specs[i].constant_id);
+            ac_sha256_update(&id_ctx, le, 4);
+            write_le32(le, canonical_specs[i].type);
+            ac_sha256_update(&id_ctx, le, 4);
+            write_le32(le, canonical_specs[i].value_bits);
+            ac_sha256_update(&id_ctx, le, 4);
+        }
+
+        uint8_t final_hash[32];
+        ac_sha256_final(&id_ctx, final_hash);
+        for (int i = 0; i < 32; ++i) {
+            sprintf(pipeline_identity + (i * 2), "%02x", final_hash[i]);
+        }
+        pipeline_identity[64] = '\0';
+    }
+
     AcKernelBindingDesc vk_bindings[16];
     for (uint32_t i = 0; i < rmeta->binding_count; ++i) {
         vk_bindings[i].binding_index = rmeta->bindings[i].binding_index;
@@ -383,13 +663,19 @@ AcResult ac_runtime_kernel_create(AcContext* ctx, const AcKernelDesc* desc, AcKe
     vk_meta.local_size = rmeta->local_size;
     vk_meta.required_features = rmeta->required_features;
     vk_meta.expected_spirv_sha256 = rmeta->expected_spirv_sha256;
+    vk_meta.specialization_schema_count = rmeta->specialization_schema_count;
+    vk_meta.specialization_schemas = rmeta->specialization_schemas;
 
     AcVkKernel* vk_kernel = NULL;
-    AcResult res = ac_vk_kernel_create_with_metadata(
+    AcResult res = ac_vk_kernel_create_with_specialization(
         ctx->vk_ctx,
         desc->spirv_code,
         desc->code_size_bytes,
         &vk_meta,
+        rmeta->specialization_schema_count,
+        canonical_specs,
+        effective_local_size,
+        pipeline_identity,
         &vk_kernel
     );
     if (res != AC_SUCCESS) {
@@ -433,6 +719,44 @@ AcResult ac_runtime_kernel_destroy(AcKernel* kernel) {
 
     kernel->magic = 0;
     free(kernel);
+    return AC_SUCCESS;
+}
+
+AcResult ac_runtime_kernel_get_pipeline_identity(
+    const AcKernel* kernel,
+    char* out_hex,
+    size_t out_hex_size
+) {
+    if (out_hex && out_hex_size > 0) {
+        out_hex[0] = '\0';
+    }
+    if (!kernel || kernel->magic != AC_MAGIC_KERNEL || !kernel->vk_kernel) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (!out_hex) {
+        return AC_ERR_NULL_POINTER;
+    }
+    if (out_hex_size < AC_PIPELINE_IDENTITY_SHA256_HEX_SIZE) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    memcpy(out_hex, kernel->vk_kernel->pipeline_identity, AC_PIPELINE_IDENTITY_SHA256_HEX_SIZE);
+    return AC_SUCCESS;
+}
+
+AcResult ac_runtime_kernel_get_effective_local_size(
+    const AcKernel* kernel,
+    AcDim3* out_local_size
+) {
+    if (out_local_size) {
+        *out_local_size = (AcDim3){0, 0, 0};
+    }
+    if (!kernel || kernel->magic != AC_MAGIC_KERNEL || !kernel->vk_kernel) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (!out_local_size) {
+        return AC_ERR_NULL_POINTER;
+    }
+    *out_local_size = kernel->vk_kernel->effective_local_size;
     return AC_SUCCESS;
 }
 

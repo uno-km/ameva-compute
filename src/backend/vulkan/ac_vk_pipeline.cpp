@@ -7,11 +7,15 @@
 
 extern "C" {
 
-AcResult ac_vk_kernel_create_with_metadata(
+AcResult ac_vk_kernel_create_with_specialization(
     AcVkContext* ctx,
     const uint32_t* spirv_code,
     size_t code_size_bytes,
     const AcKernelMetadata* metadata,
+    uint32_t specialization_count,
+    const AcSpecConstant* specializations,
+    AcDim3 effective_local_size,
+    const char* pipeline_identity,
     AcVkKernel** out_kernel
 ) {
     VkShaderModule shader_module = VK_NULL_HANDLE;
@@ -24,6 +28,9 @@ AcResult ac_vk_kernel_create_with_metadata(
     VkPushConstantRange pushRange = {};
     VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
     VkComputePipelineCreateInfo pipelineInfo = {};
+    VkSpecializationMapEntry map_entries[16] = {};
+    uint32_t payload[16] = {};
+    VkSpecializationInfo spec_info = {};
     AcResult ret = AC_SUCCESS;
     VkResult vk_res = VK_SUCCESS;
     uint32_t buffer_count = 0;
@@ -43,6 +50,31 @@ AcResult ac_vk_kernel_create_with_metadata(
     }
     if (!metadata) {
         return AC_ERR_NULL_POINTER;
+    }
+    if (specialization_count > 16) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (specialization_count > 0 && !specializations) {
+        return AC_ERR_NULL_POINTER;
+    }
+
+    /* 0. Device Workgroup Size and Invocation Limits Check */
+    if (effective_local_size.x == 0 || effective_local_size.y == 0 || effective_local_size.z == 0) {
+        return AC_ERR_INVALID_WORK_GROUP_SIZE;
+    }
+    {
+        const VkPhysicalDeviceLimits* limits = &ctx->device_properties.limits;
+        if (effective_local_size.x > limits->maxComputeWorkGroupSize[0] ||
+            effective_local_size.y > limits->maxComputeWorkGroupSize[1] ||
+            effective_local_size.z > limits->maxComputeWorkGroupSize[2]) {
+            return AC_ERR_INVALID_WORK_GROUP_SIZE;
+        }
+        const uint64_t invocation_count = (uint64_t)effective_local_size.x *
+                                          (uint64_t)effective_local_size.y *
+                                          (uint64_t)effective_local_size.z;
+        if (invocation_count > limits->maxComputeWorkGroupInvocations) {
+            return AC_ERR_INVALID_WORK_GROUP_SIZE;
+        }
     }
 
     /* 1. Cryptographic Authentication against expected SHA-256 */
@@ -132,13 +164,29 @@ AcResult ac_vk_kernel_create_with_metadata(
         goto cleanup;
     }
 
-    /* 6. Compute Pipeline Creation */
+    /* 6. Compute Pipeline Creation with Specialization Constants */
     pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
     pipelineInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
     pipelineInfo.stage.module = shader_module;
     pipelineInfo.stage.pName = entry_name;
     pipelineInfo.layout = pipeline_layout;
+
+    if (specialization_count > 0) {
+        for (uint32_t i = 0; i < specialization_count; ++i) {
+            map_entries[i].constantID = specializations[i].constant_id;
+            map_entries[i].offset = i * sizeof(uint32_t);
+            map_entries[i].size = sizeof(uint32_t);
+            payload[i] = specializations[i].value_bits;
+        }
+        spec_info.mapEntryCount = specialization_count;
+        spec_info.pMapEntries = map_entries;
+        spec_info.dataSize = specialization_count * sizeof(uint32_t);
+        spec_info.pData = payload;
+        pipelineInfo.stage.pSpecializationInfo = &spec_info;
+    } else {
+        pipelineInfo.stage.pSpecializationInfo = NULL;
+    }
 
     vk_res = vkCreateComputePipelines(ctx->device, VK_NULL_HANDLE, 1, &pipelineInfo, NULL, &compute_pipeline);
     if (vk_res != VK_SUCCESS) {
@@ -162,6 +210,14 @@ AcResult ac_vk_kernel_create_with_metadata(
         k->owning_context = ctx;
         k->submission_outstanding_count = 0;
         k->metadata = *metadata;
+        k->specialization_count = specialization_count;
+        for (uint32_t i = 0; i < specialization_count; ++i) {
+            k->specializations[i] = specializations[i];
+        }
+        k->effective_local_size = effective_local_size;
+        if (pipeline_identity) {
+            strncpy(k->pipeline_identity, pipeline_identity, sizeof(k->pipeline_identity) - 1);
+        }
 
         ctx->active_child_kernels++;
         *out_kernel = k;
@@ -182,6 +238,30 @@ cleanup:
         vkDestroyShaderModule(ctx->device, shader_module, NULL);
     }
     return ret;
+}
+
+AcResult ac_vk_kernel_create_with_metadata(
+    AcVkContext* ctx,
+    const uint32_t* spirv_code,
+    size_t code_size_bytes,
+    const AcKernelMetadata* metadata,
+    AcVkKernel** out_kernel
+) {
+    AcDim3 local_size = {0, 0, 0};
+    if (metadata) {
+        local_size = metadata->local_size;
+    }
+    return ac_vk_kernel_create_with_specialization(
+        ctx,
+        spirv_code,
+        code_size_bytes,
+        metadata,
+        0,
+        NULL,
+        local_size,
+        NULL,
+        out_kernel
+    );
 }
 
 AcResult ac_vk_kernel_create_spirv(

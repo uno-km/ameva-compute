@@ -45,6 +45,8 @@ typedef struct {
     AcDim3 local_size;
     uint32_t required_features;
     const char* expected_spirv_sha256;
+    uint32_t specialization_schema_count;
+    const AcSpecConstantSchemaEntry* specialization_schemas;
 } AcKernelMetadata;
 
 struct AcVkKernel {
@@ -57,7 +59,26 @@ struct AcVkKernel {
     AcVkContext* owning_context;
     uint32_t submission_outstanding_count;
     AcKernelMetadata metadata;
+    uint32_t specialization_count;
+    AcSpecConstant specializations[16];
+    AcDim3 effective_local_size;
+    char pipeline_identity[AC_PIPELINE_IDENTITY_SHA256_HEX_SIZE];
 };
+
+/**
+ * @brief Create a compute kernel with explicit specialization constants and metadata.
+ */
+AcResult ac_vk_kernel_create_with_specialization(
+    AcVkContext* ctx,
+    const uint32_t* spirv_code,
+    size_t code_size_bytes,
+    const AcKernelMetadata* metadata,
+    uint32_t specialization_count,
+    const AcSpecConstant* specializations,
+    AcDim3 effective_local_size,
+    const char* pipeline_identity,
+    AcVkKernel** out_kernel
+);
 
 /**
  * @brief Create a compute kernel with explicit universal metadata and validation.
