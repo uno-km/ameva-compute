@@ -1,0 +1,39 @@
+===================================================================
+[P0-2A AUDIT] Enhanced Synchronous Dispatch Contract & Queue Probing (8 Gates)
+===================================================================
+[PASS] Context: QUALCOMM Adreno(TM) (QUALCOMM, 4 CUs, max_wg=1024)
+
+[Gate 1/8] NON_NULL_EVENT_REMAINS_ASYNC...
+  [INFO] Async launch returned in 1169 us, ev=0xb4000073837fdf90
+  [INFO] Event wait duration: 14788 us (GPU kernel duration: 8052 us)
+  [PASS] Async dispatch verified: host returns while command in-flight.
+
+[Gate 2/8] NULL_EVENT_SMALL_WORKLOAD_COMPLETES (64x64x64)...
+  [PASS] Small workload returned AC_SUCCESS.
+
+[Gate 3/8] NULL_EVENT_LONG_WORKLOAD_BLOCKS & RESIDUAL QUEUE PROBE (1024x1024x1024)...
+  [BENCHMARK] Baseline 1024x1024 GPU duration (median of 3): 64214 us (64214, 64210, 64214)
+  [MEASUREMENT] ac_ops_gemm_fp32(out_event=NULL) host duration (median of 3): 281853 us (293575, 71537, 281853)
+  [PROBE] Residual clFinish() duration immediately after return: 20 us (25, 19, 20)
+  [RATIO] Host/GPU timing ratio: 4.389
+  [PASS] STRICT SYNCHRONOUS: Host blocked until GPU finished (ratio=4.389 >= 0.80, residual=20 us < 500 us)
+
+[Gate 4/8] NULL_EVENT_NO_IMPLICIT_BLOCKING_READ...
+  [PASS] Timing measurement above did not invoke ac_buffer_sync_to_host() or clEnqueueMapBuffer.
+
+[Gate 5/8] NULL_EVENT_RESULT_VISIBLE_AFTER_RETURN...
+  [PASS] Numerical output 100% validated (2048.0f), mismatches=0
+
+[Gate 6/8] SYNC_ENQUEUE_FAILURE_DOES_NOT_WAIT...
+  [PASS] Enqueue failure rejected immediately in 1 us without waiting (res=-401)
+
+[Gate 7/8] SYNC_WAIT_FAILURE_POLICY_DEFINED...
+  [PASS] Error mapping verified: wait errors are never lost or converted to fake timeouts.
+
+[Gate 8/8] ASYNC_FAIL_CLOSED_CLEAR_OUT_EVENT...
+  [PASS] out_event cleared to NULL on failure
+
+===================================================================
+[RESULT] P0-2A ALL 8 GATES PASSED (Strict Synchronous Contract Verified)
+===================================================================
+SYNC_TEST_EXIT_CODE=0
