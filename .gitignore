@@ -1,0 +1,7 @@
+# Build directories
+build*/
+build-*
+
+# Generated consolidated audits
+ameva_compute_consolidated.md
+*.md.tmp
