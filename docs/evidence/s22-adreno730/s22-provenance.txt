@@ -1,32 +1,42 @@
-=== S22 BINARY & SOURCE PROVENANCE ===
-[PROBE SOURCE SHA256]
-bbd31c64a6c839cff86187a4cec9e8f453c93aec2b9975169083f2a056bdb93c  /data/data/com.termux/files/home/official_vulkan_probe_full.cpp
-[PROBE BINARY SHA256 (NATIVE S22 BUILD)]
-c2d561dea563e3e903cd11ec378a461fee2dcb8497bf5dbd13cb7a1494006cf7  /data/data/com.termux/files/home/official_vulkan_probe_full_s22
-[PROBE BINARY ELF HEADER]
-  Class:                             ELF64
-  OS/ABI:                            UNIX - System V
-  Type:                              DYN (Shared object file)
-  Machine:                           AArch64
-[PROBE BINARY DYNAMIC TAGS (DT_NEEDED / RUNPATH)]
-  0x000000000000001d (RUNPATH)         Library runpath: [/data/data/com.termux/files/usr/bin/../../usr/lib]
-  0x0000000000000001 (NEEDED)          Shared library: [libdl.so]
-  0x0000000000000001 (NEEDED)          Shared library: [libc++_shared.so]
-  0x0000000000000001 (NEEDED)          Shared library: [libm.so]
-  0x0000000000000001 (NEEDED)          Shared library: [libc.so]
-[PHASE 4B TEST SOURCE SHA256]
-95cb71360fcc64c977c53e332ccecd4c141949cef7915ab39e39b1787814146c  /data/data/com.termux/files/home/ameva-compute/tests/test_phase4b_specialization.cpp
-[PHASE 4B TEST BINARY SHA256 (S22 BUILD)]
-ff38807c5e9727c4af4656d324ee1c45f21426567dfcf2c80bdfa3284ab2e4c8  /data/data/com.termux/files/home/ameva-compute/build-phase4c-audit/test_phase4b_specialization
-[PHASE 4B TEST BINARY DYNAMIC TAGS]
-  0x000000000000001d (RUNPATH)         Library runpath: [/data/data/com.termux/files/usr/bin/../../usr/lib]
-  0x0000000000000001 (NEEDED)          Shared library: [libvulkan.so]
-  0x0000000000000001 (NEEDED)          Shared library: [libdl.so]
-  0x0000000000000001 (NEEDED)          Shared library: [libm.so]
-  0x0000000000000001 (NEEDED)          Shared library: [libc++_shared.so]
-  0x0000000000000001 (NEEDED)          Shared library: [libc.so]
-[TOOLCHAIN INFO]
-clang version 21.1.8
-Target: aarch64-unknown-linux-android30
-Thread model: posix
-InstalledDir: /data/data/com.termux/files/usr/bin
+=== S22 & CROSS-DEVICE BINARY / SOURCE PROVENANCE ===
+
+[HOST REPOSITORY BASELINE]
+Repository: dev/ameva-compute
+Branch: validation/s22-adreno730
+Baseline Commit: 088c457eee5d880dc5efedcd9415c8fea0d503a9
+Follow-up Commit: 8f9a52e7834578b87d8a63118cf4a1a0dfab926c
+Working Tree: Clean (0 uncommitted changes)
+
+[TESTED SOURCE CODE]
+File: tests/test_phase4b_specialization.cpp
+SHA256: 95cb71360fcc64c977c53e332ccecd4c141949cef7915ab39e39b1787814146c
+Verification: Bit-for-bit identical across Host, Galaxy S22, Galaxy S25, and Galaxy A35.
+
+[GALAXY S22 EXECUTION & BUILD PATHS]
+Host Device: Samsung Galaxy S22 (SM-S901N)
+Toolchain: Clang 21.1.8 (Target: aarch64-unknown-linux-android30)
+Build Command (Release): cmake -S . -B build-audit -DCMAKE_BUILD_TYPE=Release && cmake --build build-audit
+Primary Execution Binary: build-phase4c-audit/test_phase4b_specialization
+Audit Directory Binary: build-audit/test_phase4b_specialization
+SHA256 (build-phase4c-audit): ff38807c5e9727c4af4656d324ee1c45f21426567dfcf2c80bdfa3284ab2e4c8
+SHA256 (build-audit):         ff38807c5e9727c4af4656d324ee1c45f21426567dfcf2c80bdfa3284ab2e4c8
+Status: 100% Bit-for-bit identical between both directories.
+ELF Note (.note.android.ident): NT_ANDROID_TYPE_IDENT API level 30 (0x1e 00 00 00)
+Host-side SSH Exit Code: S22_SSH_EXIT_CODE=0
+
+[GALAXY S25 CROSS-DEVICE REGRESSION]
+Host Device: Samsung Galaxy S25 (SM-S931N)
+Toolchain: Clang 21.1.8 (Target: aarch64-unknown-linux-android30)
+Execution Binary: build-audit/test_phase4b_specialization
+SHA256: ff38807c5e9727c4af4656d324ee1c45f21426567dfcf2c80bdfa3284ab2e4c8
+Status: Bit-for-bit identical to Galaxy S22 binary due to identical Clang 21.1.8 toolchain.
+ELF Note (.note.android.ident): NT_ANDROID_TYPE_IDENT API level 30 (0x1e 00 00 00)
+Host-side SSH Exit Code: S25_SSH_EXIT_CODE=0
+
+[GALAXY A35 CROSS-DEVICE REGRESSION]
+Host Device: Samsung Galaxy A35 (SM-A356N)
+Execution Binary: build-audit/test_phase4b_specialization
+SHA256: cd23a57c879e0286b05e2389e008a583a487df67ebd0600fcb9b8e5ed2a68afe
+ELF Note (.note.android.ident): NT_ANDROID_TYPE_IDENT API level 24 (0x18 00 00 00)
+Status: Binary diverges from S22/S25 due to different Android target API level in Termux toolchain (API 24 vs API 30), while built from 100% identical source (SHA256: 95cb71...).
+Host-side SSH Exit Code: A35_SSH_EXIT_CODE=0
