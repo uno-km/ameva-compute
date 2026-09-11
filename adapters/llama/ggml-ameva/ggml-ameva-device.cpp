@@ -1,3 +1,4 @@
+
 #include "ggml-ameva.h"
 #include "ggml-backend-impl.h"
 #include "ac_runtime.h"
@@ -9,6 +10,69 @@
 #include <atomic>
 #include <mutex>
 #include <vector>
+
+// Detailed Sub-Microsecond Decompositions (Nanoseconds)
+static std::atomic<uint64_t> g_cpu_dequant_time_ns{0};
+static std::atomic<uint64_t> g_q5_raw_upload_time_ns{0};
+static std::atomic<uint64_t> g_gpu_dequant_dispatch_time_ns{0};
+static std::atomic<uint64_t> g_gpu_dequant_wait_time_ns{0};
+static std::atomic<uint64_t> g_f32_temp_allocation_time_ns{0};
+static std::atomic<uint64_t> g_fused_dispatch_submit_time_ns{0};
+static std::atomic<uint64_t> g_fused_event_wait_time_ns{0};
+static std::atomic<uint64_t> g_output_readback_time_ns{0};
+static std::atomic<int64_t>  g_fused_q5_0_dispatch_count{0};
+
+extern "C" {
+int64_t ggml_backend_ameva_get_fused_q5_0_dispatch_count(void) { return g_fused_q5_0_dispatch_count.load(); }
+void ameva_increment_fused_q5_0_dispatch_count(void) { g_fused_q5_0_dispatch_count.fetch_add(1, std::memory_order_relaxed); }
+
+void ameva_record_detailed_timing_ns(
+    uint64_t q5_raw_upload_ns,
+    uint64_t gpu_dequant_disp_ns,
+    uint64_t gpu_dequant_wait_ns,
+    uint64_t f32_temp_alloc_ns,
+    uint64_t fused_dispatch_submit_ns,
+    uint64_t fused_event_wait_ns,
+    uint64_t output_readback_ns
+) {
+    g_q5_raw_upload_time_ns += q5_raw_upload_ns;
+    g_gpu_dequant_dispatch_time_ns += gpu_dequant_disp_ns;
+    g_gpu_dequant_wait_time_ns += gpu_dequant_wait_ns;
+    g_f32_temp_allocation_time_ns += f32_temp_alloc_ns;
+    g_fused_dispatch_submit_time_ns += fused_dispatch_submit_ns;
+    g_fused_event_wait_time_ns += fused_event_wait_ns;
+    g_output_readback_time_ns += output_readback_ns;
+}
+
+uint64_t ggml_backend_ameva_get_cpu_dequant_time_ns(void) { return g_cpu_dequant_time_ns.load(); }
+uint64_t ggml_backend_ameva_get_q5_raw_upload_time_ns(void) { return g_q5_raw_upload_time_ns.load(); }
+uint64_t ggml_backend_ameva_get_gpu_dequant_dispatch_time_ns(void) { return g_gpu_dequant_dispatch_time_ns.load(); }
+uint64_t ggml_backend_ameva_get_gpu_dequant_wait_time_ns(void) { return g_gpu_dequant_wait_time_ns.load(); }
+uint64_t ggml_backend_ameva_get_f32_temp_allocation_time_ns(void) { return g_f32_temp_allocation_time_ns.load(); }
+uint64_t ggml_backend_ameva_get_fused_dispatch_submit_time_ns(void) { return g_fused_dispatch_submit_time_ns.load(); }
+uint64_t ggml_backend_ameva_get_fused_event_wait_time_ns(void) { return g_fused_event_wait_time_ns.load(); }
+uint64_t ggml_backend_ameva_get_output_readback_time_ns(void) { return g_output_readback_time_ns.load(); }
+uint64_t ggml_backend_ameva_get_total_mul_mat_time_ns(void) {
+    return g_q5_raw_upload_time_ns.load() +
+           g_gpu_dequant_dispatch_time_ns.load() +
+           g_gpu_dequant_wait_time_ns.load() +
+           g_f32_temp_allocation_time_ns.load() +
+           g_fused_dispatch_submit_time_ns.load() +
+           g_fused_event_wait_time_ns.load() +
+           g_output_readback_time_ns.load();
+}
+
+uint64_t ggml_backend_ameva_get_cpu_dequant_time_us(void) { return g_cpu_dequant_time_ns.load() / 1000ULL; }
+uint64_t ggml_backend_ameva_get_q5_raw_upload_time_us(void) { return g_q5_raw_upload_time_ns.load() / 1000ULL; }
+uint64_t ggml_backend_ameva_get_gpu_dequant_dispatch_time_us(void) { return g_gpu_dequant_dispatch_time_ns.load() / 1000ULL; }
+uint64_t ggml_backend_ameva_get_gpu_dequant_wait_time_us(void) { return g_gpu_dequant_wait_time_ns.load() / 1000ULL; }
+uint64_t ggml_backend_ameva_get_f32_temp_allocation_time_us(void) { return g_f32_temp_allocation_time_ns.load() / 1000ULL; }
+uint64_t ggml_backend_ameva_get_sgemm_dispatch_time_us(void) { return g_fused_dispatch_submit_time_ns.load() / 1000ULL; }
+uint64_t ggml_backend_ameva_get_sgemm_wait_time_us(void) { return g_fused_event_wait_time_ns.load() / 1000ULL; }
+uint64_t ggml_backend_ameva_get_output_readback_time_us(void) { return g_output_readback_time_ns.load() / 1000ULL; }
+uint64_t ggml_backend_ameva_get_total_mul_mat_time_us(void) { return ggml_backend_ameva_get_total_mul_mat_time_ns() / 1000ULL; }
+}
+
 
 extern struct ggml_backend_buffer_type g_ameva_buft;
 
@@ -101,12 +165,6 @@ void ameva_record_timing_and_shape(
     sm.total_us = (dequant_us + gpu_dequant_us + upload_us + sgemm_us + d2h_us);
     s_shape_metrics.push_back(sm);
 }
-
-uint64_t ggml_backend_ameva_get_cpu_dequant_time_us(void) { return g_ameva_cpu_dequant_time_us.load(); }
-uint64_t ggml_backend_ameva_get_gpu_dequant_time_us(void) { return g_ameva_gpu_dequant_time_us.load(); }
-uint64_t ggml_backend_ameva_get_host_to_device_time_us(void) { return g_ameva_host_to_device_time_us.load(); }
-uint64_t ggml_backend_ameva_get_gpu_sgemm_time_us(void) { return g_ameva_gpu_sgemm_time_us.load(); }
-uint64_t ggml_backend_ameva_get_device_to_host_time_us(void) { return g_ameva_device_to_host_time_us.load(); }
 }
 
 #ifndef GGML_AMEVA_BUILD_COMMIT
@@ -167,6 +225,15 @@ void ggml_backend_ameva_reset_counters(void) {
     g_ameva_host_to_device_time_us.store(0);
     g_ameva_gpu_sgemm_time_us.store(0);
     g_ameva_device_to_host_time_us.store(0);
+    g_fused_q5_0_dispatch_count.store(0);
+    g_cpu_dequant_time_ns.store(0);
+    g_q5_raw_upload_time_ns.store(0);
+    g_gpu_dequant_dispatch_time_ns.store(0);
+    g_gpu_dequant_wait_time_ns.store(0);
+    g_f32_temp_allocation_time_ns.store(0);
+    g_fused_dispatch_submit_time_ns.store(0);
+    g_fused_event_wait_time_ns.store(0);
+    g_output_readback_time_ns.store(0);
     {
         std::lock_guard<std::mutex> lock(s_shape_mutex);
         s_shape_metrics.clear();
@@ -329,16 +396,28 @@ static bool ggml_backend_ameva_device_supports_op(ggml_backend_dev_t dev, const 
 
     int64_t K = src0->ne[0];
     int64_t N = src0->ne[1];
+    int64_t M = src1->ne[1];
 
-    // 6. Q5_0 alignment and shape contract checks
+    if (K <= 0 || N <= 0 || M <= 0) {
+        if (s_query_log_count <= 30) fprintf(stderr, "ggml-ameva [REJECT]: zero or negative dims (K=%ld N=%ld M=%ld)\n", (long)K, (long)N, (long)M);
+        return false;
+    }
+
+    // 6. Q5_0 alignment, stride, and shape contract checks
     if (src0->type == GGML_TYPE_Q5_0) {
         if (K % 32 != 0) {
-            if (s_query_log_count <= 30) fprintf(stderr, "ggml-ameva [REJECT]: Q5_0 K %% 32 != 0\n");
+            if (s_query_log_count <= 30) fprintf(stderr, "ggml-ameva [REJECT]: Q5_0 K %% 32 != 0 (K=%ld)\n", (long)K);
             return false;
         }
-        size_t expected_q5_row_bytes = (size_t)(K / 32) * 22;
+        const size_t q5_block_bytes = ggml_type_size(GGML_TYPE_Q5_0);
+        const size_t expected_q5_row_bytes = (size_t)(K / 32) * q5_block_bytes;
         if (ggml_row_size(src0->type, K) != expected_q5_row_bytes) {
-            if (s_query_log_count <= 30) fprintf(stderr, "ggml-ameva [REJECT]: Q5_0 row size mismatch\n");
+            if (s_query_log_count <= 30) fprintf(stderr, "ggml-ameva [REJECT]: Q5_0 row size mismatch (%zu vs %zu)\n", ggml_row_size(src0->type, K), expected_q5_row_bytes);
+            return false;
+        }
+        if (src0->nb[0] != q5_block_bytes || src0->nb[1] != expected_q5_row_bytes) {
+            if (s_query_log_count <= 30) fprintf(stderr, "ggml-ameva [REJECT]: Q5_0 stride mismatch (nb0=%zu vs %zu, nb1=%zu vs %zu)\n",
+                (size_t)src0->nb[0], q5_block_bytes, (size_t)src0->nb[1], expected_q5_row_bytes);
             return false;
         }
     }
@@ -481,6 +560,7 @@ extern "C" __attribute__((destructor)) void ameva_plugin_diagnostics_dump(void) 
         fprintf(stderr, "TOTAL_AMEVA_DISPATCH_COUNT=%ld\n", (long)total_dispatch);
         fprintf(stderr, "AMEVA_Q5_0_EXECUTION_COUNT=%ld\n", (long)g_ameva_q5_0_execution_count.load());
         fprintf(stderr, "AMEVA_NON_Q5_0_EXECUTION_COUNT=%ld\n", (long)g_ameva_non_q5_0_execution_count.load());
+        fprintf(stderr, "FUSED_Q5_0_MATMUL_DISPATCH_COUNT=%ld\n", (long)g_fused_q5_0_dispatch_count.load());
         fprintf(stderr, "CPU_RETAINED_TYPE_COUNTS=f32:121, q8_0:13, q4_K:12, q6_K:12\n");
         fprintf(stderr, "Q5_0_CPU_DEQUANT_COUNT=%ld\n", (long)g_ameva_q5_0_cpu_dequant_count.load());
         fprintf(stderr, "F32_GPU_SGEMM_DISPATCH_COUNT=%ld\n", (long)g_ameva_f32_gpu_sgemm_dispatch_count.load());
@@ -505,10 +585,19 @@ extern "C" __attribute__((destructor)) void ameva_plugin_diagnostics_dump(void) 
         fprintf(stderr, "FULL_RESOURCE_LIFECYCLE_BALANCED=%s\n", balanced ? "true" : "false");
         fprintf(stderr, "FORCED_FAILURE_LIFECYCLE_BALANCED=%s\n", balanced ? "true" : "false");
 
-        uint64_t dequant_us = g_ameva_cpu_dequant_time_us.load();
-        uint64_t h2d_us = g_ameva_host_to_device_time_us.load();
-        uint64_t sgemm_us = g_ameva_gpu_sgemm_time_us.load();
-        uint64_t d2h_us = g_ameva_device_to_host_time_us.load();
+        fprintf(stderr, "Q5_RAW_UPLOAD_TIME_NS=%llu\n", (unsigned long long)g_q5_raw_upload_time_ns.load());
+        fprintf(stderr, "GPU_DEQUANT_DISPATCH_TIME_NS=%llu\n", (unsigned long long)g_gpu_dequant_dispatch_time_ns.load());
+        fprintf(stderr, "GPU_DEQUANT_WAIT_TIME_NS=%llu\n", (unsigned long long)g_gpu_dequant_wait_time_ns.load());
+        fprintf(stderr, "F32_TEMP_ALLOCATION_TIME_NS=%llu\n", (unsigned long long)g_f32_temp_allocation_time_ns.load());
+        fprintf(stderr, "FUSED_DISPATCH_SUBMIT_TIME_NS=%llu\n", (unsigned long long)g_fused_dispatch_submit_time_ns.load());
+        fprintf(stderr, "FUSED_EVENT_WAIT_TIME_NS=%llu\n", (unsigned long long)g_fused_event_wait_time_ns.load());
+        fprintf(stderr, "OUTPUT_READBACK_TIME_NS=%llu\n", (unsigned long long)g_output_readback_time_ns.load());
+        fprintf(stderr, "TOTAL_MUL_MAT_TIME_NS=%llu\n", (unsigned long long)ggml_backend_ameva_get_total_mul_mat_time_ns());
+
+        uint64_t dequant_us = g_cpu_dequant_time_ns.load() / 1000ULL;
+        uint64_t h2d_us = g_q5_raw_upload_time_ns.load() / 1000ULL;
+        uint64_t sgemm_us = (g_fused_dispatch_submit_time_ns.load() + g_fused_event_wait_time_ns.load()) / 1000ULL;
+        uint64_t d2h_us = g_output_readback_time_ns.load() / 1000ULL;
         fprintf(stderr, "Q5_0_CPU_DEQUANT_TIME_US=%llu\n", (unsigned long long)dequant_us);
         fprintf(stderr, "HOST_TO_DEVICE_UPLOAD_TIME_US=%llu\n", (unsigned long long)h2d_us);
         fprintf(stderr, "GPU_SGEMM_TIME_US=%llu\n", (unsigned long long)sgemm_us);

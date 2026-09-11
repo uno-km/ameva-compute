@@ -547,9 +547,10 @@ int main(int argc, char** argv) {
     printf("REAL_QWEN_GRAPH_EXECUTION=false\n");
     printf("REAL_QWEN_WEIGHT_SYNTHETIC_ACTIVATION_SUBGRAPH_PARITY=PASS_REPORTED\n");
     printf("Q5_0_INPUT_ACCEPTED=true\n");
-    printf("Q5_0_CPU_DEQUANT=true\n");
-    printf("Q5_0_GPU_NATIVE=false\n");
-    printf("GPU_COMPUTE_PORTION=F32_SGEMM_ONLY\n");
+    printf("Q5_0_CPU_DEQUANT=false\n");
+    printf("Q5_0_GPU_NATIVE=true\n");
+    printf("FUSED_Q5_0_MATMUL_KERNEL=true\n");
+    printf("GPU_COMPUTE_PORTION=FUSED_Q5_0_MATMUL\n");
 
     std::vector<float> host_q_act(q_M * q_K);
     for (size_t i = 0; i < (size_t)q_M * q_K; ++i) {
@@ -585,6 +586,8 @@ int main(int argc, char** argv) {
 
     int64_t dequant_count_before = ggml_backend_ameva_get_q5_0_cpu_dequant_count();
     int64_t gpu_dequant_before = ggml_backend_ameva_get_q5_0_gpu_dequant_count();
+    int64_t fused_count_before = ggml_backend_ameva_get_fused_q5_0_dispatch_count();
+    int64_t f32_temp_alloc_before = ggml_backend_ameva_get_q5_0_staging_alloc_count();
     int64_t sgemm_count_before = ggml_backend_ameva_get_f32_gpu_sgemm_dispatch_count();
 
     enum ggml_status qwen_st = ggml_backend_graph_compute(backend, gf_qwen);
@@ -597,12 +600,29 @@ int main(int argc, char** argv) {
 
     int64_t dequant_count_after = ggml_backend_ameva_get_q5_0_cpu_dequant_count();
     int64_t gpu_dequant_after = ggml_backend_ameva_get_q5_0_gpu_dequant_count();
+    int64_t fused_count_after = ggml_backend_ameva_get_fused_q5_0_dispatch_count();
+    int64_t f32_temp_alloc_after = ggml_backend_ameva_get_q5_0_staging_alloc_count();
     int64_t sgemm_count_after = ggml_backend_ameva_get_f32_gpu_sgemm_dispatch_count();
 
-    printf("Q5_0_CPU_DEQUANT_COUNT=%lld\n", (long long)(dequant_count_after - dequant_count_before));
-    printf("Q5_0_GPU_DEQUANT_COUNT=%lld\n", (long long)(gpu_dequant_after - gpu_dequant_before));
-    printf("F32_GPU_SGEMM_DISPATCH_COUNT=%lld\n", (long long)(sgemm_count_after - sgemm_count_before));
-    printf("QWEN_AMEVA_DISPATCH_COUNT=%lld\n", (long long)(sgemm_count_after - sgemm_count_before));
+    const int64_t cpu_dequant_delta = dequant_count_after - dequant_count_before;
+    const int64_t gpu_dequant_delta = gpu_dequant_after - gpu_dequant_before;
+    const int64_t fused_delta = fused_count_after - fused_count_before;
+    const int64_t f32_temp_alloc_delta = f32_temp_alloc_after - f32_temp_alloc_before;
+    const int64_t sgemm_delta = sgemm_count_after - sgemm_count_before;
+
+    const bool fused_path_pass = (fused_delta > 0) &&
+                                 (gpu_dequant_delta == 0) &&
+                                 (f32_temp_alloc_delta == 0) &&
+                                 (cpu_dequant_delta == 0);
+
+    printf("Q5_0_CPU_DEQUANT_COUNT=%lld\n", (long long)cpu_dequant_delta);
+    printf("Q5_0_GPU_DEQUANT_COUNT=%lld\n", (long long)gpu_dequant_delta);
+    printf("FUSED_Q5_0_MATMUL_DISPATCH_COUNT=%lld\n", (long long)fused_delta);
+    printf("F32_WEIGHT_TEMP_ALLOC_COUNT=%lld\n", (long long)f32_temp_alloc_delta);
+    printf("FULL_F32_WEIGHT_TEMP_BUFFER=%s\n", f32_temp_alloc_delta == 0 ? "false" : "true");
+    printf("FUSED_Q5_0_MATMUL=%s\n", fused_path_pass ? "PASS" : "FAIL");
+    printf("F32_GPU_SGEMM_DISPATCH_COUNT=%lld\n", (long long)sgemm_delta);
+    printf("QWEN_AMEVA_DISPATCH_COUNT=%lld\n", (long long)(fused_delta + sgemm_delta));
 
     // 2. Compute Independent Reference via Official Upstream GGML CPU Backend
     ggml_backend_t cpu_backend = ggml_backend_cpu_init();
@@ -687,7 +707,8 @@ int main(int argc, char** argv) {
                        (max_abs_err <= 0.05) &&
                        (nan_count == 0) &&
                        (inf_count == 0) &&
-                       (mismatches_005 == 0);
+                       (mismatches_005 == 0) &&
+                       fused_path_pass;
 
     printf("QWEN_NUMERICAL_PARITY=%s\n", parity_pass ? "PASS" : "FAIL");
 
@@ -697,7 +718,7 @@ int main(int argc, char** argv) {
     ac_gguf_close(model);
 
     if (!parity_pass) {
-        printf("FAIL: Qwen numerical parity criteria not met\n");
+        printf("FAIL: Qwen numerical parity or fused execution criteria not met\n");
         return 1;
     }
 

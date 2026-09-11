@@ -4,7 +4,7 @@
 #include "ac_runtime.h"
 #include "ac_dispatch.h"
 #include "ggml_mul_mat_spv.h"
-#include "q5_0_dequant_spv.h"
+#include "ggml_mul_mat_fused_q5_0_spv.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -15,9 +15,20 @@
 #include <vector>
 #include <chrono>
 
+struct FusedQ5MatMulPushConstants {
+    uint32_t m;
+    uint32_t k;
+    uint32_t n;
+    uint32_t src0_byte_offset;
+    uint32_t src1_element_offset;
+    uint32_t dst_element_offset;
+};
+static_assert(sizeof(FusedQ5MatMulPushConstants) == 24, "FusedQ5MatMulPushConstants size mismatch");
+
 void ameva_increment_gpu_op_count(void);
 void ameva_increment_q5_0_cpu_dequant_count(void);
 void ameva_increment_q5_0_gpu_dequant_count(void);
+void ameva_increment_fused_q5_0_dispatch_count(void);
 void ameva_increment_f32_gpu_sgemm_dispatch_count(void);
 void ameva_increment_context_create_count(void);
 void ameva_increment_context_destroy_count(void);
@@ -186,11 +197,12 @@ static AcKernel* ameva_get_mul_mat_kernel() {
 }
 
 
-static AcKernel* s_kernel_dequant = nullptr;
+static AcKernel* s_kernel_fused_q5_0 = nullptr;
 
-static AcKernel* ameva_get_q5_0_dequant_kernel() {
+static AcKernel* ameva_get_fused_q5_0_matmul_kernel() {
     std::lock_guard<std::mutex> lock(s_mutex);
-    if (!s_kernel_dequant) {
+    if (!s_kernel_fused_q5_0) {
+        bool created_context_here = false;
         if (!s_ctx) {
             AcContextDesc cdesc = { AC_ABI_VERSION, sizeof(AcContextDesc), AC_BACKEND_VULKAN, 0 };
             AcResult res = ac_runtime_context_create(&cdesc, &s_ctx);
@@ -198,23 +210,25 @@ static AcKernel* ameva_get_q5_0_dequant_kernel() {
                 fprintf(stderr, "ggml-ameva: failed to create Vulkan AcContext (code %d)\n", res);
                 return nullptr;
             }
+            created_context_here = true;
             ameva_increment_context_create_count();
         }
 
-        static const AcRuntimeBindingDesc kDequantBindings[2] = {
+        static const AcRuntimeBindingDesc kFusedBindings[3] = {
             { 0, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE },
-            { 1, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE }
+            { 1, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE },
+            { 2, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE }
         };
 
         AcKernelRuntimeMetadata meta = {
-            "q5_0_dequant",
+            "ggml_mul_mat_fused_q5_0",
             "main",
-            2,
-            kDequantBindings,
-            12, // 3 x uint32: num_blocks, byte_offset_src, elem_offset_dst
-            { 64, 1, 1 },
+            3,
+            kFusedBindings,
+            sizeof(FusedQ5MatMulPushConstants),
+            { 16, 16, 1 },
             0,
-            kQ5_0DequantSpvSha256,
+            kGgmlMulMatFusedQ5_0SpvSha256,
             0,
             nullptr
         };
@@ -222,29 +236,34 @@ static AcKernel* ameva_get_q5_0_dequant_kernel() {
         AcKernelDesc kdesc = {
             AC_ABI_VERSION,
             sizeof(AcKernelDesc),
-            kQ5_0DequantSpv,
-            kQ5_0DequantSpvByteSize,
+            kGgmlMulMatFusedQ5_0Spv,
+            kGgmlMulMatFusedQ5_0SpvByteSize,
             &meta,
             0,
             nullptr
         };
 
-        AcResult res = ac_runtime_kernel_create(s_ctx, &kdesc, &s_kernel_dequant);
+        AcResult res = ac_runtime_kernel_create(s_ctx, &kdesc, &s_kernel_fused_q5_0);
         if (res != AC_SUCCESS) {
-            fprintf(stderr, "ggml-ameva: failed to create q5_0_dequant AcKernel (code %d)\n", res);
+            fprintf(stderr, "ggml-ameva: failed to create fused Q5_0 MatMul AcKernel (code %d)\n", res);
+            if (created_context_here && s_ctx) {
+                ac_runtime_context_destroy(s_ctx);
+                s_ctx = nullptr;
+                ameva_increment_context_destroy_count();
+            }
             return nullptr;
         }
         ameva_increment_kernel_create_count();
     }
-    return s_kernel_dequant;
+    return s_kernel_fused_q5_0;
 }
 
 void ggml_backend_ameva_teardown(void) {
     std::lock_guard<std::mutex> lock(s_mutex);
     ameva_buffer_teardown();
-    if (s_kernel_dequant) {
-        ac_runtime_kernel_destroy(s_kernel_dequant);
-        s_kernel_dequant = nullptr;
+    if (s_kernel_fused_q5_0) {
+        ac_runtime_kernel_destroy(s_kernel_fused_q5_0);
+        s_kernel_fused_q5_0 = nullptr;
         ameva_increment_kernel_destroy_count();
     }
     if (s_kernel) {
@@ -370,20 +389,22 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
         uint32_t off_src1 = 0;
         uint32_t off_dst  = 0;
 
+        AcBuffer* raw_q5_buf = nullptr;
         AcBuffer* temp_src0 = nullptr;
         AcBuffer* temp_src1 = nullptr;
         AcBuffer* temp_dst  = nullptr;
-        bool is_q5_0_staging = (src0->type == GGML_TYPE_Q5_0);
 
         // Cleanup lambda
         auto cleanup_temps = [&]() {
+            if (raw_q5_buf) {
+                ac_runtime_buffer_destroy(raw_q5_buf);
+                raw_q5_buf = nullptr;
+                ameva_increment_buffer_destroy_count();
+            }
             if (temp_src0) {
                 ac_runtime_buffer_destroy(temp_src0);
                 temp_src0 = nullptr;
                 ameva_increment_buffer_destroy_count();
-                if (is_q5_0_staging) {
-                    ameva_increment_q5_0_staging_free_count();
-                }
             }
             if (temp_src1) {
                 ac_runtime_buffer_destroy(temp_src1);
@@ -397,11 +418,14 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
             }
         };
 
-        uint64_t node_dequant_us = 0;
-        uint64_t node_gpu_dequant_us = 0;
-        uint64_t node_upload_us = 0;
-        uint64_t node_sgemm_us = 0;
-        uint64_t node_readback_us = 0;
+        using Clock = std::chrono::steady_clock;
+        uint64_t node_q5_raw_upload_ns = 0;
+        uint64_t node_gpu_dequant_disp_ns = 0;
+        uint64_t node_gpu_dequant_wait_ns = 0;
+        uint64_t node_f32_temp_alloc_ns = 0;
+        uint64_t node_fused_dispatch_submit_ns = 0;
+        uint64_t node_fused_event_wait_ns = 0;
+        uint64_t node_output_readback_ns = 0;
 
         // 1. Resolve SRC0
         if (src0->type == GGML_TYPE_Q5_0) {
@@ -411,14 +435,18 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
                 return GGML_STATUS_FAILED;
             }
 
-            // Q5_0 GPU-Native Dequantization -> GPU-resident F32 buffer
+            constexpr size_t kLoadPadding = 4;
+            const size_t q5_block_bytes = ggml_type_size(GGML_TYPE_Q5_0); // 22 bytes
             size_t num_blocks = ((size_t)K * N) / 32;
-            size_t q5_raw_bytes = num_blocks * 22;
-            size_t f32_bytes = (size_t)K * N * sizeof(float);
+            size_t raw_q5_bytes = num_blocks * q5_block_bytes;
 
-            // Step 1a: Allocate GPU Raw Q5_0 buffer and upload raw Q5_0 bytes
-            AcBuffer* raw_q5_buf = nullptr;
-            AcBufferDesc bdesc_q5 = { AC_ABI_VERSION, sizeof(AcBufferDesc), (q5_raw_bytes + 63) & ~63, AC_BUFFER_USAGE_STORAGE, 0 };
+            if (raw_q5_bytes > SIZE_MAX - kLoadPadding) {
+                return GGML_STATUS_FAILED;
+            }
+            const size_t padded_q5_bytes = raw_q5_bytes + kLoadPadding;
+            const size_t alloc_bytes = (padded_q5_bytes + 63) & ~63;
+
+            AcBufferDesc bdesc_q5 = { AC_ABI_VERSION, sizeof(AcBufferDesc), alloc_bytes, AC_BUFFER_USAGE_STORAGE, 0 };
             if (ac_runtime_buffer_create(ctx, &bdesc_q5, &raw_q5_buf) != AC_SUCCESS) {
                 cleanup_temps();
                 return GGML_STATUS_FAILED;
@@ -426,101 +454,42 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
             ameva_increment_buffer_create_count();
 
             void* q5_map_ptr = nullptr;
-            auto t_up0_start = std::chrono::high_resolution_clock::now();
+            auto t_up0_start = Clock::now();
             AcResult mres = ac_runtime_buffer_get_mapped_ptr(raw_q5_buf, &q5_map_ptr);
             if (mres != AC_SUCCESS || !q5_map_ptr) {
                 ac_runtime_buffer_destroy(raw_q5_buf);
+                raw_q5_buf = nullptr;
                 ameva_increment_buffer_destroy_count();
                 cleanup_temps();
                 return GGML_STATUS_FAILED;
             }
 
-            memcpy(q5_map_ptr, src0->data, q5_raw_bytes);
+            memset(q5_map_ptr, 0, alloc_bytes);
+            memcpy(q5_map_ptr, src0->data, raw_q5_bytes);
 
             // Failure Injection: FLUSH_SRC0_FAIL
             if (fi == AMEVA_FAIL_FLUSH_SRC0) {
                 fprintf(stderr, "ggml-ameva [FAILURE_INJECTION]: FLUSH_SRC0_FAIL triggered\n");
                 ac_runtime_buffer_destroy(raw_q5_buf);
+                raw_q5_buf = nullptr;
                 ameva_increment_buffer_destroy_count();
                 cleanup_temps();
                 return GGML_STATUS_FAILED;
             }
 
-            if (ac_runtime_buffer_flush(raw_q5_buf, 0, q5_raw_bytes) != AC_SUCCESS) {
+            if (ac_runtime_buffer_flush(raw_q5_buf, 0, alloc_bytes) != AC_SUCCESS) {
                 ac_runtime_buffer_destroy(raw_q5_buf);
+                raw_q5_buf = nullptr;
                 ameva_increment_buffer_destroy_count();
                 cleanup_temps();
                 return GGML_STATUS_FAILED;
             }
-            auto t_up0_end = std::chrono::high_resolution_clock::now();
-            node_upload_us += std::chrono::duration_cast<std::chrono::microseconds>(t_up0_end - t_up0_start).count();
+            auto t_up0_end = Clock::now();
+            node_q5_raw_upload_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t_up0_end - t_up0_start).count();
 
-            // Step 1b: Allocate GPU F32 destination buffer
-            AcBufferDesc bdesc_f32 = { AC_ABI_VERSION, sizeof(AcBufferDesc), (f32_bytes + 63) & ~63, AC_BUFFER_USAGE_STORAGE, 0 };
-            if (ac_runtime_buffer_create(ctx, &bdesc_f32, &temp_src0) != AC_SUCCESS) {
-                ac_runtime_buffer_destroy(raw_q5_buf);
-                ameva_increment_buffer_destroy_count();
-                cleanup_temps();
-                return GGML_STATUS_FAILED;
-            }
-            ameva_increment_buffer_create_count();
-            ameva_increment_q5_0_staging_alloc_count();
-
-            // Step 1c: Dispatch GPU Q5_0 Dequant Kernel
-            AcKernel* deq_kernel = ameva_get_q5_0_dequant_kernel();
-            if (!deq_kernel) {
-                ac_runtime_buffer_destroy(raw_q5_buf);
-                ameva_increment_buffer_destroy_count();
-                cleanup_temps();
-                return GGML_STATUS_FAILED;
-            }
-
-            uint32_t deq_pc[3] = { (uint32_t)num_blocks, 0, 0 };
-            AcBuffer* deq_bufs[2] = { raw_q5_buf, temp_src0 };
-            uint32_t grid_blocks = ((uint32_t)num_blocks + 63) / 64;
-
-            AcLaunchDesc deq_desc = {
-                AC_ABI_VERSION,
-                sizeof(AcLaunchDesc),
-                deq_kernel,
-                deq_bufs,
-                2,
-                deq_pc,
-                sizeof(deq_pc),
-                { grid_blocks, 1, 1 }
-            };
-
-            auto t_deq_start = std::chrono::high_resolution_clock::now();
-            AcEvent* ev_deq = nullptr;
-            AcResult dres = ac_runtime_dispatch(ctx, &deq_desc, &ev_deq);
-            if (dres != AC_SUCCESS) {
-                ac_runtime_buffer_destroy(raw_q5_buf);
-                ameva_increment_buffer_destroy_count();
-                cleanup_temps();
-                return GGML_STATUS_FAILED;
-            }
-            if (ev_deq) {
-                ameva_increment_event_create_count();
-                AcResult wres = ac_runtime_event_wait(ev_deq, 5000000000ULL);
-                ac_runtime_event_destroy(ev_deq);
-                ameva_increment_event_destroy_count();
-                if (wres != AC_SUCCESS) {
-                    ac_runtime_buffer_destroy(raw_q5_buf);
-                    ameva_increment_buffer_destroy_count();
-                    cleanup_temps();
-                    return GGML_STATUS_FAILED;
-                }
-            }
-            auto t_deq_end = std::chrono::high_resolution_clock::now();
-            node_gpu_dequant_us += std::chrono::duration_cast<std::chrono::microseconds>(t_deq_end - t_deq_start).count();
-            ameva_increment_q5_0_gpu_dequant_count();
-
-            // Destroy raw_q5_buf now that dequantization into temp_src0 is complete
-            ac_runtime_buffer_destroy(raw_q5_buf);
-            ameva_increment_buffer_destroy_count();
-
-            // buf_src0 points directly to GPU-resident F32 buffer!
-            buf_src0 = temp_src0;
+            // Direct Fused Path: raw_q5_buf is directly bound to Binding 0!
+            // No temp_src0 allocation, no dequant dispatch!
+            buf_src0 = raw_q5_buf;
             off_src0 = 0;
         } else {
             // F32 SRC0
@@ -643,7 +612,7 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
         }
 
         // Flush resident buffers if needed
-        if (!temp_src0) {
+        if (src0->type != GGML_TYPE_Q5_0 && !temp_src0) {
             if (fi == AMEVA_FAIL_FLUSH_SRC0) {
                 fprintf(stderr, "ggml-ameva [FAILURE_INJECTION]: FLUSH_SRC0_FAIL triggered\n");
                 cleanup_temps();
@@ -666,8 +635,23 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
             }
         }
 
-        // Push constants: M, K, N, off_src0, off_src1, off_dst
-        uint32_t push_constants[6] = { M, K, N, off_src0, off_src1, off_dst };
+        AcKernel* kernel_to_dispatch = (src0->type == GGML_TYPE_Q5_0)
+            ? ameva_get_fused_q5_0_matmul_kernel()
+            : ameva_get_mul_mat_kernel();
+        if (!kernel_to_dispatch) {
+            cleanup_temps();
+            return GGML_STATUS_FAILED;
+        }
+
+        // Push constants: M, K, N, off_src0 (bytes for Q5_0, elems for F32), off_src1 (elems), off_dst (elems)
+        FusedQ5MatMulPushConstants pc = {
+            M,
+            K,
+            N,
+            off_src0,
+            off_src1,
+            off_dst
+        };
         AcBuffer* bound_bufs[3] = { buf_src0, buf_src1, buf_dst };
 
         uint32_t grid_x = (N + 15) / 16;
@@ -676,11 +660,11 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
         AcLaunchDesc ldesc = {
             AC_ABI_VERSION,
             sizeof(AcLaunchDesc),
-            kernel,
+            kernel_to_dispatch,
             bound_bufs,
             3,
-            push_constants,
-            sizeof(push_constants),
+            &pc,
+            sizeof(pc),
             { grid_x, grid_y, 1 }
         };
 
@@ -694,9 +678,12 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
 
         ameva_increment_dispatch_attempt_count();
 
-        auto t_sgemm_start = std::chrono::high_resolution_clock::now();
+        auto t_s_disp_start = Clock::now();
         AcEvent* ev = nullptr;
         AcResult dres = ac_runtime_dispatch(ctx, &ldesc, &ev);
+        auto t_s_disp_end = Clock::now();
+        node_fused_dispatch_submit_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t_s_disp_end - t_s_disp_start).count();
+
         if (dres != AC_SUCCESS) {
             fprintf(stderr, "ggml-ameva: dispatch failed with code %d\n", dres);
             cleanup_temps();
@@ -708,11 +695,12 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
 
         // Failure Injection: WAIT_TIMEOUT
         uint64_t wait_timeout_ns = (fi == AMEVA_FAIL_WAIT_TIMEOUT) ? 1ULL : 5000000000ULL;
+        auto t_s_wait_start = Clock::now();
         AcResult wres = ac_runtime_event_wait(ev, wait_timeout_ns);
+        auto t_s_wait_end = Clock::now();
+        node_fused_event_wait_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t_s_wait_end - t_s_wait_start).count();
         ac_runtime_event_destroy(ev);
         ameva_increment_event_destroy_count();
-        auto t_sgemm_end = std::chrono::high_resolution_clock::now();
-        node_sgemm_us += std::chrono::duration_cast<std::chrono::microseconds>(t_sgemm_end - t_sgemm_start).count();
 
         if (wres != AC_SUCCESS) {
             fprintf(stderr, "ggml-ameva: event wait failed with code %d (FAIL-FAST)\n", wres);
@@ -728,7 +716,7 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
         }
 
         // Readback / Invalidate
-        auto t_rb_start = std::chrono::high_resolution_clock::now();
+        auto t_rb_start = Clock::now();
         if (temp_dst) {
             AcResult ires = ac_runtime_buffer_invalidate(temp_dst, 0, ggml_nbytes(node));
             if (ires != AC_SUCCESS) {
@@ -749,21 +737,28 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
                 return GGML_STATUS_FAILED;
             }
         }
-        auto t_rb_end = std::chrono::high_resolution_clock::now();
-        node_readback_us += std::chrono::duration_cast<std::chrono::microseconds>(t_rb_end - t_rb_start).count();
+        auto t_rb_end = Clock::now();
+        node_output_readback_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t_rb_end - t_rb_start).count();
 
-        ameva_record_timing_and_shape(
-            M, N, K,
-            (src0->type == GGML_TYPE_Q5_0) ? ((size_t)(K / 32) * 22 * N) : 0,
-            (size_t)K * N * sizeof(float),
-            node_dequant_us, node_gpu_dequant_us, node_upload_us, node_sgemm_us, node_readback_us
+        ameva_record_detailed_timing_ns(
+            node_q5_raw_upload_ns,
+            node_gpu_dequant_disp_ns,
+            node_gpu_dequant_wait_ns,
+            node_f32_temp_alloc_ns,
+            node_fused_dispatch_submit_ns,
+            node_fused_event_wait_ns,
+            node_output_readback_ns
         );
 
         cleanup_temps();
 
         // Increment verified execution counters ONLY on verified completion
         ameva_increment_dispatch_success_count();
-        ameva_increment_f32_gpu_sgemm_dispatch_count();
+        if (src0->type == GGML_TYPE_Q5_0) {
+            ameva_increment_fused_q5_0_dispatch_count();
+        } else {
+            ameva_increment_f32_gpu_sgemm_dispatch_count();
+        }
         ameva_increment_qwen_dispatch_count();
         ameva_increment_gpu_op_count();
         if (M > 1) {

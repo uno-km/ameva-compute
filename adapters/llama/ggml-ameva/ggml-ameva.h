@@ -52,16 +52,39 @@ GGML_API const char* ggml_backend_ameva_get_build_commit(void);
 GGML_API void ggml_backend_ameva_reset_counters(void);
 GGML_API void ameva_plugin_diagnostics_dump(void);
 
-// Timing & Shape Diagnostics
+GGML_API int64_t ggml_backend_ameva_get_fused_q5_0_dispatch_count(void);
+void ameva_increment_fused_q5_0_dispatch_count(void);
+
+// Detailed Timing Decomposition (Nanoseconds with std::chrono::steady_clock)
+GGML_API uint64_t ggml_backend_ameva_get_cpu_dequant_time_ns(void);
+GGML_API uint64_t ggml_backend_ameva_get_q5_raw_upload_time_ns(void);
+GGML_API uint64_t ggml_backend_ameva_get_gpu_dequant_dispatch_time_ns(void);
+GGML_API uint64_t ggml_backend_ameva_get_gpu_dequant_wait_time_ns(void);
+GGML_API uint64_t ggml_backend_ameva_get_f32_temp_allocation_time_ns(void);
+GGML_API uint64_t ggml_backend_ameva_get_fused_dispatch_submit_time_ns(void);
+GGML_API uint64_t ggml_backend_ameva_get_fused_event_wait_time_ns(void);
+GGML_API uint64_t ggml_backend_ameva_get_output_readback_time_ns(void);
+GGML_API uint64_t ggml_backend_ameva_get_total_mul_mat_time_ns(void);
+
+// Microsecond compatibility getters
 GGML_API uint64_t ggml_backend_ameva_get_cpu_dequant_time_us(void);
-GGML_API uint64_t ggml_backend_ameva_get_gpu_dequant_time_us(void);
-GGML_API uint64_t ggml_backend_ameva_get_host_to_device_time_us(void);
-GGML_API uint64_t ggml_backend_ameva_get_gpu_sgemm_time_us(void);
-GGML_API uint64_t ggml_backend_ameva_get_device_to_host_time_us(void);
-void ameva_record_timing_and_shape(
-    uint32_t M, uint32_t N, uint32_t K,
-    uint64_t q5_bytes, uint64_t f32_bytes,
-    uint64_t dequant_us, uint64_t gpu_dequant_us, uint64_t upload_us, uint64_t sgemm_us, uint64_t d2h_us
+GGML_API uint64_t ggml_backend_ameva_get_q5_raw_upload_time_us(void);
+GGML_API uint64_t ggml_backend_ameva_get_gpu_dequant_dispatch_time_us(void);
+GGML_API uint64_t ggml_backend_ameva_get_gpu_dequant_wait_time_us(void);
+GGML_API uint64_t ggml_backend_ameva_get_f32_temp_allocation_time_us(void);
+GGML_API uint64_t ggml_backend_ameva_get_sgemm_dispatch_time_us(void);
+GGML_API uint64_t ggml_backend_ameva_get_sgemm_wait_time_us(void);
+GGML_API uint64_t ggml_backend_ameva_get_output_readback_time_us(void);
+GGML_API uint64_t ggml_backend_ameva_get_total_mul_mat_time_us(void);
+
+void ameva_record_detailed_timing_ns(
+    uint64_t q5_raw_upload_ns,
+    uint64_t gpu_dequant_disp_ns,
+    uint64_t gpu_dequant_wait_ns,
+    uint64_t f32_temp_alloc_ns,
+    uint64_t fused_dispatch_submit_ns,
+    uint64_t fused_event_wait_ns,
+    uint64_t output_readback_ns
 );
 
 // Failure Injection Hooks (P0 Hardening Verification)
