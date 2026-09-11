@@ -590,6 +590,9 @@ int main(void) {
     {
         const char* qwen_path = "/data/data/com.termux/files/home/ameva-compute/models/ggml-vocab-qwen2.gguf";
         if (access(qwen_path, R_OK) != 0) {
+            qwen_path = "/data/data/com.termux/files/home/BitNet_ms/3rdparty/llama.cpp/models/ggml-vocab-qwen2.gguf";
+        }
+        if (access(qwen_path, R_OK) != 0) {
             qwen_path = "./models/ggml-vocab-qwen2.gguf";
         }
         bool file_exists = (access(qwen_path, R_OK) == 0);
@@ -597,7 +600,6 @@ int main(void) {
             GgufModel* model = NULL;
             int fds_before = count_open_fds();
             AcResult res = ac_gguf_open(qwen_path, &model);
-            int fds_after = count_open_fds();
             bool ok = false;
             if (res == AC_SUCCESS && model != NULL) {
                 if (model->tensor_count == 0 && model->metadata_kv_count == 20 &&
@@ -620,6 +622,9 @@ int main(void) {
     // Gate 21: REAL_GGUF_VOCAB_LLAMA_COMPATIBILITY (llama.cpp test corpus vocabulary fixture)
     {
         const char* llama_path = "/data/data/com.termux/files/home/ameva-compute/models/ggml-vocab-llama-bpe.gguf";
+        if (access(llama_path, R_OK) != 0) {
+            llama_path = "/data/data/com.termux/files/home/BitNet_ms/3rdparty/llama.cpp/models/ggml-vocab-llama-bpe.gguf";
+        }
         if (access(llama_path, R_OK) != 0) {
             llama_path = "./models/ggml-vocab-llama-bpe.gguf";
         }

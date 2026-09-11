@@ -113,6 +113,12 @@ static inline bool checked_mul_u64(uint64_t a, uint64_t b, uint64_t* out) {
     return true;
 }
 
+static inline bool checked_add_u64(uint64_t a, uint64_t b, uint64_t* out) {
+    if (UINT64_MAX - a < b) return false;
+    *out = a + b;
+    return true;
+}
+
 static inline bool checked_align_up(size_t val, size_t align, size_t* out) {
     if (align == 0 || (align & (align - 1)) != 0) return false;
     size_t rem = val % align;
@@ -304,14 +310,13 @@ static AcResult calculate_tensor_size(uint32_t type, const uint64_t* ne, uint32_
             return AC_SUCCESS;
         }
         case GGML_TYPE_I2_S: {
-            uint64_t nrow = 1;
-            for (uint32_t d = 1; d < n_dims; d++) {
-                if (!checked_mul_u64(nrow, ne[d], &nrow)) return AC_ERR_BINARY_CORRUPTED;
+            uint64_t n_elements = 1;
+            for (uint32_t d = 0; d < n_dims; d++) {
+                if (!checked_mul_u64(n_elements, ne[d], &n_elements)) return AC_ERR_BINARY_CORRUPTED;
             }
-            uint64_t n_per_row = ne[0];
-            uint64_t row_bytes = (n_per_row / 4) + 32;
+            uint64_t payload_bytes = (n_elements + 3) / 4;
             uint64_t total_bytes = 0;
-            if (!checked_mul_u64(nrow, row_bytes, &total_bytes) || total_bytes > SIZE_MAX) {
+            if (!checked_add_u64(payload_bytes, 32, &total_bytes) || total_bytes > SIZE_MAX) {
                 return AC_ERR_BINARY_CORRUPTED;
             }
             *out_size = (size_t)total_bytes;

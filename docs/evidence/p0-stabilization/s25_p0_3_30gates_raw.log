@@ -1,0 +1,55 @@
+=======================================================================
+  AMUDA GGUF Hardened Bounded Reader & Partial-Allocation Leak Suite   
+  Standards: Zero-Silent-Fallback, Fail-Closed, No FD/RSS Leakage      
+  Policy: A missing optional real-model fixture produces PENDING,     
+          not FAIL, and does not fail the synthetic parser validation. 
+=======================================================================
+[GATE 01] TRUNCATED_HEADER_REJECTED                  : PASS (Rejected file size < 24 bytes, model=NULL)
+[GATE 02] TRUNCATED_METADATA_COUNT_REJECTED          : PASS (Rejected EOF at metadata start)
+[GATE 03] TRUNCATED_METADATA_KEY_REJECTED            : PASS (Rejected key len exceeding EOF)
+[GATE 04] TRUNCATED_TENSOR_NAME_REJECTED             : PASS (Rejected tensor name exceeding EOF)
+[GATE 05] NDIMS_ZERO_REJECTED                        : PASS (Rejected n_dims == 0)
+[GATE 06] NDIMS_FIVE_REJECTED                        : PASS (Rejected n_dims == 5 (>4 buffer boundary))
+[GATE 07] NDIMS_UINT32_MAX_REJECTED                  : PASS (Rejected n_dims == UINT32_MAX)
+[GATE 08] TRUNCATED_DIMENSION_ARRAY_REJECTED         : PASS (Rejected truncated ne[] array)
+[GATE 09] ZERO_DIMENSION_REJECTED                    : PASS (Rejected dimension value 0)
+[GATE 10] DIMENSION_PRODUCT_OVERFLOW_REJECTED        : PASS (Rejected uint64 overflow in shape)
+[GATE 11] UNKNOWN_TENSOR_TYPE_REJECTED               : PASS (Rejected unsupported tensor type 9999)
+[GATE 12] ALIGNMENT_ZERO_REJECTED                    : PASS (Rejected general.alignment == 0)
+[GATE 13] ALIGNMENT_NON_POWER_OF_TWO_REJECTED        : PASS (Rejected non-power-of-2 alignment)
+[GATE 14] ALIGN_UP_OVERFLOW_REJECTED                 : PASS (Rejected alignment arithmetic overflow)
+[GATE 15] TENSOR_OFFSET_OUT_OF_RANGE_REJECTED        : PASS (Rejected tensor offset > file size)
+[GATE 16] TENSOR_END_OUT_OF_RANGE_REJECTED           : PASS (Rejected offset + size > file size)
+[GATE 17] TENSOR_COUNT_ALLOCATION_OVERFLOW_REJECTED  : PASS (Rejected overflowing tensor_count)
+[GATE 18] METADATA_COUNT_LIMIT_REJECTED              : PASS (Rejected metadata_kv_count > 64K)
+[GATE 19] VALID_MINIMAL_SYNTHETIC_GGUF_ACCEPTED      : PASS (Synthesized minimal GGUF parsed with accurate data)
+[GATE 20] REAL_GGUF_VOCAB_QWEN2_COMPATIBILITY        : PASS (qwen2 vocab GGUF parsed (arch=qwen2, kv=20, tensors=0, fd_delta=0))
+[GATE 21] REAL_GGUF_VOCAB_LLAMA_COMPATIBILITY        : PASS (llama vocab GGUF parsed (arch=llama, kv=20, tensors=0, fd_delta=0))
+[GATE 22] REAL_GGUF_WEIGHTED_BITNET_COMPATIBILITY    : PASS (BitNet 2B weighted model verified)
+[GATE 23] READ_LE_BYTE_SHIFT_KAT                     : PASS (U32/U64 high-bit, all-FF, and unaligned shifts exact match)
+[GATE 24] REPEATED_MALFORMED_OPEN_NO_FD_GROWTH       : PASS (100 iterations: init=3, final=3, delta=0)
+[GATE 25] REPEATED_MALFORMED_OPEN_NO_RSS_SLOPE       : PASS (200 iterations: init=2612 KB, final=2612 KB, delta=0 KB)
+[GATE 26] FAIL_AFTER_METADATA_STRING_ALLOCATION      : PASS (Clean fail-closed after valid string metadata, 0 FD leak)
+[GATE 27] FAIL_AFTER_TENSOR_ARRAY_ALLOCATION         : PASS (tensors array freed on EOF, model=NULL, 0 FD leak)
+[GATE 28] FAIL_AFTER_TENSOR_NAME_ALLOCATION          : PASS (Clean fail-closed after tensor name parsed, 0 FD leak)
+[GATE 29] FAIL_AFTER_MULTIPLE_TENSOR_DESCRIPTORS     : PASS (All prior descriptors freed on tensor 2 error, 0 FD leak)
+[GATE 30] FAIL_AT_FINAL_TENSOR_DATA_RANGE            : PASS (Full cleanup on final data range boundary check, 0 FD leak)
+
+=======================================================================
+  [FINAL GATE CALIBRATION METRICS]
+  EXECUTED_GATES=30
+  PASSED_GATES=30
+  FAILED_GATES=0
+  PENDING_GATES=0
+
+  Core malformed/synthetic parser gates: 19/19 PASS
+  Qwen2 vocabulary GGUF: PASS
+  Llama vocabulary GGUF: PASS
+  BitNet weighted fixture: PASS
+  Qwen2.5 weighted model: NOT_AVAILABLE
+  Llama weighted model: NOT_AVAILABLE
+  Partial-allocation cleanup gates (26-30): 5/5 PASS
+  LE integer-read KAT group: PASS
+  FD leak gate: PASS (Observed open-FD delta: 0)
+  RSS stability gate: PASS (Observed delta <= 64 KB threshold)
+=======================================================================
