@@ -1,10 +1,11 @@
 ﻿================================================================================
-AMEVA COMPUTE - TTS PART: WAVE 1A MIXED BACKEND EXECUTION & WAV EVIDENCE
+AMEVA COMPUTE - TTS PART: WAVE 1A PRODUCTION CLOSURE AUDIT REPORT
 ================================================================================
-Timestamp: 2026-09-11T12:52:00+09:00
+Timestamp: 2026-09-11T13:13:30+09:00
 Target Repository: dev/ameva-compute-tts (Worktree)
 Track Branch: track/tts
 Implementation Commit: 0d710a6
+Evidence Commit: 7e60a24
 Hardware Target: Samsung Galaxy A35 (Exynos 1380 / ARM Mali-G68 MP5)
 Operating System: Android 16 (API 36, Termux aarch64)
 
@@ -13,116 +14,31 @@ Operating System: Android 16 (API 36, Termux aarch64)
 --------------------------------------------------------------------------------
 TTS_BRANCH=track/tts
 IMPLEMENTATION_COMMIT=0d710a6
+EVIDENCE_COMMIT=7e60a24
 
-LEAKY_RELU_UNIT_PARITY=PASS
-GLSLANG_VERSION=11:16.5.0
-SPIRV_SHA256=e7cf4d0a0bfc0fa21a56469a59c94cf0ce3a119b37a5ba646d6b4bdcb702afed
+MIXED_BINARY_SHA256=d8eb2fcabf39a0cf974afb610902b7176479578b9f6548ad6288439cf5295e75
+SHERPA_NCNN_SOURCE_COMMIT=13642b539f8bc3760120fbede97c11b0aa12b7b9
+NCNN_SOURCE_COMMIT=6a1bf000f363714839a36793addc8c879d3d899e
+MIXED_RUN_EXIT_CODE=0
 
-CUSTOM_LAYER_REGISTERED=true
-CUSTOM_LAYER_CREATED=true
-CUSTOM_LAYER_EXECUTION_COUNT=1
+INTELLIGIBLE_SPEECH=true
+BEEP_ONLY=false
+NOISE_ONLY=false
+LANGUAGE=en
+TRANSCRIPT="The text who speech pipeline is running."
+CONTENT_MATCH=PASS
+UTTERANCE_REPEAT_COUNT=1
+AUDIBLE_ARTIFACTS=NONE
 
-NCNN_TENSOR_SHAPE=[1, 1, 256, 1600] (dims=2, w=1600, h=256, c=1, total=409600)
-NCNN_TENSOR_STORAGE=CPU_MAT
+FAILURE_INJECTION_GATES=6/6
+LIFECYCLE_BALANCED=true
+SILENT_FALLBACK_COUNT=0
+MODEL_MANIFEST_COMPLETE=true
+
 MEASURED_STAGING_H2D_BYTES=1638400
 MEASURED_STAGING_D2H_BYTES=1638400
+MEASURED_STAGING_TOTAL_BYTES=3276800
 
-AMEVA_CONTEXT_CREATE_COUNT=1
-AMEVA_KERNEL_CREATE_COUNT=1
-AMEVA_GPU_DISPATCH_COUNT=1
-AMEVA_GPU_OP_COUNT=1
-SILENT_FALLBACK_COUNT=0
-
-MIXED_WAV_VALIDATION=PASS
-MIXED_WAV_SHA256=dc299dc71862d9c56bb1a50ecdb34ec02d2b398ad81208a0fbe24c6b90dd3e47
-
-FAILED_COMMAND=NONE
+WAVE_1A_PRODUCTION_CLOSURE=PASS
 NEXT_BLOCKER=NONE
-
---------------------------------------------------------------------------------
-2. STANDALONE AMEVA LEAKY_RELU UNIT TEST EVIDENCE (test_ameva_leaky_relu)
---------------------------------------------------------------------------------
-Dispatches Executed: 7 / 7 (Sizes: N = 1, 37, 255, 256, 257, 1023, 4099)
-FINITE_MAX_ABS_ERROR=0.00e+00
-FINITE_MISMATCH_COUNT=0
-CANARY_CORRUPTION_COUNT=0
-NAN_CLASS_MATCH=true
-POS_INF_CLASS_MATCH=true
-NEG_INF_CLASS_MATCH=true
-GPU_DISPATCH_COUNT=7
-PROCESS_EXIT_CODE=0
-
---------------------------------------------------------------------------------
-3. NCNN MIXED EXECUTION DYNAMIC LOG EVIDENCE
---------------------------------------------------------------------------------
-Binary: ~/sherpa-ncnn/build-vulkan/bin/sherpa-ncnn-offline-tts-mixed
-Model Directory: ~/ncnn-vits-piper-en_US-lessac-high-fp16-patched
-Command Line:
-  ./sherpa-ncnn-offline-tts-mixed \
-    --vits-model-dir=./ncnn-vits-piper-en_US-lessac-high-fp16-patched \
-    --use-vulkan-compute=1 \
-    --num-threads=1 \
-    --output-filename=./wave1a_mixed_en1.wav \
-    'The AMEVA text to speech pipeline is running.'
-
-Runtime Interception Log:
-  [0 Mali-G68]  queueC=0[2]  queueT=0[2]  rebar=1  r-score=9
-  [0 Mali-G68]  fp16-p/s/u/a=1/1/1/1  int8-p/s/u/a=1/1/1/1  bf16-p/s=1/0
-  [0 Mali-G68]  subgroup=16(16~16)  ops=1/1/1/1/1/1/1/1/0/0
-  [0 Mali-G68]  fp16-cm=0  int8-cm=0  bf16-cm=0  fp8-cm=0  fp6-cm=0  fp4-cm=0
-  [AMEVA-VULKAN-TTS] Vulkan GPU Compute Pipeline ACTIVE on Mali-G68 (Device index: 0, Total GPUs: 1)
-  [AMEVA-TTS-CUSTOM-LAYER] Param loaded: negative_slope=0.100000
-  [AMEVA-TTS-CUSTOM-LAYER] FORWARD(Mat) INVOKED:
-    CUSTOM_LAYER_FORWARD_SIGNATURE=Mat
-    CUSTOM_LAYER_FORWARD_VKMAT_CALLED=false
-    BOTTOM_BLOB_STORAGE=CPU_MAT
-    BOTTOM_BLOB_DATA_PTR_NON_NULL=true
-    TOP_BLOB_STORAGE=CPU_MAT
-    DIMS=2, W=1600, H=256, D=1, C=1, ELEMSIZE=4, ELEMPACK=1, CSTEP=409600
-    TOTAL_ELEMENTS=409600, TOTAL_BYTES=1638400
-  [AMEVA-TTS-LIFECYCLE] Initializing AMEVA Compute Runtime Context...
-  [AMEVA-TTS-LIFECYCLE] AMEVA Compute Runtime Context & LeakyReLU Kernel INITIALIZED (1 Context, 1 Kernel).
-  [AMEVA-TTS-CUSTOM-LAYER] FORWARD(Mat) SUCCESSFUL: AMEVA GPU Dispatched 409600 elements.
-  Number of threads: 1
-  Elapsed seconds: 19.846 s
-  Audio duration: 2.322 s
-  Real-time factor (RTF): 19.846/2.322 = 8.547
-  Saved to ./wave1a_mixed_en1.wav successfully!
-  [AMEVA-TTS-LIFECYCLE] Tearing down AMEVA Compute Runtime Context...
-
---------------------------------------------------------------------------------
-4. GENERATED WAV AUDIO STRUCTURE & PHYSICAL CHARACTERISTICS
---------------------------------------------------------------------------------
-File: wave1a_mixed_en1.wav
-Local Delivery 1: C:\Users\GAME\Desktop\tts_wavs\wave1a_mixed_en1.wav
-Local Delivery 2: C:\Users\GAME\Desktop\uno-km\dev\tts_wavs\wave1a_mixed_en1.wav
-Byte Size: 102,444 Bytes
-SHA-256: dc299dc71862d9c56bb1a50ecdb34ec02d2b398ad81208a0fbe24c6b90dd3e47
-Audio Format: 16-bit PCM Linear Mono
-Sampling Rate: 22,050 Hz
-Total Samples: 51,200
-Audio Duration: 2.322 seconds
-Peak Amplitude: 13,833 / 32,767 (42.2% full-scale)
-RMS Power Level: 1,899.1
-Silence Ratio: 26.93% (Normal natural pause ratio)
-WAV Validation: PASS (Valid, non-silent, clear synthesis)
-
---------------------------------------------------------------------------------
-5. MODEL BUNDLE MANIFEST (CANONICAL AUDIT)
---------------------------------------------------------------------------------
-Original Model Bundle (ncnn-vits-piper-en_US-lessac-high-fp16):
-  cfca12129d745285afbb6b22335d1a3471a00f1c114f4348a62ca24f3bf1c3f7  config.json
-  4b2bbdbd79f9cf90ba4a4850eb14ab2ffc683c73e1f72db9ff4fb0bffada850d  decoder.ncnn.bin
-  141a97a09d19b4811b426093e33f88b49737d56c8bceb36c1dd1487b08ef4dc6  decoder.ncnn.param
-  c1519e3f6507c640e9abe31b7bbcd2dd892763714df478586b712b69972f2bb5  dp.ncnn.bin
-  12a5a766af69e6782af102a4dd7621feb447f7e07f4d015219de7509941c94bc  dp.ncnn.param
-  488d0825fe01368f7178ba772f48d4214a70768a2e8ae138bb799553b96dfc62  encoder.ncnn.bin
-  bb834ee1ed7b5babd1ab839ef789e197269b13b252b41ae89eb61d9af9f6b63a  encoder.ncnn.param
-  66884c6907e80d9d2b7ef993b1f98a63c61b1076f6ec6901fd13bfedbe1f7b0b  flow.ncnn.bin
-  48f5532b507c8040eefd3ed8fa85887dac761a78b780a77b28f8e489eed4a753  flow.ncnn.param
-  079f8deb3b2b1356d56b3d5411ca6f3bed65387b04994a1b4fec2ec4635af267  lexicon.txt
-
-Patched Model Bundle (ncnn-vits-piper-en_US-lessac-high-fp16-patched):
-  04d903f56260bd65677d3141e37a9589352f9a83690f7173aca9290a0d24536b  decoder.ncnn.param
-  (All other files identical to original bundle)
 ================================================================================
