@@ -1,804 +1,804 @@
 =======================================================================
 DEVICE: S25
-COMMAND: AMEVA_FAIL_STAGE=dispatch llama-cli --device AMEVA0 -ngl 25 -m qwen2.5-0.5b-instruct-q4_k_m.gguf -p "The capital of Japan is" -n 4 --seed 1234 --temp 0 -st --simple-io -fit off -v
-WORKTREE_HEAD_COMMIT: abfb159a132e3d55f6f78c6c0392e3aa1fa2a7a8
-LOCAL_SOURCE_MANIFEST_SHA256: 98a7fc1f6e112cab1f7f575ad7c9ba00f747b30b586e943f235585e4045584a1
-REMOTE_SOURCE_MANIFEST_SHA256: 98a7fc1f6e112cab1f7f575ad7c9ba00f747b30b586e943f235585e4045584a1
+COMMAND: export AMEVA_FAIL_STAGE=dispatch; cd /data/data/com.termux/files/home/BitNet_ms/3rdparty/llama.cpp/build/bin && ./llama-cli --device AMEVA0 -ngl 25 -m qwen2.5-0.5b-instruct-q4_k_m.gguf -p "Reply with exactly one word: Tokyo" -n 8 --seed 1234 --temp 0 -st --simple-io -fit off -v
+WORKTREE_HEAD_COMMIT: de9183f7f212cb5cb74e4b262810b3fbf6504d3f
+LOCAL_SOURCE_MANIFEST_SHA256: 8bce0957b61f92f5ce4adccb73d26ce8cfe1a938f45e83f2bc679e91469c649f
+REMOTE_SOURCE_MANIFEST_SHA256: 8bce0957b61f92f5ce4adccb73d26ce8cfe1a938f45e83f2bc679e91469c649f
 SOURCE_MANIFEST_MATCH: true
-BINARY_SOURCE_COMMIT: abfb159a132e3d55f6f78c6c0392e3aa1fa2a7a8
+BINARY_SOURCE_COMMIT: de9183f7f212cb5cb74e4b262810b3fbf6504d3f
 SOURCE_BINARY_CORRESPONDENCE: ESTABLISHED
-LLAMA_CLI_SHA256: 19437ccb66561c56a39e3d8663ce5453aa354797c8fb6060f938516d850d93ab
-LIBGGML_AMEVA_SHA256: ee893eee15d1dc9fffd8224dba248ffa1ac6e8f00f04eb3f61128ef75e773cb3
+LLAMA_CLI_SHA256: f56bb5335627c26c0e40eeb65fce9eea2bda52e3cec810a40ac3bd68ad6315cd
+LIBGGML_AMEVA_SHA256: 4b22f017cf6a5eddf0fb367d293f4b24529e702ae425036461d89a21477e40a1
 LIBGGML_BASE_SHA256: 12a07f532c39672461030504b0afc91a4a35c2069ab816a41abf0c7ac04b4a2b
 LIBGGML_CPU_SHA256: 51c2144030963eae66bd742e5656adb64c2a5674ac41fc8c16cad14ede18d9d8
 MODEL_SHA256: 74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db
-START_TIMESTAMP: 2026-09-11T07:57:32.001343+00:00
-END_TIMESTAMP: 2026-09-11T07:57:34.910402+00:00
+START_TIMESTAMP: 2026-09-11T08:30:56.283436+00:00
+END_TIMESTAMP: 2026-09-11T08:30:59.819738+00:00
 PROCESS_EXIT_CODE: 1
 =======================================================================
 [STDOUT_AND_STDERR]
-0.00.054.969 I srv    load_model: loading model '/data/data/com.termux/files/home/.termux-llama/models/qwen2.5-0.5b-instruct-q4_k_m.gguf'
-0.00.055.685 I srv    load_model: local path '/data/data/com.termux/files/home/.termux-llama/models/qwen2.5-0.5b-instruct-q4_k_m.gguf'
-0.00.131.392 I llama_model_loader: loaded meta data with 26 key-value pairs and 291 tensors from /data/data/com.termux/files/home/.termux-llama/models/qwen2.5-0.5b-instruct-q4_k_m.gguf (version GGUF V3 (latest))
-0.00.131.417 I llama_model_loader: Dumping metadata keys/values. Note: KV overrides do not apply in this output.
-0.00.131.421 I llama_model_loader: - kv   0:                       general.architecture str              = qwen2
-0.00.131.422 I llama_model_loader: - kv   1:                               general.type str              = model
-0.00.131.424 I llama_model_loader: - kv   2:                               general.name str              = qwen2.5-0.5b-instruct
-0.00.131.424 I llama_model_loader: - kv   3:                            general.version str              = v0.1
-0.00.131.426 I llama_model_loader: - kv   4:                           general.finetune str              = qwen2.5-0.5b-instruct
-0.00.131.427 I llama_model_loader: - kv   5:                         general.size_label str              = 630M
-0.00.131.430 I llama_model_loader: - kv   6:                          qwen2.block_count u32              = 24
-0.00.131.431 I llama_model_loader: - kv   7:                       qwen2.context_length u32              = 32768
-0.00.131.432 I llama_model_loader: - kv   8:                     qwen2.embedding_length u32              = 896
-0.00.131.433 I llama_model_loader: - kv   9:                  qwen2.feed_forward_length u32              = 4864
-0.00.131.434 I llama_model_loader: - kv  10:                 qwen2.attention.head_count u32              = 14
-0.00.131.435 I llama_model_loader: - kv  11:              qwen2.attention.head_count_kv u32              = 2
-0.00.131.442 I llama_model_loader: - kv  12:                       qwen2.rope.freq_base f32              = 1000000.000000
-0.00.131.447 I llama_model_loader: - kv  13:     qwen2.attention.layer_norm_rms_epsilon f32              = 0.000001
-0.00.131.448 I llama_model_loader: - kv  14:                          general.file_type u32              = 15
-0.00.131.449 I llama_model_loader: - kv  15:                       tokenizer.ggml.model str              = gpt2
-0.00.131.473 I llama_model_loader: - kv  16:                         tokenizer.ggml.pre str              = qwen2
-0.00.184.081 I llama_model_loader: - kv  17:                      tokenizer.ggml.tokens arr[str,151936]  = ["!", "\"", "#", "$", "%", "&", "'", ...
-0.00.202.059 I llama_model_loader: - kv  18:                  tokenizer.ggml.token_type arr[i32,151936]  = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, ...
-0.00.254.084 I llama_model_loader: - kv  19:                      tokenizer.ggml.merges arr[str,151387]  = ["Ġ Ġ", "ĠĠ ĠĠ", "i n", "Ġ t",...
-0.00.254.106 I llama_model_loader: - kv  20:                tokenizer.ggml.eos_token_id u32              = 151645
-0.00.254.108 I llama_model_loader: - kv  21:            tokenizer.ggml.padding_token_id u32              = 151643
-0.00.254.109 I llama_model_loader: - kv  22:                tokenizer.ggml.bos_token_id u32              = 151643
-0.00.254.111 I llama_model_loader: - kv  23:               tokenizer.ggml.add_bos_token bool             = false
-0.00.254.118 I llama_model_loader: - kv  24:                    tokenizer.chat_template str              = {%- if tools %}\n    {{- '<|im_start|>...
-0.00.254.119 I llama_model_loader: - kv  25:               general.quantization_version u32              = 2
-0.00.254.121 I llama_model_loader: - type  f32:  121 tensors
-0.00.254.123 I llama_model_loader: - type q5_0:  133 tensors
-0.00.254.124 I llama_model_loader: - type q8_0:   13 tensors
-0.00.254.126 I llama_model_loader: - type q4_K:   12 tensors
-0.00.254.127 I llama_model_loader: - type q6_K:   12 tensors
-0.00.254.132 I print_info: file format = GGUF V3 (latest)
-0.00.254.133 I print_info: file type   = Q4_K - Medium
-0.00.254.141 I print_info: file size   = 462.96 MiB (6.16 BPW) 
-0.00.256.556 I llama_prepare_model_devices: using device AMEVA0 (AMEVA Vulkan Compute SGEMM Accelerator) (AMEVA_VULKAN_0) - 4096 MiB free
-0.00.363.741 D init_tokenizer: initializing tokenizer for type 2
-0.00.382.248 I load: 0 unused tokens
-0.00.382.281 D load: control token: 151659 '<|fim_prefix|>' is not marked as EOG
-0.00.382.282 D load: control token: 151656 '<|video_pad|>' is not marked as EOG
-0.00.382.284 D load: control token: 151655 '<|image_pad|>' is not marked as EOG
-0.00.382.285 D load: control token: 151653 '<|vision_end|>' is not marked as EOG
-0.00.382.287 D load: control token: 151652 '<|vision_start|>' is not marked as EOG
-0.00.382.288 D load: control token: 151651 '<|quad_end|>' is not marked as EOG
-0.00.382.290 D load: control token: 151649 '<|box_end|>' is not marked as EOG
-0.00.382.291 D load: control token: 151648 '<|box_start|>' is not marked as EOG
-0.00.382.292 D load: control token: 151646 '<|object_ref_start|>' is not marked as EOG
-0.00.382.294 D load: control token: 151644 '<|im_start|>' is not marked as EOG
-0.00.382.939 D load: control token: 151661 '<|fim_suffix|>' is not marked as EOG
-0.00.382.996 D load: control token: 151647 '<|object_ref_end|>' is not marked as EOG
-0.00.384.139 W load: control-looking token: 128247 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
-0.00.384.514 D load: control token: 151660 '<|fim_middle|>' is not marked as EOG
-0.00.385.416 D load: control token: 151654 '<|vision_pad|>' is not marked as EOG
-0.00.385.951 D load: control token: 151650 '<|quad_start|>' is not marked as EOG
-0.00.415.273 I load: printing all EOG tokens:
-0.00.415.281 I load:   - 128247 ('</s>')
-0.00.415.282 I load:   - 151643 ('<|endoftext|>')
-0.00.415.283 I load:   - 151645 ('<|im_end|>')
-0.00.415.284 I load:   - 151662 ('<|fim_pad|>')
-0.00.415.286 I load:   - 151663 ('<|repo_name|>')
-0.00.415.287 I load:   - 151664 ('<|file_sep|>')
-0.00.415.705 I load: special tokens cache size = 23
-0.00.508.895 I load: token to piece cache size = 0.9310 MB
-0.00.508.917 I print_info: arch                  = qwen2
-0.00.508.918 I print_info: vocab_only            = 0
-0.00.508.919 I print_info: no_alloc              = 0
-0.00.508.921 I print_info: n_ctx_train           = 32768
-0.00.508.922 I print_info: n_embd_inp            = 896
-0.00.508.924 I print_info: n_embd                = 896
-0.00.508.925 I print_info: n_embd_out            = 896
-0.00.508.926 I print_info: n_layer               = 24
-0.00.508.928 I print_info: n_layer_all           = 24
-0.00.508.956 I print_info: n_head                = 14
-ggml-ameva [SUPPORTS_QUERY #1]: op='unnamed' src0='output.weight' (type=8 ne=[896,151936,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[151936,512,1,1])
+0.00.087.156 I srv    load_model: loading model '/data/data/com.termux/files/home/.termux-llama/models/qwen2.5-0.5b-instruct-q4_k_m.gguf'
+0.00.087.169 I srv    load_model: local path '/data/data/com.termux/files/home/.termux-llama/models/qwen2.5-0.5b-instruct-q4_k_m.gguf'
+0.00.141.050 I llama_model_loader: loaded meta data with 26 key-value pairs and 291 tensors from /data/data/com.termux/files/home/.termux-llama/models/qwen2.5-0.5b-instruct-q4_k_m.gguf (version GGUF V3 (latest))
+0.00.141.076 I llama_model_loader: Dumping metadata keys/values. Note: KV overrides do not apply in this output.
+0.00.141.079 I llama_model_loader: - kv   0:                       general.architecture str              = qwen2
+0.00.141.080 I llama_model_loader: - kv   1:                               general.type str              = model
+0.00.141.081 I llama_model_loader: - kv   2:                               general.name str              = qwen2.5-0.5b-instruct
+0.00.141.082 I llama_model_loader: - kv   3:                            general.version str              = v0.1
+0.00.141.083 I llama_model_loader: - kv   4:                           general.finetune str              = qwen2.5-0.5b-instruct
+0.00.141.083 I llama_model_loader: - kv   5:                         general.size_label str              = 630M
+0.00.141.085 I llama_model_loader: - kv   6:                          qwen2.block_count u32              = 24
+0.00.141.086 I llama_model_loader: - kv   7:                       qwen2.context_length u32              = 32768
+0.00.141.087 I llama_model_loader: - kv   8:                     qwen2.embedding_length u32              = 896
+0.00.141.088 I llama_model_loader: - kv   9:                  qwen2.feed_forward_length u32              = 4864
+0.00.141.089 I llama_model_loader: - kv  10:                 qwen2.attention.head_count u32              = 14
+0.00.141.090 I llama_model_loader: - kv  11:              qwen2.attention.head_count_kv u32              = 2
+0.00.141.094 I llama_model_loader: - kv  12:                       qwen2.rope.freq_base f32              = 1000000.000000
+0.00.141.097 I llama_model_loader: - kv  13:     qwen2.attention.layer_norm_rms_epsilon f32              = 0.000001
+0.00.141.098 I llama_model_loader: - kv  14:                          general.file_type u32              = 15
+0.00.141.099 I llama_model_loader: - kv  15:                       tokenizer.ggml.model str              = gpt2
+0.00.141.099 I llama_model_loader: - kv  16:                         tokenizer.ggml.pre str              = qwen2
+0.00.179.472 I llama_model_loader: - kv  17:                      tokenizer.ggml.tokens arr[str,151936]  = ["!", "\"", "#", "$", "%", "&", "'", ...
+0.00.192.549 I llama_model_loader: - kv  18:                  tokenizer.ggml.token_type arr[i32,151936]  = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, ...
+0.00.232.125 I llama_model_loader: - kv  19:                      tokenizer.ggml.merges arr[str,151387]  = ["Ġ Ġ", "ĠĠ ĠĠ", "i n", "Ġ t",...
+0.00.232.135 I llama_model_loader: - kv  20:                tokenizer.ggml.eos_token_id u32              = 151645
+0.00.232.136 I llama_model_loader: - kv  21:            tokenizer.ggml.padding_token_id u32              = 151643
+0.00.232.137 I llama_model_loader: - kv  22:                tokenizer.ggml.bos_token_id u32              = 151643
+0.00.232.139 I llama_model_loader: - kv  23:               tokenizer.ggml.add_bos_token bool             = false
+0.00.232.143 I llama_model_loader: - kv  24:                    tokenizer.chat_template str              = {%- if tools %}\n    {{- '<|im_start|>...
+0.00.232.144 I llama_model_loader: - kv  25:               general.quantization_version u32              = 2
+0.00.232.146 I llama_model_loader: - type  f32:  121 tensors
+0.00.232.147 I llama_model_loader: - type q5_0:  133 tensors
+0.00.232.148 I llama_model_loader: - type q8_0:   13 tensors
+0.00.232.149 I llama_model_loader: - type q4_K:   12 tensors
+0.00.232.151 I llama_model_loader: - type q6_K:   12 tensors
+0.00.232.154 I print_info: file format = GGUF V3 (latest)
+0.00.232.156 I print_info: file type   = Q4_K - Medium
+0.00.232.161 I print_info: file size   = 462.96 MiB (6.16 BPW) 
+0.00.234.353 I llama_prepare_model_devices: using device AMEVA0 (AMEVA Vulkan Compute SGEMM Accelerator) (AMEVA_VULKAN_0) - 4096 MiB free
+0.00.333.381 D init_tokenizer: initializing tokenizer for type 2
+0.00.355.115 I load: 0 unused tokens
+0.00.355.188 D load: control token: 151659 '<|fim_prefix|>' is not marked as EOG
+0.00.355.189 D load: control token: 151656 '<|video_pad|>' is not marked as EOG
+0.00.355.189 D load: control token: 151655 '<|image_pad|>' is not marked as EOG
+0.00.355.190 D load: control token: 151653 '<|vision_end|>' is not marked as EOG
+0.00.355.191 D load: control token: 151652 '<|vision_start|>' is not marked as EOG
+0.00.355.191 D load: control token: 151651 '<|quad_end|>' is not marked as EOG
+0.00.355.192 D load: control token: 151649 '<|box_end|>' is not marked as EOG
+0.00.355.193 D load: control token: 151648 '<|box_start|>' is not marked as EOG
+0.00.355.193 D load: control token: 151646 '<|object_ref_start|>' is not marked as EOG
+0.00.355.194 D load: control token: 151644 '<|im_start|>' is not marked as EOG
+0.00.355.692 D load: control token: 151661 '<|fim_suffix|>' is not marked as EOG
+0.00.355.733 D load: control token: 151647 '<|object_ref_end|>' is not marked as EOG
+0.00.356.633 W load: control-looking token: 128247 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.00.356.901 D load: control token: 151660 '<|fim_middle|>' is not marked as EOG
+0.00.357.615 D load: control token: 151654 '<|vision_pad|>' is not marked as EOG
+0.00.358.043 D load: control token: 151650 '<|quad_start|>' is not marked as EOG
+0.00.383.078 I load: printing all EOG tokens:
+0.00.383.088 I load:   - 128247 ('</s>')
+0.00.383.090 I load:   - 151643 ('<|endoftext|>')
+0.00.383.091 I load:   - 151645 ('<|im_end|>')
+0.00.383.092 I load:   - 151662 ('<|fim_pad|>')
+0.00.383.093 I load:   - 151663 ('<|repo_name|>')
+0.00.383.093 I load:   - 151664 ('<|file_sep|>')
+0.00.383.693 I load: special tokens cache size = 23
+0.00.452.038 I load: token to piece cache size = 0.9310 MB
+0.00.452.064 I print_info: arch                  = qwen2
+0.00.452.065 I print_info: vocab_only            = 0
+0.00.452.066 I print_info: no_alloc              = 0
+0.00.452.067 I print_info: n_ctx_train           = 32768
+0.00.452.068 I print_info: n_embd_inp            = 896
+0.00.452.069 I print_info: n_embd                = 896
+0.00.452.070 I print_info: n_embd_out            = 896
+0.00.452.071 I print_info: n_layer               = 24
+0.00.452.072 I print_info: n_layer_all           = 24
+0.00.452.129 I print_info: n_head                = 14
+0.00.452.132 I print_info: n_head_kv             = 2
+0.00.452.132 I print_info: n_rot                 = 64
+0.00.452.133 I print_info: n_swa                 = 0
+0.00.452.133 I print_info: is_swa_any            = 0
+0.00.452.134 I print_info: n_embd_head_k         = 64
+0.00.452.135 I print_info: n_embd_head_v         = 64
+0.00.452.137 I print_info: n_gqa                 = 7
+0.00.452.138 I print_info: n_embd_k_gqa          = 128
+0.00.452.140 I print_info: n_embd_v_gqa          = 128
+0.00.452.142 I print_info: f_norm_eps            = 0.0e+00
+0.00.452.143 I print_info: f_norm_rms_eps        = 1.0e-06
+0.00.452.144 I print_info: f_clamp_kqv           = 0.0e+00
+0.00.452.144 ggml-ameva [SUPPORTS_QUERY #1]: op='unnamed' src0='output.weight' (type=8 ne=[896,151936,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[151936,512,1,1])
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
-0.00.508.959 I print_info: n_head_kv             = 2
-0.00.508.960 I print_info: n_rot                 = 64
-0.00.508.961 ggml-ameva [SUPPORTS_QUERY #2]: op='unnamed' src0='output.weight' (type=8 ne=[896,151936,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[151936,512,1,1])
+I print_info: f_max_alibi_bias      = 0.0e+00
+0.00.452.145 I print_info: f_logit_scale         = 0.0e+00
+0.00.452.145 I print_info: f_attn_scale          = 0.0e+00
+0.00.452.146 I print_info: f_attn_value_scale    = 0.0000
+ggml-ameva [SUPPORTS_QUERY #2]: op='unnamed' src0='output.weight' (type=8 ne=[896,151936,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[151936,512,1,1])
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
-I print_info: n_swa                 = 0
-0.00.508.964 I print_info: is_swa_any            = 0
-0.00.508.967 I print_info: n_embd_head_k         = 64
-0.00.508.967 I print_info: n_embd_head_v         = 64
-0.00.508.970 I print_info: n_gqa                 = 7
-0.00.508.972 I print_info: n_embd_k_gqa          = 128
-0.00.508.974 I print_info: n_embd_v_gqa          = 128
-0.00.508.976 I print_info: f_norm_eps            = 0.0e+00
-0.00.508.977 I print_info: f_norm_rms_eps        = 1.0e-06
-0.00.508.978 I print_info: f_clamp_kqv           = 0.0e+00
-0.00.508.979 I print_info: f_max_alibi_bias      = 0.0e+00
-0.00.508.979 I print_info: f_logit_scale         = 0.0e+00
-0.00.508.980 I print_info: f_attn_scale          = 0.0e+00
+0.00.452.148 I print_info: n_ff                  = 4864
+0.00.452.149 I print_info: n_expert              = 0
+0.00.452.149 I print_info: n_expert_used         = 0
+0.00.452.150 I print_info: n_expert_groups       = 0
+0.00.452.150 I print_info: n_group_used          = 0
+0.00.452.151 I print_info: causal attn           = 1
+0.00.452.152 I print_info: pooling type          = -1
+0.00.452.152 I print_info: rope type             = 2
+0.00.452.153 I print_info: rope scaling          = linear
+0.00.452.154 I print_info: freq_base_train       = 1000000.0
+0.00.452.155 I print_info: freq_scale_train      = 1
+0.00.452.155 I print_info: n_ctx_orig_yarn       = 32768
+0.00.452.156 I print_info: rope_yarn_log_mul     = 0.0000
+0.00.452.156 I print_info: rope_finetuned        = unknown
+0.00.452.158 I print_info: model type            = 1B
+0.00.452.159 I print_info: model params          = 630.17 M
 ggml-ameva [SUPPORTS_QUERY #3]: op='unnamed' src0='blk.0.attn_q.weight' (type=6 ne=[896,896,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[896,512,1,1])
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.0.attn_q.weight', src1='unnamed') accepted for AMEVA!
-ggml-ameva [SUPPORTS_QUERY #4]: op='unnamed' src0='blk.0.attn_k.weight' (type=6 ne=[896,128,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[128,512,1,1])
+0.00.452.160 I print_info: general.name          = qwen2.5-0.5b-instruct
+0.00.452.162 I ggml-ameva [SUPPORTS_QUERY #4]: op='unnamed' src0='blk.0.attn_k.weight' (type=6 ne=[896,128,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[128,512,1,1])
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.0.attn_k.weight', src1='unnamed') accepted for AMEVA!
-0.00.508.981 I print_info: f_attn_value_scale    = 0.0000
-0.00.508.983 I print_info: n_ff                  = 4864
-0.00.508.984 I print_info: n_expert              = 0
+print_info: vocab type            = BPE
 ggml-ameva [SUPPORTS_QUERY #5]: op='unnamed' src0='blk.0.attn_v.weight' (type=8 ne=[896,128,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[128,512,1,1])
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
 ggml-ameva [SUPPORTS_QUERY #6]: op='unnamed' src0='blk.0.attn_v.weight' (type=8 ne=[896,128,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[128,512,1,1])
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
-0.00.508.985 I print_info: n_expert_used         = 0
-0.00.508.986 I print_info: n_expert_groups       = 0
-0.00.508.986 I print_info: n_group_used          = 0
-0.00.508.987 I print_info: causal attn           = 1
-0.00.508.987 I print_info: pooling type          = -1
-0.00.508.988 I print_info: rope type             = 2
-0.00.508.989 I print_info: rope scaling          = linear
-0.00.508.990 ggml-ameva [SUPPORTS_QUERY #7]: op='unnamed' src0='blk.0.attn_output.weight' (type=6 ne=[896,896,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[896,512,1,1])
+0.00.452.163 I print_info: n_vocab               = 151936
+0.00.452.164 I print_info: n_merges              = 151387
+0.00.452.165 I print_info: BOS token             = 151643 '<|endoftext|>'
+0.00.452.165 I print_info: EOS token             = 151645 '<|im_end|>'
+0.00.452.166 I print_info: EOT token             = 151645 '<|im_end|>'
+0.00.452.167 I print_info: PAD token             = 151643 '<|endoftext|>'
+ggml-ameva [SUPPORTS_QUERY #7]: op='unnamed' src0='blk.0.attn_output.weight' (type=6 ne=[896,896,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[896,512,1,1])
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.0.attn_output.weight', src1='unnamed') accepted for AMEVA!
-I print_info: freq_base_train       = 1000000.0
-0.00.508.991 I print_info: freq_scale_train      = 1
-0.00.508.992 I print_info: n_ctx_orig_yarn       = 32768
-0.00.508.993 I print_info: rope_yarn_log_mul     = 0.0000
-0.00.508.993 I print_info: rope_finetuned        = unknown
-0.00.508.995 I print_info: model type            = 1B
-0.00.508.997 ggml-ameva [SUPPORTS_QUERY #8]: op='unnamed' src0='blk.0.ffn_gate.weight' (type=6 ne=[896,4864,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[4864,512,1,1])
+0.00.452.167 I print_info: LF token              = 198 'Ċ'
+0.00.452.168 I print_info: FIM PRE token         = 151659 '<|fim_prefix|>'
+0.00.452.169 I print_info: FIM SUF token         = 151661 '<|fim_suffix|>'
+0.00.452.170 I print_info: FIM MID token         = 151660 '<|fim_middle|>'
+0.00.452.170 I print_info: FIM PAD token         = 151662 '<|fim_pad|>'
+0.00.452.171 I print_info: FIM REP token         = 151663 '<|repo_name|>'
+0.00.452.172 I print_info: FIM SEP token         = 151664 '<|file_sep|>'
+0.00.452.172 I ggml-ameva [SUPPORTS_QUERY #8]: op='unnamed' src0='blk.0.ffn_gate.weight' (type=6 ne=[896,4864,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[4864,512,1,1])
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.0.ffn_gate.weight', src1='unnamed') accepted for AMEVA!
-I print_info: model params          = 630.17 M
-0.00.508.997 I print_info: general.name          = qwen2.5-0.5b-instruct
-0.00.508.999 I print_info: vocab type            = BPE
-0.00.509.000 ggml-ameva [SUPPORTS_QUERY #9]: op='unnamed' src0='blk.0.ffn_down.weight' (type=14 ne=[4864,896,1,1]) src1='unnamed' (type=0 ne=[4864,512,1,1]) dst (type=0 ne=[896,512,1,1])
+print_info: EOG token             = 128247 '</s>'
+ggml-ameva [SUPPORTS_QUERY #9]: op='unnamed' src0='blk.0.ffn_down.weight' (type=14 ne=[4864,896,1,1]) src1='unnamed' (type=0 ne=[4864,512,1,1]) dst (type=0 ne=[896,512,1,1])
 ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
 ggml-ameva [SUPPORTS_QUERY #10]: op='unnamed' src0='blk.0.ffn_down.weight' (type=14 ne=[4864,896,1,1]) src1='unnamed' (type=0 ne=[4864,512,1,1]) dst (type=0 ne=[896,512,1,1])
 ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
-I print_info: n_vocab               = 151936
-0.00.509.001 I print_info: n_merges              = 151387
-0.00.509.002 I print_info: BOS token             = 151643 '<|endoftext|>'
-0.00.509.002 ggml-ameva [SUPPORTS_QUERY #11]: op='unnamed' src0='blk.0.ffn_up.weight' (type=6 ne=[896,4864,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[4864,512,1,1])
+0.00.452.173 I print_info: EOG token             = 151643 '<|endoftext|>'
+0.00.452.173 I print_info: EOG token             = 151645 '<|im_end|>'
+0.00.452.174 ggml-ameva [SUPPORTS_QUERY #11]: op='unnamed' src0='blk.0.ffn_up.weight' (type=6 ne=[896,4864,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[4864,512,1,1])
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.0.ffn_up.weight', src1='unnamed') accepted for AMEVA!
-I print_info: EOS token             = 151645 '<|im_end|>'
-0.00.509.003 I print_info: EOT token             = 151645 '<|im_end|>'
-0.00.509.004 I print_info: PAD token             = 151643 '<|endoftext|>'
-0.00.509.005 I print_info: LF token              = 198 'Ċ'
-0.00.509.006 ggml-ameva [SUPPORTS_QUERY #12]: op='unnamed' src0='blk.1.attn_q.weight' (type=6 ne=[896,896,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[896,512,1,1])
+I print_info: EOG token             = 151662 '<|fim_pad|>'
+0.00.452.175 I print_info: EOG token             = 151663 '<|repo_name|>'
+0.00.452.175 ggml-ameva [SUPPORTS_QUERY #12]: op='unnamed' src0='blk.1.attn_q.weight' (type=6 ne=[896,896,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[896,512,1,1])
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.1.attn_q.weight', src1='unnamed') accepted for AMEVA!
-I print_info: FIM PRE token         = 151659 '<|fim_prefix|>'
-0.00.509.007 I ggml-ameva [SUPPORTS_QUERY #13]: op='unnamed' src0='blk.1.attn_k.weight' (type=6 ne=[896,128,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[128,512,1,1])
+I print_info: EOG token             = 151664 '<|file_sep|>'
+0.00.452.175 I ggml-ameva [SUPPORTS_QUERY #13]: op='unnamed' src0='blk.1.attn_k.weight' (type=6 ne=[896,128,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[128,512,1,1])
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.1.attn_k.weight', src1='unnamed') accepted for AMEVA!
+print_info: max token length      = 256
+0.00.452.177 I load_tensors: loading model tensors, this can take a while... (mmap = true, direct_io = false)
+0.00.452.235 D load_tensors: layer   0 assigned to device AMEVA0, is_swa = 0
+0.00.452.236 D load_tensors: layer   1 assigned to device AMEVA0, is_swa = 0
+0.00.452.237 D load_tensors: layer   2 assigned to device AMEVA0, is_swa = 0
+0.00.452.237 D load_tensors: layer   3 assigned to device AMEVA0, is_swa = 0
+0.00.452.238 D load_tensors: layer   4 assigned to device AMEVA0, is_swa = 0
+0.00.452.238 D load_tensors: layer   5 assigned to device AMEVA0, is_swa = 0
+0.00.452.239 D load_tensors: layer   6 assigned to device AMEVA0, is_swa = 0
+0.00.452.239 D load_tensors: layer   7 assigned to device AMEVA0, is_swa = 0
+0.00.452.240 D load_tensors: layer   8 assigned to device AMEVA0, is_swa = 0
+0.00.452.240 D load_tensors: layer   9 assigned to device AMEVA0, is_swa = 0
+0.00.452.241 D load_tensors: layer  10 assigned to device AMEVA0, is_swa = 0
+0.00.452.242 D load_tensors: layer  11 assigned to device AMEVA0, is_swa = 0
+0.00.452.242 D load_tensors: layer  12 assigned to device AMEVA0, is_swa = 0
+0.00.452.243 D load_tensors: layer  13 assigned to device AMEVA0, is_swa = 0
+0.00.452.243 D load_tensors: layer  14 assigned to device AMEVA0, is_swa = 0
+0.00.452.244 D load_tensors: layer  15 assigned to device AMEVA0, is_swa = 0
+0.00.452.244 D load_tensors: layer  16 assigned to device AMEVA0, is_swa = 0
+0.00.452.245 D load_tensors: layer  17 assigned to device AMEVA0, is_swa = 0
+0.00.452.245 D load_tensors: layer  18 assigned to device AMEVA0, is_swa = 0
+0.00.452.246 D load_tensors: layer  19 assigned to device AMEVA0, is_swa = 0
+0.00.452.246 D load_tensors: layer  20 assigned to device AMEVA0, is_swa = 0
+0.00.452.247 D load_tensors: layer  21 assigned to device AMEVA0, is_swa = 0
+0.00.452.248 D load_tensors: layer  22 assigned to device AMEVA0, is_swa = 0
+0.00.452.248 D load_tensors: layer  23 assigned to device AMEVA0, is_swa = 0
+0.00.452.249 D load_tensors: layer  24 assigned to device AMEVA0, is_swa = 0
+0.00.452.300 D create_tensor: loading tensor token_embd.weight
+0.00.452.309 D create_tensor: loading tensor output_norm.weight
+0.00.452.521 D create_tensor: loading tensor output.weight
+0.00.452.532 D create_tensor: loading tensor blk.0.attn_norm.weight
+0.00.452.626 D create_tensor: loading tensor blk.0.attn_q.weight
+0.00.452.670 D create_tensor: loading tensor blk.0.attn_k.weight
+0.00.452.707 D create_tensor: loading tensor blk.0.attn_v.weight
+0.00.452.715 D create_tensor: loading tensor blk.0.attn_q.bias
+0.00.452.722 D create_tensor: loading tensor blk.0.attn_k.bias
+0.00.452.731 D create_tensor: loading tensor blk.0.attn_v.bias
+0.00.452.805 D create_tensor: loading tensor blk.0.attn_output.weight
+0.00.452.815 D create_tensor: loading tensor blk.0.ffn_norm.weight
+0.00.452.935 D create_tensor: loading tensor blk.0.ffn_gate.weight
+0.00.452.973 D create_tensor: loading tensor blk.0.ffn_down.weight
+0.00.453.039 D create_tensor: loading tensor blk.0.ffn_up.weight
+0.00.453.047 D create_tensor: loading tensor blk.1.attn_norm.weight
+0.00.453.088 D create_tensor: loading tensor blk.1.attn_q.weight
+0.00.453.127 D create_tensor: loading tensor blk.1.attn_k.weight
 ggml-ameva [SUPPORTS_QUERY #14]: op='unnamed' src0='blk.1.attn_v.weight' (type=8 ne=[896,128,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[128,512,1,1])
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
 ggml-ameva [SUPPORTS_QUERY #15]: op='unnamed' src0='blk.1.attn_v.weight' (type=8 ne=[896,128,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[128,512,1,1])
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
-print_info: FIM SUF token         = 151661 '<|fim_suffix|>'
-0.00.509.008 I print_info: FIM MID token         = 151660 '<|fim_middle|>'
-0.00.509.008 I print_info: FIM PAD token         = 151662 '<|fim_pad|>'
-0.00.509.009 I print_info: FIM REP token         = 151663 '<|repo_name|>'
-0.00.509.010 I print_info: FIM SEP token         = 151664 '<|file_sep|>'
+0.00.453.862 D create_tensor: loading tensor blk.1.attn_v.weight
+0.00.453.874 D create_tensor: loading tensor blk.1.attn_q.bias
+0.00.453.882 D create_tensor: loading tensor blk.1.attn_k.bias
+0.00.453.889 D create_tensor: loading tensor blk.1.attn_v.bias
 ggml-ameva [SUPPORTS_QUERY #16]: op='unnamed' src0='blk.1.attn_output.weight' (type=6 ne=[896,896,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[896,512,1,1])
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.1.attn_output.weight', src1='unnamed') accepted for AMEVA!
-0.00.509.011 I print_info: EOG token             = 128247 '</s>'
-0.00.509.011 I print_info: EOG token             = 151643 '<|endoftext|>'
-0.00.509.012 I print_info: EOG token             = 151645 '<|im_end|>'
-0.00.509.013 I ggml-ameva [SUPPORTS_QUERY #17]: op='unnamed' src0='blk.1.ffn_gate.weight' (type=6 ne=[896,4864,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[4864,512,1,1])
+0.00.453.944 D create_tensor: loading tensor blk.1.attn_output.weight
+0.00.453.956 D create_tensor: loading tensor blk.1.ffn_norm.weight
+ggml-ameva [SUPPORTS_QUERY #17]: op='unnamed' src0='blk.1.ffn_gate.weight' (type=6 ne=[896,4864,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[4864,512,1,1])
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.1.ffn_gate.weight', src1='unnamed') accepted for AMEVA!
-print_info: EOG token             = 151662 '<|fim_pad|>'
-0.00.509.014 I print_info: EOG token             = 151663 '<|repo_name|>'
-0.00.509.014 I print_info: EOG token             = 151664 '<|file_sep|>'
-0.00.509.015 I ggml-ameva [SUPPORTS_QUERY #18]: op='unnamed' src0='blk.1.ffn_down.weight' (type=14 ne=[4864,896,1,1]) src1='unnamed' (type=0 ne=[4864,512,1,1]) dst (type=0 ne=[896,512,1,1])
+0.00.454.006 D create_tensor: loading tensor blk.1.ffn_gate.weight
+ggml-ameva [SUPPORTS_QUERY #18]: op='unnamed' src0='blk.1.ffn_down.weight' (type=14 ne=[4864,896,1,1]) src1='unnamed' (type=0 ne=[4864,512,1,1]) dst (type=0 ne=[896,512,1,1])
 ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
 ggml-ameva [SUPPORTS_QUERY #19]: op='unnamed' src0='blk.1.ffn_down.weight' (type=14 ne=[4864,896,1,1]) src1='unnamed' (type=0 ne=[4864,512,1,1]) dst (type=0 ne=[896,512,1,1])
 ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
-print_info: max token length      = 256
-0.00.509.016 I load_tensors: loading model tensors, this can take a while... (mmap = true, direct_io = false)
-0.00.509.071 D load_tensors: layer   0 assigned to device AMEVA0, is_swa = 0
-0.00.509.072 D load_tensors: layer   1 assigned to device AMEVA0, is_swa = 0
-0.00.509.073 D load_tensors: layer   2 assigned to device AMEVA0, is_swa = 0
+0.00.454.052 D create_tensor: loading tensor blk.1.ffn_down.weight
 ggml-ameva [SUPPORTS_QUERY #20]: op='unnamed' src0='blk.1.ffn_up.weight' (type=6 ne=[896,4864,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[4864,512,1,1])
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.1.ffn_up.weight', src1='unnamed') accepted for AMEVA!
-0.00.509.074 D load_tensors: layer   3 assigned to device AMEVA0, is_swa = 0
-0.00.509.075 D load_tensors: layer   4 assigned to device AMEVA0, is_swa = 0
-0.00.509.075 D load_tensors: layer   5 assigned to device AMEVA0, is_swa = 0
-0.00.509.076 D load_tensors: layer   6 assigned to device AMEVA0, is_swa = 0
-0.00.509.077 D load_tensors: layer   7 assigned to device AMEVA0, is_swa = 0
-0.00.509.077 D load_tensors: layer   8 assigned to device AMEVA0, is_swa = 0
-0.00.509.078 ggml-ameva [SUPPORTS_QUERY #21]: op='unnamed' src0='blk.2.attn_q.weight' (type=6 ne=[896,896,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[896,512,1,1])
+0.00.454.089 D create_tensor: loading tensor blk.1.ffn_up.weight
+0.00.454.101 D create_tensor: loading tensor blk.2.attn_norm.weight
+ggml-ameva [SUPPORTS_QUERY #21]: op='unnamed' src0='blk.2.attn_q.weight' (type=6 ne=[896,896,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[896,512,1,1])
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.2.attn_q.weight', src1='unnamed') accepted for AMEVA!
-D load_tensors: layer   9 assigned to device AMEVA0, is_swa = 0
-0.00.509.079 D ggml-ameva [SUPPORTS_QUERY #22]: op='unnamed' src0='blk.2.attn_k.weight' (type=6 ne=[896,128,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[128,512,1,1])
+0.00.454.138 D create_tensor: loading tensor blk.2.attn_q.weight
+ggml-ameva [SUPPORTS_QUERY #22]: op='unnamed' src0='blk.2.attn_k.weight' (type=6 ne=[896,128,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[128,512,1,1])
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.2.attn_k.weight', src1='unnamed') accepted for AMEVA!
+0.00.454.175 D create_tensor: loading tensor blk.2.attn_k.weight
 ggml-ameva [SUPPORTS_QUERY #23]: op='unnamed' src0='blk.2.attn_v.weight' (type=6 ne=[896,128,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[128,512,1,1])
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.2.attn_v.weight', src1='unnamed') accepted for AMEVA!
-load_tensors: layer  10 assigned to device AMEVA0, is_swa = 0
-0.00.509.080 D load_tensors: layer  11 assigned to device AMEVA0, is_swa = 0
-0.00.509.081 D load_tensors: layer  12 assigned to device AMEVA0, is_swa = 0
-0.00.509.081 D load_tensors: layer  13 assigned to device AMEVA0, is_swa = 0
-0.00.509.082 D load_tensors: layer  14 assigned to device AMEVA0, is_swa = 0
-ggml-ameva [SUPPORTS_QUERY #24]: op='unnamed' src0='blk.2.attn_output.weight' (type=6 ne=[896,896,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[896,512,1,1])
+0.00.454.212 D create_tensor: loading tensor blk.2.attn_v.weight
+0.00.454.224 D create_tensor: loading tensor blk.2.attn_q.bias
+0.00.454.232 D create_tensor: loading tensor blk.2.attn_k.bias
+0.00.454.239 D ggml-ameva [SUPPORTS_QUERY #24]: op='unnamed' src0='blk.2.attn_output.weight' (type=6 ne=[896,896,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[896,512,1,1])
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.2.attn_output.weight', src1='unnamed') accepted for AMEVA!
-0.00.509.083 D load_tensors: layer  15 assigned to device AMEVA0, is_swa = 0
-0.00.509.083 D load_tensors: layer  16 assigned to device AMEVA0, is_swa = 0
-0.00.509.084 D load_tensors: layer  17 assigned to device AMEVA0, is_swa = 0
-0.00.509.085 D ggml-ameva [SUPPORTS_QUERY #25]: op='unnamed' src0='blk.2.ffn_gate.weight' (type=6 ne=[896,4864,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[4864,512,1,1])
+create_tensor: loading tensor blk.2.attn_v.bias
+0.00.454.280 D create_tensor: loading tensor blk.2.attn_output.weight
+0.00.454.288 D create_tensor: loading tensor blk.2.ffn_norm.weight
+ggml-ameva [SUPPORTS_QUERY #25]: op='unnamed' src0='blk.2.ffn_gate.weight' (type=6 ne=[896,4864,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[4864,512,1,1])
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.2.ffn_gate.weight', src1='unnamed') accepted for AMEVA!
-load_tensors: layer  18 assigned to device AMEVA0, is_swa = 0
-0.00.509.086 D load_tensors: layer  19 assigned to device AMEVA0, is_swa = 0
-0.00.509.087 D load_tensors: layer  20 assigned to device AMEVA0, is_swa = 0
-0.00.509.087 D ggml-ameva [SUPPORTS_QUERY #26]: op='unnamed' src0='blk.2.ffn_down.weight' (type=12 ne=[4864,896,1,1]) src1='unnamed' (type=0 ne=[4864,512,1,1]) dst (type=0 ne=[896,512,1,1])
+0.00.454.338 D create_tensor: loading tensor blk.2.ffn_gate.weight
+ggml-ameva [SUPPORTS_QUERY #26]: op='unnamed' src0='blk.2.ffn_down.weight' (type=12 ne=[4864,896,1,1]) src1='unnamed' (type=0 ne=[4864,512,1,1]) dst (type=0 ne=[896,512,1,1])
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
 ggml-ameva [SUPPORTS_QUERY #27]: op='unnamed' src0='blk.2.ffn_down.weight' (type=12 ne=[4864,896,1,1]) src1='unnamed' (type=0 ne=[4864,512,1,1]) dst (type=0 ne=[896,512,1,1])
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
-load_tensors: layer  21 assigned to device AMEVA0, is_swa = 0
-0.00.509.088 D load_tensors: layer  22 assigned to device AMEVA0, is_swa = 0
-0.00.509.089 D load_tensors: layer  23 assigned to device AMEVA0, is_swa = 0
-0.00.509.090 D load_tensors: layer  24 assigned to device AMEVA0, is_swa = 0
-0.00.509.149 D create_tensor: loading tensor token_embd.weight
-0.00.509.161 D create_tensor: loading tensor output_norm.weight
-0.00.509.474 D create_tensor: loading tensor output.weight
-0.00.509.489 ggml-ameva [SUPPORTS_QUERY #28]: op='unnamed' src0='blk.2.ffn_up.weight' (type=6 ne=[896,4864,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[4864,512,1,1])
+0.00.454.384 D create_tensor: loading tensor blk.2.ffn_down.weight
+ggml-ameva [SUPPORTS_QUERY #28]: op='unnamed' src0='blk.2.ffn_up.weight' (type=6 ne=[896,4864,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[4864,512,1,1])
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.2.ffn_up.weight', src1='unnamed') accepted for AMEVA!
-D create_tensor: loading tensor blk.0.attn_norm.weight
-0.00.509.579 D create_tensor: loading tensor blk.0.attn_q.weight
-0.00.509.608 D create_tensor: loading tensor blk.0.attn_k.weight
-0.00.509.713 D create_tensor: loading tensor blk.0.attn_v.weight
-0.00.509.724 ggml-ameva [SUPPORTS_QUERY #29]: op='unnamed' src0='blk.3.attn_q.weight' (type=6 ne=[896,896,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[896,512,1,1])
+0.00.454.421 D create_tensor: loading tensor blk.2.ffn_up.weight
+0.00.454.435 D create_tensor: loading tensor blk.3.attn_norm.weight
+ggml-ameva [SUPPORTS_QUERY #29]: op='unnamed' src0='blk.3.attn_q.weight' (type=6 ne=[896,896,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[896,512,1,1])
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.3.attn_q.weight', src1='unnamed') accepted for AMEVA!
-D create_tensor: loading tensor blk.0.attn_q.bias
-0.00.509.735 D create_tensor: loading tensor blk.0.attn_k.bias
-0.00.509.747 D create_tensor: loading tensor blk.0.attn_v.bias
-0.00.509.891 ggml-ameva [SUPPORTS_QUERY #30]: op='unnamed' src0='blk.3.attn_k.weight' (type=6 ne=[896,128,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[128,512,1,1])
+0.00.454.472 D create_tensor: loading tensor blk.3.attn_q.weight
+ggml-ameva [SUPPORTS_QUERY #30]: op='unnamed' src0='blk.3.attn_k.weight' (type=6 ne=[896,128,1,1]) src1='unnamed' (type=0 ne=[896,512,1,1]) dst (type=0 ne=[128,512,1,1])
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.3.attn_k.weight', src1='unnamed') accepted for AMEVA!
-D create_tensor: loading tensor blk.0.attn_output.weight
-0.00.509.903 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
+0.00.454.508 D create_tensor: loading tensor blk.3.attn_k.weight
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
-D create_tensor: loading tensor blk.0.ffn_norm.weight
-0.00.510.045 D create_tensor: loading tensor blk.0.ffn_gate.weight
-0.00.510.155 D create_tensor: loading tensor blk.0.ffn_down.weight
-0.00.510.242 D create_tensor: loading tensor blk.0.ffn_up.weight
-0.00.510.253 D create_tensor: loading tensor blk.1.attn_norm.weight
-0.00.510.344 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.3.attn_output.weight', src1='unnamed') accepted for AMEVA!
-D create_tensor: loading tensor blk.1.attn_q.weight
-0.00.510.405 D create_tensor: loading tensor blk.1.attn_k.weight
-0.00.510.451 D create_tensor: loading tensor blk.1.attn_v.weight
-0.00.510.462 D create_tensor: loading tensor blk.1.attn_q.bias
-0.00.510.473 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.3.ffn_gate.weight', src1='unnamed') accepted for AMEVA!
-D create_tensor: loading tensor blk.1.attn_k.bias
-0.00.510.484 D create_tensor: loading tensor blk.1.attn_v.bias
-0.00.510.555 D create_tensor: loading tensor blk.1.attn_output.weight
-0.00.510.566 D ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
+0.00.454.544 D create_tensor: loading tensor blk.3.attn_v.weight
+0.00.454.558 D create_tensor: loading tensor blk.3.attn_q.bias
+0.00.454.566 D create_tensor: loading tensor blk.3.attn_k.bias
+0.00.454.581 D create_tensor: loading tensor blk.3.attn_v.bias
+ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.3.attn_output.weight', src1='unnamed') accepted for AMEVA!
+0.00.454.671 D create_tensor: loading tensor blk.3.attn_output.weight
+0.00.454.690 D create_tensor: loading tensor blk.3.ffn_norm.weight
+ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.3.ffn_gate.weight', src1='unnamed') accepted for AMEVA!
+0.00.454.719 D create_tensor: loading tensor blk.3.ffn_gate.weight
 ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
-create_tensor: loading tensor blk.1.ffn_norm.weight
-0.00.510.654 D create_tensor: loading tensor blk.1.ffn_gate.weight
-0.00.510.761 D create_tensor: loading tensor blk.1.ffn_down.weight
-0.00.510.884 D ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.3.ffn_up.weight', src1='unnamed') accepted for AMEVA!
-create_tensor: loading tensor blk.1.ffn_up.weight
-0.00.510.895 D create_tensor: loading tensor blk.2.attn_norm.weight
-0.00.511.041 D create_tensor: loading tensor blk.2.attn_q.weight
-0.00.511.101 D create_tensor: loading tensor blk.2.attn_k.weight
-0.00.511.130 D ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.4.attn_q.weight', src1='unnamed') accepted for AMEVA!
-create_tensor: loading tensor blk.2.attn_v.weight
-0.00.511.141 D ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.4.attn_k.weight', src1='unnamed') accepted for AMEVA!
-create_tensor: loading tensor blk.2.attn_q.bias
-0.00.511.152 D ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.4.attn_v.weight', src1='unnamed') accepted for AMEVA!
-create_tensor: loading tensor blk.2.attn_k.bias
-0.00.511.162 D create_tensor: loading tensor blk.2.attn_v.bias
-0.00.511.232 D create_tensor: loading tensor blk.2.attn_output.weight
-0.00.511.244 D create_tensor: loading tensor blk.2.ffn_norm.weight
-0.00.511.331 D ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.4.attn_output.weight', src1='unnamed') accepted for AMEVA!
-create_tensor: loading tensor blk.2.ffn_gate.weight
-0.00.511.437 D create_tensor: loading tensor blk.2.ffn_down.weight
-0.00.511.630 D create_tensor: loading tensor blk.2.ffn_up.weight
-0.00.511.641 D create_tensor: loading tensor blk.3.attn_norm.weight
+ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
+0.00.454.755 D create_tensor: loading tensor blk.3.ffn_down.weight
+ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.3.ffn_up.weight', src1='unnamed') accepted for AMEVA!
+0.00.454.787 D create_tensor: loading tensor blk.3.ffn_up.weight
+0.00.454.799 D create_tensor: loading tensor blk.4.attn_norm.weight
+ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.4.attn_q.weight', src1='unnamed') accepted for AMEVA!
+0.00.454.828 D create_tensor: loading tensor blk.4.attn_q.weight
+ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.4.attn_k.weight', src1='unnamed') accepted for AMEVA!
+0.00.454.859 D create_tensor: loading tensor blk.4.attn_k.weight
+ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.4.attn_v.weight', src1='unnamed') accepted for AMEVA!
+0.00.454.890 D create_tensor: loading tensor blk.4.attn_v.weight
+0.00.454.901 D create_tensor: loading tensor blk.4.attn_q.bias
+0.00.454.908 D create_tensor: loading tensor blk.4.attn_k.bias
+0.00.454.915 D create_tensor: loading tensor blk.4.attn_v.bias
+ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.4.attn_output.weight', src1='unnamed') accepted for AMEVA!
+0.00.454.956 D create_tensor: loading tensor blk.4.attn_output.weight
+0.00.454.970 D create_tensor: loading tensor blk.4.ffn_norm.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.4.ffn_gate.weight', src1='unnamed') accepted for AMEVA!
-0.00.511.733 D create_tensor: loading tensor blk.3.attn_q.weight
+0.00.455.011 D create_tensor: loading tensor blk.4.ffn_gate.weight
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
-0.00.511.820 D create_tensor: loading tensor blk.3.attn_k.weight
-0.00.511.880 D create_tensor: loading tensor blk.3.attn_v.weight
-0.00.511.893 D create_tensor: loading tensor blk.3.attn_q.bias
+0.00.455.045 D create_tensor: loading tensor blk.4.ffn_down.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.4.ffn_up.weight', src1='unnamed') accepted for AMEVA!
-0.00.511.904 D create_tensor: loading tensor blk.3.attn_k.bias
-0.00.511.914 D create_tensor: loading tensor blk.3.attn_v.bias
-0.00.511.994 D create_tensor: loading tensor blk.3.attn_output.weight
-0.00.512.008 D ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.5.attn_q.weight', src1='unnamed') accepted for AMEVA!
-create_tensor: loading tensor blk.3.ffn_norm.weight
-0.00.512.105 D create_tensor: loading tensor blk.3.ffn_gate.weight
-0.00.512.210 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.5.attn_k.weight', src1='unnamed') accepted for AMEVA!
-D create_tensor: loading tensor blk.3.ffn_down.weight
-0.00.512.289 D create_tensor: loading tensor blk.3.ffn_up.weight
-0.00.512.300 D create_tensor: loading tensor blk.4.attn_norm.weight
-0.00.512.402 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.5.attn_v.weight', src1='unnamed') accepted for AMEVA!
-D create_tensor: loading tensor blk.4.attn_q.weight
-0.00.512.443 D create_tensor: loading tensor blk.4.attn_k.weight
-0.00.512.485 D create_tensor: loading tensor blk.4.attn_v.weight
-0.00.512.496 D create_tensor: loading tensor blk.4.attn_q.bias
-0.00.512.507 D create_tensor: loading tensor blk.4.attn_k.bias
+0.00.455.076 D create_tensor: loading tensor blk.4.ffn_up.weight
+0.00.455.088 D create_tensor: loading tensor blk.5.attn_norm.weight
+ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.5.attn_q.weight', src1='unnamed') accepted for AMEVA!
+0.00.455.117 D create_tensor: loading tensor blk.5.attn_q.weight
+ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.5.attn_k.weight', src1='unnamed') accepted for AMEVA!
+0.00.455.148 D create_tensor: loading tensor blk.5.attn_k.weight
+ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.5.attn_v.weight', src1='unnamed') accepted for AMEVA!
+0.00.455.179 D create_tensor: loading tensor blk.5.attn_v.weight
+0.00.455.191 D create_tensor: loading tensor blk.5.attn_q.bias
+0.00.455.198 D create_tensor: loading tensor blk.5.attn_k.bias
+0.00.455.205 D create_tensor: loading tensor blk.5.attn_v.bias
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.5.attn_output.weight', src1='unnamed') accepted for AMEVA!
-0.00.512.517 D create_tensor: loading tensor blk.4.attn_v.bias
-0.00.512.581 D create_tensor: loading tensor blk.4.attn_output.weight
-0.00.512.594 D create_tensor: loading tensor blk.4.ffn_norm.weight
-0.00.512.674 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.5.ffn_gate.weight', src1='unnamed') accepted for AMEVA!
-D create_tensor: loading tensor blk.4.ffn_gate.weight
-0.00.512.723 D create_tensor: loading tensor blk.4.ffn_down.weight
-0.00.512.803 D create_tensor: loading tensor blk.4.ffn_up.weight
-0.00.512.814 D ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
+0.00.455.246 D create_tensor: loading tensor blk.5.attn_output.weight
+ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.5.ffn_gate.weight', src1='unnamed') accepted for AMEVA!
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
-create_tensor: loading tensor blk.5.attn_norm.weight
-0.00.512.899 D create_tensor: loading tensor blk.5.attn_q.weight
+ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
+0.00.455.260 D create_tensor: loading tensor blk.5.ffn_norm.weight
+0.00.455.275 D create_tensor: loading tensor blk.5.ffn_gate.weight
+0.00.455.296 D create_tensor: loading tensor blk.5.ffn_down.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.5.ffn_up.weight', src1='unnamed') accepted for AMEVA!
-0.00.512.960 D create_tensor: loading tensor blk.5.attn_k.weight
-0.00.513.056 D create_tensor: loading tensor blk.5.attn_v.weight
-0.00.513.068 D create_tensor: loading tensor blk.5.attn_q.bias
-0.00.513.078 D ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.6.attn_q.weight', src1='unnamed') accepted for AMEVA!
-create_tensor: loading tensor blk.5.attn_k.bias
-0.00.513.089 D ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.6.attn_k.weight', src1='unnamed') accepted for AMEVA!
-create_tensor: loading tensor blk.5.attn_v.bias
-0.00.513.168 D create_tensor: loading tensor blk.5.attn_output.weight
-0.00.513.182 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
+0.00.455.350 D create_tensor: loading tensor blk.5.ffn_up.weight
+0.00.455.362 D create_tensor: loading tensor blk.6.attn_norm.weight
+ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.6.attn_q.weight', src1='unnamed') accepted for AMEVA!
+0.00.455.392 D create_tensor: loading tensor blk.6.attn_q.weight
+ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.6.attn_k.weight', src1='unnamed') accepted for AMEVA!
+0.00.455.422 D create_tensor: loading tensor blk.6.attn_k.weight
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
-D create_tensor: loading tensor blk.5.ffn_norm.weight
-0.00.513.262 D create_tensor: loading tensor blk.5.ffn_gate.weight
-0.00.513.366 D create_tensor: loading tensor blk.5.ffn_down.weight
-0.00.513.409 D create_tensor: loading tensor blk.5.ffn_up.weight
-0.00.513.420 D create_tensor: loading tensor blk.6.attn_norm.weight
-0.00.513.506 D create_tensor: loading tensor blk.6.attn_q.weight
+ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
+0.00.455.457 D create_tensor: loading tensor blk.6.attn_v.weight
+0.00.455.469 D create_tensor: loading tensor blk.6.attn_q.bias
+0.00.455.476 D create_tensor: loading tensor blk.6.attn_k.bias
+0.00.455.483 D create_tensor: loading tensor blk.6.attn_v.bias
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.6.attn_output.weight', src1='unnamed') accepted for AMEVA!
-0.00.513.548 D create_tensor: loading tensor blk.6.attn_k.weight
-0.00.513.616 D create_tensor: loading tensor blk.6.attn_v.weight
-0.00.513.627 D create_tensor: loading tensor blk.6.attn_q.bias
-0.00.513.638 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.6.ffn_gate.weight', src1='unnamed') accepted for AMEVA!
-D create_tensor: loading tensor blk.6.attn_k.bias
-0.00.513.649 ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
+0.00.455.524 D create_tensor: loading tensor blk.6.attn_output.weight
+0.00.455.537 D create_tensor: loading tensor blk.6.ffn_norm.weight
+ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.6.ffn_gate.weight', src1='unnamed') accepted for AMEVA!
+0.00.455.567 D create_tensor: loading tensor blk.6.ffn_gate.weight
 ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
-D create_tensor: loading tensor blk.6.attn_v.bias
-0.00.513.748 D ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.6.ffn_up.weight', src1='unnamed') accepted for AMEVA!
-create_tensor: loading tensor blk.6.attn_output.weight
-0.00.513.760 D create_tensor: loading tensor blk.6.ffn_norm.weight
-0.00.513.841 D create_tensor: loading tensor blk.6.ffn_gate.weight
-0.00.513.890 D create_tensor: loading tensor blk.6.ffn_down.weight
-0.00.513.931 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.7.attn_q.weight', src1='unnamed') accepted for AMEVA!
-D create_tensor: loading tensor blk.6.ffn_up.weight
-0.00.513.944 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.7.attn_k.weight', src1='unnamed') accepted for AMEVA!
-D create_tensor: loading tensor blk.7.attn_norm.weight
-0.00.514.031 D create_tensor: loading tensor blk.7.attn_q.weight
-0.00.514.073 D create_tensor: loading tensor blk.7.attn_k.weight
+ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
+0.00.455.601 D create_tensor: loading tensor blk.6.ffn_down.weight
+ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.6.ffn_up.weight', src1='unnamed') accepted for AMEVA!
+0.00.455.632 D create_tensor: loading tensor blk.6.ffn_up.weight
+0.00.455.644 D create_tensor: loading tensor blk.7.attn_norm.weight
+ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.7.attn_q.weight', src1='unnamed') accepted for AMEVA!
+0.00.455.675 D create_tensor: loading tensor blk.7.attn_q.weight
+ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.7.attn_k.weight', src1='unnamed') accepted for AMEVA!
+0.00.455.706 D create_tensor: loading tensor blk.7.attn_k.weight
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
-0.00.514.157 D create_tensor: loading tensor blk.7.attn_v.weight
-0.00.514.174 D create_tensor: loading tensor blk.7.attn_q.bias
-0.00.514.186 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.7.attn_output.weight', src1='unnamed') accepted for AMEVA!
-D create_tensor: loading tensor blk.7.attn_k.bias
-0.00.514.197 D create_tensor: loading tensor blk.7.attn_v.bias
-0.00.514.221 D create_tensor: loading tensor blk.7.attn_output.weight
-0.00.514.233 D ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.7.ffn_gate.weight', src1='unnamed') accepted for AMEVA!
-create_tensor: loading tensor blk.7.ffn_norm.weight
-0.00.514.313 D create_tensor: loading tensor blk.7.ffn_gate.weight
+0.00.455.745 D create_tensor: loading tensor blk.7.attn_v.weight
+0.00.455.757 D create_tensor: loading tensor blk.7.attn_q.bias
+0.00.455.764 D create_tensor: loading tensor blk.7.attn_k.bias
+0.00.455.771 D create_tensor: loading tensor blk.7.attn_v.bias
+ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.7.attn_output.weight', src1='unnamed') accepted for AMEVA!
+0.00.455.814 D create_tensor: loading tensor blk.7.attn_output.weight
+0.00.455.826 D create_tensor: loading tensor blk.7.ffn_norm.weight
+ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.7.ffn_gate.weight', src1='unnamed') accepted for AMEVA!
+0.00.455.869 D create_tensor: loading tensor blk.7.ffn_gate.weight
 ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
-0.00.514.374 D create_tensor: loading tensor blk.7.ffn_down.weight
+0.00.455.903 D create_tensor: loading tensor blk.7.ffn_down.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.7.ffn_up.weight', src1='unnamed') accepted for AMEVA!
-0.00.514.417 D create_tensor: loading tensor blk.7.ffn_up.weight
-0.00.514.437 D create_tensor: loading tensor blk.8.attn_norm.weight
+0.00.455.932 D create_tensor: loading tensor blk.7.ffn_up.weight
+0.00.455.948 D create_tensor: loading tensor blk.8.attn_norm.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.8.attn_q.weight', src1='unnamed') accepted for AMEVA!
-0.00.514.482 D create_tensor: loading tensor blk.8.attn_q.weight
+0.00.455.978 D create_tensor: loading tensor blk.8.attn_q.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.8.attn_k.weight', src1='unnamed') accepted for AMEVA!
-0.00.514.524 D create_tensor: loading tensor blk.8.attn_k.weight
+0.00.456.007 D create_tensor: loading tensor blk.8.attn_k.weight
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
-0.00.514.573 D create_tensor: loading tensor blk.8.attn_v.weight
-0.00.514.591 D create_tensor: loading tensor blk.8.attn_q.bias
-0.00.514.603 D create_tensor: loading tensor blk.8.attn_k.bias
-0.00.514.615 D create_tensor: loading tensor blk.8.attn_v.bias
+0.00.456.042 D create_tensor: loading tensor blk.8.attn_v.weight
+0.00.456.054 D create_tensor: loading tensor blk.8.attn_q.bias
+0.00.456.062 D create_tensor: loading tensor blk.8.attn_k.bias
+0.00.456.070 D create_tensor: loading tensor blk.8.attn_v.bias
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.8.attn_output.weight', src1='unnamed') accepted for AMEVA!
-0.00.514.673 D create_tensor: loading tensor blk.8.attn_output.weight
-0.00.514.691 D ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.8.ffn_gate.weight', src1='unnamed') accepted for AMEVA!
-create_tensor: loading tensor blk.8.ffn_norm.weight
-0.00.514.734 D create_tensor: loading tensor blk.8.ffn_gate.weight
+0.00.456.111 D create_tensor: loading tensor blk.8.attn_output.weight
+ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.8.ffn_gate.weight', src1='unnamed') accepted for AMEVA!
 ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
-0.00.514.783 D create_tensor: loading tensor blk.8.ffn_down.weight
+0.00.456.123 D create_tensor: loading tensor blk.8.ffn_norm.weight
+0.00.456.139 D create_tensor: loading tensor blk.8.ffn_gate.weight
+0.00.456.159 D create_tensor: loading tensor blk.8.ffn_down.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.8.ffn_up.weight', src1='unnamed') accepted for AMEVA!
-0.00.514.826 D create_tensor: loading tensor blk.8.ffn_up.weight
-0.00.514.844 D create_tensor: loading tensor blk.9.attn_norm.weight
+0.00.456.213 D create_tensor: loading tensor blk.8.ffn_up.weight
+0.00.456.226 D create_tensor: loading tensor blk.9.attn_norm.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.9.attn_q.weight', src1='unnamed') accepted for AMEVA!
-0.00.514.894 D create_tensor: loading tensor blk.9.attn_q.weight
+0.00.456.258 D create_tensor: loading tensor blk.9.attn_q.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.9.attn_k.weight', src1='unnamed') accepted for AMEVA!
-0.00.514.936 D create_tensor: loading tensor blk.9.attn_k.weight
+0.00.456.288 D create_tensor: loading tensor blk.9.attn_k.weight
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
-0.00.514.985 D create_tensor: loading tensor blk.9.attn_v.weight
-0.00.515.003 D create_tensor: loading tensor blk.9.attn_q.bias
-0.00.515.015 D create_tensor: loading tensor blk.9.attn_k.bias
-0.00.515.027 D create_tensor: loading tensor blk.9.attn_v.bias
+0.00.456.323 D create_tensor: loading tensor blk.9.attn_v.weight
+0.00.456.335 D create_tensor: loading tensor blk.9.attn_q.bias
+0.00.456.343 D create_tensor: loading tensor blk.9.attn_k.bias
+0.00.456.351 D create_tensor: loading tensor blk.9.attn_v.bias
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.9.attn_output.weight', src1='unnamed') accepted for AMEVA!
-0.00.515.084 D create_tensor: loading tensor blk.9.attn_output.weight
-0.00.515.102 D create_tensor: loading tensor blk.9.ffn_norm.weight
+0.00.456.394 D create_tensor: loading tensor blk.9.attn_output.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.9.ffn_gate.weight', src1='unnamed') accepted for AMEVA!
-0.00.515.159 D create_tensor: loading tensor blk.9.ffn_gate.weight
 ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
-0.00.515.207 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.9.ffn_up.weight', src1='unnamed') accepted for AMEVA!
-D create_tensor: loading tensor blk.9.ffn_down.weight
-0.00.515.238 D create_tensor: loading tensor blk.9.ffn_up.weight
-0.00.515.251 D create_tensor: loading tensor blk.10.attn_norm.weight
+0.00.456.406 D create_tensor: loading tensor blk.9.ffn_norm.weight
+0.00.456.421 D create_tensor: loading tensor blk.9.ffn_gate.weight
+0.00.456.441 D create_tensor: loading tensor blk.9.ffn_down.weight
+ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.9.ffn_up.weight', src1='unnamed') accepted for AMEVA!
+0.00.456.499 D create_tensor: loading tensor blk.9.ffn_up.weight
+0.00.456.512 D create_tensor: loading tensor blk.10.attn_norm.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.10.attn_q.weight', src1='unnamed') accepted for AMEVA!
-0.00.515.312 D create_tensor: loading tensor blk.10.attn_q.weight
+0.00.456.542 D create_tensor: loading tensor blk.10.attn_q.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.10.attn_k.weight', src1='unnamed') accepted for AMEVA!
-0.00.515.357 D create_tensor: loading tensor blk.10.attn_k.weight
+0.00.456.576 D create_tensor: loading tensor blk.10.attn_k.weight
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
-0.00.515.405 D create_tensor: loading tensor blk.10.attn_v.weight
-0.00.515.421 D create_tensor: loading tensor blk.10.attn_q.bias
-0.00.515.433 D create_tensor: loading tensor blk.10.attn_k.bias
-0.00.515.444 D create_tensor: loading tensor blk.10.attn_v.bias
+0.00.456.610 D create_tensor: loading tensor blk.10.attn_v.weight
+0.00.456.622 D create_tensor: loading tensor blk.10.attn_q.bias
+0.00.456.629 D create_tensor: loading tensor blk.10.attn_k.bias
+0.00.456.637 D create_tensor: loading tensor blk.10.attn_v.bias
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.10.attn_output.weight', src1='unnamed') accepted for AMEVA!
-0.00.515.574 D create_tensor: loading tensor blk.10.attn_output.weight
-0.00.515.592 D create_tensor: loading tensor blk.10.ffn_norm.weight
+0.00.456.679 D create_tensor: loading tensor blk.10.attn_output.weight
+0.00.456.691 D create_tensor: loading tensor blk.10.ffn_norm.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.10.ffn_gate.weight', src1='unnamed') accepted for AMEVA!
-0.00.515.678 D create_tensor: loading tensor blk.10.ffn_gate.weight
+0.00.456.733 D create_tensor: loading tensor blk.10.ffn_gate.weight
 ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
-0.00.515.745 D create_tensor: loading tensor blk.10.ffn_down.weight
+0.00.456.768 D create_tensor: loading tensor blk.10.ffn_down.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.10.ffn_up.weight', src1='unnamed') accepted for AMEVA!
-0.00.515.790 D create_tensor: loading tensor blk.10.ffn_up.weight
-0.00.515.802 D create_tensor: loading tensor blk.11.attn_norm.weight
+0.00.456.798 D create_tensor: loading tensor blk.10.ffn_up.weight
+0.00.456.810 D create_tensor: loading tensor blk.11.attn_norm.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.11.attn_q.weight', src1='unnamed') accepted for AMEVA!
-0.00.515.859 D create_tensor: loading tensor blk.11.attn_q.weight
+0.00.456.839 D create_tensor: loading tensor blk.11.attn_q.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.11.attn_k.weight', src1='unnamed') accepted for AMEVA!
-0.00.515.916 D create_tensor: loading tensor blk.11.attn_k.weight
+0.00.456.870 D create_tensor: loading tensor blk.11.attn_k.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.11.attn_v.weight', src1='unnamed') accepted for AMEVA!
-0.00.515.963 D create_tensor: loading tensor blk.11.attn_v.weight
-0.00.515.974 D create_tensor: loading tensor blk.11.attn_q.bias
-0.00.515.985 D create_tensor: loading tensor blk.11.attn_k.bias
-0.00.515.995 D create_tensor: loading tensor blk.11.attn_v.bias
+0.00.456.901 D create_tensor: loading tensor blk.11.attn_v.weight
+0.00.456.912 D create_tensor: loading tensor blk.11.attn_q.bias
+0.00.456.919 D create_tensor: loading tensor blk.11.attn_k.bias
+0.00.456.926 D create_tensor: loading tensor blk.11.attn_v.bias
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.11.attn_output.weight', src1='unnamed') accepted for AMEVA!
-0.00.516.067 D create_tensor: loading tensor blk.11.attn_output.weight
-0.00.516.082 D create_tensor: loading tensor blk.11.ffn_norm.weight
+0.00.456.967 D create_tensor: loading tensor blk.11.attn_output.weight
+0.00.456.979 D create_tensor: loading tensor blk.11.ffn_norm.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.11.ffn_gate.weight', src1='unnamed') accepted for AMEVA!
-0.00.516.134 D create_tensor: loading tensor blk.11.ffn_gate.weight
+0.00.457.020 D create_tensor: loading tensor blk.11.ffn_gate.weight
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
-0.00.516.199 D create_tensor: loading tensor blk.11.ffn_down.weight
+0.00.457.054 D create_tensor: loading tensor blk.11.ffn_down.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.11.ffn_up.weight', src1='unnamed') accepted for AMEVA!
-0.00.516.258 D create_tensor: loading tensor blk.11.ffn_up.weight
-0.00.516.273 D ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.12.attn_q.weight', src1='unnamed') accepted for AMEVA!
-create_tensor: loading tensor blk.12.attn_norm.weight
-0.00.516.318 D create_tensor: loading tensor blk.12.attn_q.weight
+0.00.457.084 D create_tensor: loading tensor blk.11.ffn_up.weight
+0.00.457.095 D create_tensor: loading tensor blk.12.attn_norm.weight
+ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.12.attn_q.weight', src1='unnamed') accepted for AMEVA!
+0.00.457.139 D create_tensor: loading tensor blk.12.attn_q.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.12.attn_k.weight', src1='unnamed') accepted for AMEVA!
-0.00.516.370 D create_tensor: loading tensor blk.12.attn_k.weight
+0.00.457.169 D create_tensor: loading tensor blk.12.attn_k.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.12.attn_v.weight', src1='unnamed') accepted for AMEVA!
-0.00.516.417 D create_tensor: loading tensor blk.12.attn_v.weight
-0.00.516.427 D create_tensor: loading tensor blk.12.attn_q.bias
-0.00.516.438 D create_tensor: loading tensor blk.12.attn_k.bias
-0.00.516.448 D create_tensor: loading tensor blk.12.attn_v.bias
+0.00.457.200 D create_tensor: loading tensor blk.12.attn_v.weight
+0.00.457.211 D create_tensor: loading tensor blk.12.attn_q.bias
+0.00.457.218 D create_tensor: loading tensor blk.12.attn_k.bias
+0.00.457.225 D create_tensor: loading tensor blk.12.attn_v.bias
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.12.attn_output.weight', src1='unnamed') accepted for AMEVA!
-0.00.516.535 D create_tensor: loading tensor blk.12.attn_output.weight
-0.00.516.551 D create_tensor: loading tensor blk.12.ffn_norm.weight
+0.00.457.265 D create_tensor: loading tensor blk.12.attn_output.weight
+0.00.457.277 D create_tensor: loading tensor blk.12.ffn_norm.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.12.ffn_gate.weight', src1='unnamed') accepted for AMEVA!
-0.00.516.609 D create_tensor: loading tensor blk.12.ffn_gate.weight
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
-0.00.516.674 D create_tensor: loading tensor blk.12.ffn_down.weight
+0.00.457.316 D create_tensor: loading tensor blk.12.ffn_gate.weight
+0.00.457.338 D create_tensor: loading tensor blk.12.ffn_down.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.12.ffn_up.weight', src1='unnamed') accepted for AMEVA!
-0.00.516.733 D create_tensor: loading tensor blk.12.ffn_up.weight
+0.00.457.378 D create_tensor: loading tensor blk.12.ffn_up.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.13.attn_q.weight', src1='unnamed') accepted for AMEVA!
-0.00.516.749 D create_tensor: loading tensor blk.13.attn_norm.weight
-0.00.516.775 D create_tensor: loading tensor blk.13.attn_q.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.13.attn_k.weight', src1='unnamed') accepted for AMEVA!
-0.00.516.845 D create_tensor: loading tensor blk.13.attn_k.weight
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
-0.00.516.898 D create_tensor: loading tensor blk.13.attn_v.weight
-0.00.516.909 D create_tensor: loading tensor blk.13.attn_q.bias
-0.00.516.919 D create_tensor: loading tensor blk.13.attn_k.bias
+0.00.457.389 D create_tensor: loading tensor blk.13.attn_norm.weight
+0.00.457.408 D create_tensor: loading tensor blk.13.attn_q.weight
+0.00.457.422 D create_tensor: loading tensor blk.13.attn_k.weight
+0.00.457.442 D create_tensor: loading tensor blk.13.attn_v.weight
+0.00.457.448 D create_tensor: loading tensor blk.13.attn_q.bias
+0.00.457.455 D create_tensor: loading tensor blk.13.attn_k.bias
+0.00.457.462 D create_tensor: loading tensor blk.13.attn_v.bias
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.13.attn_output.weight', src1='unnamed') accepted for AMEVA!
-0.00.516.929 D create_tensor: loading tensor blk.13.attn_v.bias
-0.00.516.969 D create_tensor: loading tensor blk.13.attn_output.weight
-0.00.516.980 D create_tensor: loading tensor blk.13.ffn_norm.weight
+0.00.457.545 D create_tensor: loading tensor blk.13.attn_output.weight
+0.00.457.557 D create_tensor: loading tensor blk.13.ffn_norm.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.13.ffn_gate.weight', src1='unnamed') accepted for AMEVA!
-0.00.517.065 D create_tensor: loading tensor blk.13.ffn_gate.weight
+0.00.457.597 D create_tensor: loading tensor blk.13.ffn_gate.weight
 ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
-0.00.517.130 D create_tensor: loading tensor blk.13.ffn_down.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.13.ffn_up.weight', src1='unnamed') accepted for AMEVA!
-0.00.517.188 D create_tensor: loading tensor blk.13.ffn_up.weight
+0.00.457.631 D create_tensor: loading tensor blk.13.ffn_down.weight
+0.00.457.648 D create_tensor: loading tensor blk.13.ffn_up.weight
+0.00.457.655 D create_tensor: loading tensor blk.14.attn_norm.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.14.attn_q.weight', src1='unnamed') accepted for AMEVA!
-0.00.517.204 D create_tensor: loading tensor blk.14.attn_norm.weight
-0.00.517.229 D create_tensor: loading tensor blk.14.attn_q.weight
+0.00.457.711 D create_tensor: loading tensor blk.14.attn_q.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.14.attn_k.weight', src1='unnamed') accepted for AMEVA!
-0.00.517.298 D create_tensor: loading tensor blk.14.attn_k.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.14.attn_v.weight', src1='unnamed') accepted for AMEVA!
-0.00.517.356 D create_tensor: loading tensor blk.14.attn_v.weight
-0.00.517.373 D create_tensor: loading tensor blk.14.attn_q.bias
-0.00.517.383 D create_tensor: loading tensor blk.14.attn_k.bias
+0.00.457.740 D create_tensor: loading tensor blk.14.attn_k.weight
+0.00.457.758 D create_tensor: loading tensor blk.14.attn_v.weight
+0.00.457.766 D create_tensor: loading tensor blk.14.attn_q.bias
+0.00.457.773 D create_tensor: loading tensor blk.14.attn_k.bias
+0.00.457.779 D create_tensor: loading tensor blk.14.attn_v.bias
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.14.attn_output.weight', src1='unnamed') accepted for AMEVA!
-0.00.517.393 D create_tensor: loading tensor blk.14.attn_v.bias
-0.00.517.434 D create_tensor: loading tensor blk.14.attn_output.weight
-0.00.517.444 D create_tensor: loading tensor blk.14.ffn_norm.weight
+0.00.457.848 D create_tensor: loading tensor blk.14.attn_output.weight
+0.00.457.859 D create_tensor: loading tensor blk.14.ffn_norm.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.14.ffn_gate.weight', src1='unnamed') accepted for AMEVA!
-0.00.517.530 D create_tensor: loading tensor blk.14.ffn_gate.weight
+0.00.457.900 D create_tensor: loading tensor blk.14.ffn_gate.weight
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
-0.00.517.595 D create_tensor: loading tensor blk.14.ffn_down.weight
+0.00.457.934 D create_tensor: loading tensor blk.14.ffn_down.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.14.ffn_up.weight', src1='unnamed') accepted for AMEVA!
-0.00.517.654 D create_tensor: loading tensor blk.14.ffn_up.weight
-0.00.517.670 D create_tensor: loading tensor blk.15.attn_norm.weight
+0.00.457.964 D create_tensor: loading tensor blk.14.ffn_up.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.15.attn_q.weight', src1='unnamed') accepted for AMEVA!
-0.00.517.728 D create_tensor: loading tensor blk.15.attn_q.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.15.attn_k.weight', src1='unnamed') accepted for AMEVA!
-0.00.517.786 D create_tensor: loading tensor blk.15.attn_k.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.15.attn_v.weight', src1='unnamed') accepted for AMEVA!
-0.00.517.835 D create_tensor: loading tensor blk.15.attn_v.weight
-0.00.517.847 D create_tensor: loading tensor blk.15.attn_q.bias
-0.00.517.858 D create_tensor: loading tensor blk.15.attn_k.bias
+0.00.457.975 D create_tensor: loading tensor blk.15.attn_norm.weight
+0.00.457.994 D create_tensor: loading tensor blk.15.attn_q.weight
+0.00.458.008 D create_tensor: loading tensor blk.15.attn_k.weight
+0.00.458.023 D create_tensor: loading tensor blk.15.attn_v.weight
+0.00.458.032 D create_tensor: loading tensor blk.15.attn_q.bias
+0.00.458.038 D create_tensor: loading tensor blk.15.attn_k.bias
+0.00.458.045 D create_tensor: loading tensor blk.15.attn_v.bias
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.15.attn_output.weight', src1='unnamed') accepted for AMEVA!
-0.00.517.869 D create_tensor: loading tensor blk.15.attn_v.bias
-0.00.517.910 D create_tensor: loading tensor blk.15.attn_output.weight
-0.00.517.921 D create_tensor: loading tensor blk.15.ffn_norm.weight
+0.00.458.143 D create_tensor: loading tensor blk.15.attn_output.weight
+0.00.458.154 D create_tensor: loading tensor blk.15.ffn_norm.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.15.ffn_gate.weight', src1='unnamed') accepted for AMEVA!
+0.00.458.195 D create_tensor: loading tensor blk.15.ffn_gate.weight
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
-0.00.517.995 D create_tensor: loading tensor blk.15.ffn_gate.weight
-0.00.518.023 D create_tensor: loading tensor blk.15.ffn_down.weight
+0.00.458.228 D create_tensor: loading tensor blk.15.ffn_down.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.15.ffn_up.weight', src1='unnamed') accepted for AMEVA!
-0.00.518.094 D create_tensor: loading tensor blk.15.ffn_up.weight
+0.00.458.258 D create_tensor: loading tensor blk.15.ffn_up.weight
+0.00.458.269 D create_tensor: loading tensor blk.16.attn_norm.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.16.attn_q.weight', src1='unnamed') accepted for AMEVA!
+0.00.458.312 D create_tensor: loading tensor blk.16.attn_q.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.16.attn_k.weight', src1='unnamed') accepted for AMEVA!
-0.00.518.109 D create_tensor: loading tensor blk.16.attn_norm.weight
-0.00.518.136 D create_tensor: loading tensor blk.16.attn_q.weight
-0.00.518.157 D create_tensor: loading tensor blk.16.attn_k.weight
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
+0.00.458.359 D create_tensor: loading tensor blk.16.attn_k.weight
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
-0.00.518.256 D create_tensor: loading tensor blk.16.attn_v.weight
-0.00.518.267 D create_tensor: loading tensor blk.16.attn_q.bias
-0.00.518.277 D create_tensor: loading tensor blk.16.attn_k.bias
-0.00.518.288 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.16.attn_output.weight', src1='unnamed') accepted for AMEVA!
+0.00.458.397 D create_tensor: loading tensor blk.16.attn_v.weight
+0.00.458.408 D create_tensor: loading tensor blk.16.attn_q.bias
+0.00.458.415 D create_tensor: loading tensor blk.16.attn_k.bias
+0.00.458.424 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.16.attn_output.weight', src1='unnamed') accepted for AMEVA!
 D create_tensor: loading tensor blk.16.attn_v.bias
+0.00.458.455 D create_tensor: loading tensor blk.16.attn_output.weight
+0.00.458.463 D create_tensor: loading tensor blk.16.ffn_norm.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.16.ffn_gate.weight', src1='unnamed') accepted for AMEVA!
+0.00.458.521 D create_tensor: loading tensor blk.16.ffn_gate.weight
 ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
-0.00.518.330 D create_tensor: loading tensor blk.16.attn_output.weight
-0.00.518.340 D create_tensor: loading tensor blk.16.ffn_norm.weight
+0.00.458.555 D create_tensor: loading tensor blk.16.ffn_down.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.16.ffn_up.weight', src1='unnamed') accepted for AMEVA!
-0.00.518.362 D create_tensor: loading tensor blk.16.ffn_gate.weight
-0.00.518.389 D create_tensor: loading tensor blk.16.ffn_down.weight
-0.00.518.447 D create_tensor: loading tensor blk.16.ffn_up.weight
-0.00.518.458 D create_tensor: loading tensor blk.17.attn_norm.weight
+0.00.458.633 D create_tensor: loading tensor blk.16.ffn_up.weight
+0.00.458.646 D create_tensor: loading tensor blk.17.attn_norm.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.17.attn_q.weight', src1='unnamed') accepted for AMEVA!
-0.00.518.565 D create_tensor: loading tensor blk.17.attn_q.weight
+0.00.458.704 D create_tensor: loading tensor blk.17.attn_q.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.17.attn_k.weight', src1='unnamed') accepted for AMEVA!
-0.00.518.622 D create_tensor: loading tensor blk.17.attn_k.weight
+0.00.458.737 D create_tensor: loading tensor blk.17.attn_k.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.17.attn_v.weight', src1='unnamed') accepted for AMEVA!
-0.00.518.680 D create_tensor: loading tensor blk.17.attn_v.weight
-0.00.518.695 D create_tensor: loading tensor blk.17.attn_q.bias
-0.00.518.705 D create_tensor: loading tensor blk.17.attn_k.bias
+0.00.458.769 D create_tensor: loading tensor blk.17.attn_v.weight
+0.00.458.780 D create_tensor: loading tensor blk.17.attn_q.bias
+0.00.458.788 D create_tensor: loading tensor blk.17.attn_k.bias
+0.00.458.796 D create_tensor: loading tensor blk.17.attn_v.bias
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.17.attn_output.weight', src1='unnamed') accepted for AMEVA!
-0.00.518.717 D create_tensor: loading tensor blk.17.attn_v.bias
-0.00.518.757 D create_tensor: loading tensor blk.17.attn_output.weight
-0.00.518.767 D create_tensor: loading tensor blk.17.ffn_norm.weight
+0.00.458.842 D create_tensor: loading tensor blk.17.attn_output.weight
+0.00.458.853 D create_tensor: loading tensor blk.17.ffn_norm.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.17.ffn_gate.weight', src1='unnamed') accepted for AMEVA!
-0.00.518.851 D create_tensor: loading tensor blk.17.ffn_gate.weight
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
-0.00.518.914 D create_tensor: loading tensor blk.17.ffn_down.weight
+0.00.458.881 D create_tensor: loading tensor blk.17.ffn_gate.weight
+0.00.458.905 D create_tensor: loading tensor blk.17.ffn_down.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.17.ffn_up.weight', src1='unnamed') accepted for AMEVA!
-0.00.518.960 D create_tensor: loading tensor blk.17.ffn_up.weight
-0.00.518.971 D create_tensor: loading tensor blk.18.attn_norm.weight
+0.00.458.950 D create_tensor: loading tensor blk.17.ffn_up.weight
+0.00.458.961 D create_tensor: loading tensor blk.18.attn_norm.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.18.attn_q.weight', src1='unnamed') accepted for AMEVA!
-0.00.519.027 D create_tensor: loading tensor blk.18.attn_q.weight
+0.00.459.009 D create_tensor: loading tensor blk.18.attn_q.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.18.attn_k.weight', src1='unnamed') accepted for AMEVA!
-0.00.519.084 D create_tensor: loading tensor blk.18.attn_k.weight
+0.00.459.040 D create_tensor: loading tensor blk.18.attn_k.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.18.attn_v.weight', src1='unnamed') accepted for AMEVA!
-0.00.519.142 D create_tensor: loading tensor blk.18.attn_v.weight
-0.00.519.157 D create_tensor: loading tensor blk.18.attn_q.bias
-0.00.519.167 D create_tensor: loading tensor blk.18.attn_k.bias
-0.00.519.179 D create_tensor: loading tensor blk.18.attn_v.bias
+0.00.459.072 D create_tensor: loading tensor blk.18.attn_v.weight
+0.00.459.083 D create_tensor: loading tensor blk.18.attn_q.bias
+0.00.459.090 D create_tensor: loading tensor blk.18.attn_k.bias
+0.00.459.098 D create_tensor: loading tensor blk.18.attn_v.bias
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.18.attn_output.weight', src1='unnamed') accepted for AMEVA!
-0.00.519.247 D create_tensor: loading tensor blk.18.attn_output.weight
-0.00.519.262 D create_tensor: loading tensor blk.18.ffn_norm.weight
+0.00.459.142 D create_tensor: loading tensor blk.18.attn_output.weight
+0.00.459.153 D create_tensor: loading tensor blk.18.ffn_norm.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.18.ffn_gate.weight', src1='unnamed') accepted for AMEVA!
-0.00.519.314 D create_tensor: loading tensor blk.18.ffn_gate.weight
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
-0.00.519.378 D create_tensor: loading tensor blk.18.ffn_down.weight
+0.00.459.181 D create_tensor: loading tensor blk.18.ffn_gate.weight
+0.00.459.204 D create_tensor: loading tensor blk.18.ffn_down.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.18.ffn_up.weight', src1='unnamed') accepted for AMEVA!
-0.00.519.435 D create_tensor: loading tensor blk.18.ffn_up.weight
-0.00.519.468 D create_tensor: loading tensor blk.19.attn_norm.weight
+0.00.459.248 D create_tensor: loading tensor blk.18.ffn_up.weight
+0.00.459.260 D create_tensor: loading tensor blk.19.attn_norm.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.19.attn_q.weight', src1='unnamed') accepted for AMEVA!
+0.00.459.291 D create_tensor: loading tensor blk.19.attn_q.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.19.attn_k.weight', src1='unnamed') accepted for AMEVA!
+0.00.459.323 D create_tensor: loading tensor blk.19.attn_k.weight
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
-0.00.519.534 D create_tensor: loading tensor blk.19.attn_q.weight
-0.00.519.571 D create_tensor: loading tensor blk.19.attn_k.weight
-0.00.519.588 D create_tensor: loading tensor blk.19.attn_v.weight
-0.00.519.595 D create_tensor: loading tensor blk.19.attn_q.bias
-0.00.519.604 D create_tensor: loading tensor blk.19.attn_k.bias
-0.00.519.612 D create_tensor: loading tensor blk.19.attn_v.bias
+0.00.459.359 D create_tensor: loading tensor blk.19.attn_v.weight
+0.00.459.370 D create_tensor: loading tensor blk.19.attn_q.bias
+0.00.459.377 D create_tensor: loading tensor blk.19.attn_k.bias
+0.00.459.384 D create_tensor: loading tensor blk.19.attn_v.bias
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.19.attn_output.weight', src1='unnamed') accepted for AMEVA!
-0.00.519.740 D create_tensor: loading tensor blk.19.attn_output.weight
-0.00.519.760 D create_tensor: loading tensor blk.19.ffn_norm.weight
+0.00.459.433 D create_tensor: loading tensor blk.19.attn_output.weight
+0.00.459.445 D create_tensor: loading tensor blk.19.ffn_norm.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.19.ffn_gate.weight', src1='unnamed') accepted for AMEVA!
 ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
+0.00.459.473 D create_tensor: loading tensor blk.19.ffn_gate.weight
+0.00.459.496 D create_tensor: loading tensor blk.19.ffn_down.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.19.ffn_up.weight', src1='unnamed') accepted for AMEVA!
-0.00.519.839 D create_tensor: loading tensor blk.19.ffn_gate.weight
-0.00.519.879 D create_tensor: loading tensor blk.19.ffn_down.weight
-0.00.519.896 D create_tensor: loading tensor blk.19.ffn_up.weight
-0.00.519.907 D create_tensor: loading tensor blk.20.attn_norm.weight
+0.00.459.541 D create_tensor: loading tensor blk.19.ffn_up.weight
+0.00.459.552 D create_tensor: loading tensor blk.20.attn_norm.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.20.attn_q.weight', src1='unnamed') accepted for AMEVA!
+0.00.459.584 D create_tensor: loading tensor blk.20.attn_q.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.20.attn_k.weight', src1='unnamed') accepted for AMEVA!
+0.00.459.616 D create_tensor: loading tensor blk.20.attn_k.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.20.attn_v.weight', src1='unnamed') accepted for AMEVA!
-0.00.520.011 D create_tensor: loading tensor blk.20.attn_q.weight
-0.00.520.044 D create_tensor: loading tensor blk.20.attn_k.weight
-0.00.520.061 D create_tensor: loading tensor blk.20.attn_v.weight
-0.00.520.072 D create_tensor: loading tensor blk.20.attn_q.bias
+0.00.459.649 D create_tensor: loading tensor blk.20.attn_v.weight
+0.00.459.660 D create_tensor: loading tensor blk.20.attn_q.bias
+0.00.459.667 D create_tensor: loading tensor blk.20.attn_k.bias
+0.00.459.674 D create_tensor: loading tensor blk.20.attn_v.bias
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.20.attn_output.weight', src1='unnamed') accepted for AMEVA!
+0.00.459.709 D create_tensor: loading tensor blk.20.attn_output.weight
+0.00.459.721 D create_tensor: loading tensor blk.20.ffn_norm.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.20.ffn_gate.weight', src1='unnamed') accepted for AMEVA!
+0.00.459.767 D create_tensor: loading tensor blk.20.ffn_gate.weight
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
-0.00.520.082 D create_tensor: loading tensor blk.20.attn_k.bias
-0.00.520.093 D create_tensor: loading tensor blk.20.attn_v.bias
-0.00.520.165 D create_tensor: loading tensor blk.20.attn_output.weight
-0.00.520.177 D create_tensor: loading tensor blk.20.ffn_norm.weight
-0.00.520.202 D create_tensor: loading tensor blk.20.ffn_gate.weight
-0.00.520.225 D create_tensor: loading tensor blk.20.ffn_down.weight
+0.00.459.803 D create_tensor: loading tensor blk.20.ffn_down.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.20.ffn_up.weight', src1='unnamed') accepted for AMEVA!
-0.00.520.398 D create_tensor: loading tensor blk.20.ffn_up.weight
-0.00.520.418 D create_tensor: loading tensor blk.21.attn_norm.weight
+0.00.459.836 D create_tensor: loading tensor blk.20.ffn_up.weight
+0.00.459.848 D create_tensor: loading tensor blk.21.attn_norm.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.21.attn_q.weight', src1='unnamed') accepted for AMEVA!
-0.00.520.489 D create_tensor: loading tensor blk.21.attn_q.weight
+0.00.459.881 D create_tensor: loading tensor blk.21.attn_q.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.21.attn_k.weight', src1='unnamed') accepted for AMEVA!
+0.00.459.912 D create_tensor: loading tensor blk.21.attn_k.weight
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
-0.00.520.557 D create_tensor: loading tensor blk.21.attn_k.weight
-0.00.520.597 D create_tensor: loading tensor blk.21.attn_v.weight
-0.00.520.609 D create_tensor: loading tensor blk.21.attn_q.bias
-0.00.520.620 D create_tensor: loading tensor blk.21.attn_k.bias
-0.00.520.631 D create_tensor: loading tensor blk.21.attn_v.bias
+0.00.459.949 D create_tensor: loading tensor blk.21.attn_v.weight
+0.00.459.960 D create_tensor: loading tensor blk.21.attn_q.bias
+0.00.459.967 D create_tensor: loading tensor blk.21.attn_k.bias
+0.00.459.974 D create_tensor: loading tensor blk.21.attn_v.bias
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.21.attn_output.weight', src1='unnamed') accepted for AMEVA!
-0.00.520.772 D create_tensor: loading tensor blk.21.attn_output.weight
-0.00.520.795 D create_tensor: loading tensor blk.21.ffn_norm.weight
+0.00.460.019 D create_tensor: loading tensor blk.21.attn_output.weight
+0.00.460.032 D create_tensor: loading tensor blk.21.ffn_norm.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.21.ffn_gate.weight', src1='unnamed') accepted for AMEVA!
+0.00.460.062 D create_tensor: loading tensor blk.21.ffn_gate.weight
 ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
+0.00.460.097 D create_tensor: loading tensor blk.21.ffn_down.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.21.ffn_up.weight', src1='unnamed') accepted for AMEVA!
-0.00.520.852 D create_tensor: loading tensor blk.21.ffn_gate.weight
-0.00.520.894 D create_tensor: loading tensor blk.21.ffn_down.weight
-0.00.520.911 D create_tensor: loading tensor blk.21.ffn_up.weight
-0.00.520.923 D create_tensor: loading tensor blk.22.attn_norm.weight
+0.00.460.128 D create_tensor: loading tensor blk.21.ffn_up.weight
+0.00.460.140 D create_tensor: loading tensor blk.22.attn_norm.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.22.attn_q.weight', src1='unnamed') accepted for AMEVA!
-0.00.521.027 D create_tensor: loading tensor blk.22.attn_q.weight
+0.00.460.173 D create_tensor: loading tensor blk.22.attn_q.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.22.attn_k.weight', src1='unnamed') accepted for AMEVA!
-0.00.521.097 D create_tensor: loading tensor blk.22.attn_k.weight
+0.00.460.205 D create_tensor: loading tensor blk.22.attn_k.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.22.attn_v.weight', src1='unnamed') accepted for AMEVA!
-0.00.521.164 D create_tensor: loading tensor blk.22.attn_v.weight
-0.00.521.185 D create_tensor: loading tensor blk.22.attn_q.bias
-0.00.521.197 D create_tensor: loading tensor blk.22.attn_k.bias
-0.00.521.209 D create_tensor: loading tensor blk.22.attn_v.bias
+0.00.460.239 D create_tensor: loading tensor blk.22.attn_v.weight
+0.00.460.250 D create_tensor: loading tensor blk.22.attn_q.bias
+0.00.460.258 D create_tensor: loading tensor blk.22.attn_k.bias
+0.00.460.265 D create_tensor: loading tensor blk.22.attn_v.bias
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.22.attn_output.weight', src1='unnamed') accepted for AMEVA!
-0.00.521.314 D create_tensor: loading tensor blk.22.attn_output.weight
+0.00.460.311 D create_tensor: loading tensor blk.22.attn_output.weight
+0.00.460.325 D create_tensor: loading tensor blk.22.ffn_norm.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.22.ffn_gate.weight', src1='unnamed') accepted for AMEVA!
+0.00.460.354 D create_tensor: loading tensor blk.22.ffn_gate.weight
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
-0.00.521.337 D create_tensor: loading tensor blk.22.ffn_norm.weight
-0.00.521.367 D create_tensor: loading tensor blk.22.ffn_gate.weight
-0.00.521.390 D create_tensor: loading tensor blk.22.ffn_down.weight
+0.00.460.390 D create_tensor: loading tensor blk.22.ffn_down.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.22.ffn_up.weight', src1='unnamed') accepted for AMEVA!
-0.00.521.504 D create_tensor: loading tensor blk.22.ffn_up.weight
-0.00.521.525 D create_tensor: loading tensor blk.23.attn_norm.weight
+0.00.460.423 D create_tensor: loading tensor blk.22.ffn_up.weight
+0.00.460.435 D create_tensor: loading tensor blk.23.attn_norm.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.23.attn_q.weight', src1='unnamed') accepted for AMEVA!
-0.00.521.590 D create_tensor: loading tensor blk.23.attn_q.weight
+0.00.460.468 D create_tensor: loading tensor blk.23.attn_q.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.23.attn_k.weight', src1='unnamed') accepted for AMEVA!
-0.00.521.659 D create_tensor: loading tensor blk.23.attn_k.weight
+0.00.460.501 D create_tensor: loading tensor blk.23.attn_k.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.23.attn_v.weight', src1='unnamed') accepted for AMEVA!
-0.00.521.730 D create_tensor: loading tensor blk.23.attn_v.weight
-0.00.521.751 D create_tensor: loading tensor blk.23.attn_q.bias
-0.00.521.763 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.23.attn_output.weight', src1='unnamed') accepted for AMEVA!
-D create_tensor: loading tensor blk.23.attn_k.bias
-0.00.521.776 D create_tensor: loading tensor blk.23.attn_v.bias
-0.00.521.805 D create_tensor: loading tensor blk.23.attn_output.weight
-0.00.521.820 D create_tensor: loading tensor blk.23.ffn_norm.weight
+0.00.460.536 D create_tensor: loading tensor blk.23.attn_v.weight
+0.00.460.548 D create_tensor: loading tensor blk.23.attn_q.bias
+0.00.460.556 D create_tensor: loading tensor blk.23.attn_k.bias
+0.00.460.564 D create_tensor: loading tensor blk.23.attn_v.bias
+ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.23.attn_output.weight', src1='unnamed') accepted for AMEVA!
+0.00.460.615 D create_tensor: loading tensor blk.23.attn_output.weight
+0.00.460.633 D create_tensor: loading tensor blk.23.ffn_norm.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.23.ffn_gate.weight', src1='unnamed') accepted for AMEVA!
-0.00.521.959 D create_tensor: loading tensor blk.23.ffn_gate.weight
+0.00.460.664 D create_tensor: loading tensor blk.23.ffn_gate.weight
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
-0.00.522.034 D create_tensor: loading tensor blk.23.ffn_down.weight
+0.00.460.703 D create_tensor: loading tensor blk.23.ffn_down.weight
 ggml-ameva [ACCEPT]: node='unnamed' (src0='blk.23.ffn_up.weight', src1='unnamed') accepted for AMEVA!
-0.00.522.101 D create_tensor: loading tensor blk.23.ffn_up.weight
-0.00.523.240 D done_getting_tensors: tensor 'token_embd.weight' (q5_0) (and 290 others) cannot be used with preferred buffer type AMEVA, using CPU instead
-0.00.783.697 I load_tensors: offloading output layer to GPU
-0.00.783.711 I load_tensors: offloading 23 repeating layers to GPU
-0.00.783.713 I load_tensors: offloaded 25/25 layers to GPU
-0.00.783.719 I load_tensors:   CPU_Mapped model buffer size =   325.02 MiB
-0.00.783.721 I load_tensors:   CPU_REPACK model buffer size =   208.30 MiB
-0.00.784.224 D repack: repack tensor output.weight with q8_0_4x8
-0.00.950.756 D repack: repack tensor blk.0.attn_v.weight with q8_0_4x8
-0.00.950.908 D repack: repack tensor blk.0.ffn_down.weight with q6_K_8x8
-0.00.954.698 D repack: repack tensor blk.1.attn_v.weight with q8_0_4x8
-0.00.954.856 D repack: repack tensor blk.1.ffn_down.weight with q6_K_8x8
-0.00.958.656 D repack: repack tensor blk.2.ffn_down.weight with q4_K_8x8
-0.00.961.221 D repack: repack tensor blk.3.attn_v.weight with q8_0_4x8
-0.00.961.390 D repack: repack tensor blk.3.ffn_down.weight with q6_K_8x8
-0.00.965.192 D repack: repack tensor blk.4.ffn_down.weight with q4_K_8x8
-0.00.967.780 D repack: repack tensor blk.5.ffn_down.weight with q4_K_8x8
-0.00.970.333 D repack: repack tensor blk.6.attn_v.weight with q8_0_4x8
-0.00.970.520 D repack: repack tensor blk.6.ffn_down.weight with q6_K_8x8
-0.00.974.282 D repack: repack tensor blk.7.attn_v.weight with q8_0_4x8
-0.00.974.431 D repack: repack tensor blk.7.ffn_down.weight with q6_K_8x8
-0.00.978.234 D repack: repack tensor blk.8.attn_v.weight with q8_0_4x8
-0.00.978.389 D repack: repack tensor blk.8.ffn_down.weight with q6_K_8x8
-0.00.982.218 D repack: repack tensor blk.9.attn_v.weight with q8_0_4x8
-0.00.982.378 D repack: repack tensor blk.9.ffn_down.weight with q6_K_8x8
-0.00.986.183 D repack: repack tensor blk.10.attn_v.weight with q8_0_4x8
-0.00.986.336 D repack: repack tensor blk.10.ffn_down.weight with q6_K_8x8
-0.00.990.137 D repack: repack tensor blk.11.ffn_down.weight with q4_K_8x8
-0.00.992.710 D repack: repack tensor blk.12.ffn_down.weight with q4_K_8x8
-0.00.995.336 D repack: repack tensor blk.13.attn_v.weight with q8_0_4x8
-0.00.995.503 D repack: repack tensor blk.13.ffn_down.weight with q6_K_8x8
-0.01.000.790 D repack: repack tensor blk.14.ffn_down.weight with q4_K_8x8
-0.01.004.398 D repack: repack tensor blk.15.ffn_down.weight with q4_K_8x8
-0.01.007.073 D repack: repack tensor blk.16.attn_v.weight with q8_0_4x8
-0.01.007.233 D repack: repack tensor blk.16.ffn_down.weight with q6_K_8x8
-0.01.011.005 D repack: repack tensor blk.17.ffn_down.weight with q4_K_8x8
-0.01.013.579 D repack: repack tensor blk.18.ffn_down.weight with q4_K_8x8
-0.01.016.147 D repack: repack tensor blk.19.attn_v.weight with q8_0_4x8
-0.01.016.297 D repack: repack tensor blk.19.ffn_down.weight with q6_K_8x8
-0.01.020.095 D repack: repack tensor blk.20.ffn_down.weight with q4_K_8x8
-0.01.022.623 D repack: repack tensor blk.21.attn_v.weight with q8_0_4x8
-0.01.022.779 D repack: repack tensor blk.21.ffn_down.weight with q6_K_8x8
-0.01.026.385 D repack: repack tensor blk.22.ffn_down.weight with q4_K_8x8
-0.01.028.898 D repack: repack tensor blk.23.ffn_down.weight with q4_K_8x8
-0.01.043.787 I cmn  common_init_: added </s> logit bias = -inf
-0.01.043.974 I cmn  common_init_: added <|endoftext|> logit bias = -inf
-0.01.043.980 I cmn  common_init_: added <|im_end|> logit bias = -inf
-0.01.043.981 I cmn  common_init_: added <|fim_pad|> logit bias = -inf
-0.01.043.982 I cmn  common_init_: added <|repo_name|> logit bias = -inf
-0.01.043.983 I cmn  common_init_: added <|file_sep|> logit bias = -inf
-0.01.044.043 I llama_context: constructing llama_context
-0.01.044.058 I llama_context: n_seq_max     = 1
-0.01.044.059 I llama_context: n_ctx         = 32768
-0.01.044.061 I llama_context: n_ctx_seq     = 32768
-0.01.044.061 I llama_context: n_batch       = 2048
-0.01.044.062 I llama_context: n_ubatch      = 512
-0.01.044.063 I llama_context: causal_attn   = 1
-0.01.044.064 I llama_context: flash_attn    = auto
-0.01.044.065 I llama_context: kv_unified    = false
-0.01.044.069 I llama_context: freq_base     = 1000000.0
-0.01.044.069 I llama_context: freq_scale    = 1
-0.01.044.070 I llama_context: n_rs_seq      = 0
-0.01.044.070 I llama_context: n_outputs_max = 1
-0.01.044.082 D set_abort_callback: call
-0.01.130.103 I llama_context:      AMEVA  output buffer size =     0.58 MiB
-0.01.130.832 D llama_kv_cache: layer   0: dev = AMEVA0
-0.01.130.850 D llama_kv_cache: layer   1: dev = AMEVA0
-0.01.130.852 D llama_kv_cache: layer   2: dev = AMEVA0
-0.01.130.856 D llama_kv_cache: layer   3: dev = AMEVA0
-0.01.130.857 D llama_kv_cache: layer   4: dev = AMEVA0
-0.01.130.860 D llama_kv_cache: layer   5: dev = AMEVA0
-0.01.130.861 D llama_kv_cache: layer   6: dev = AMEVA0
-0.01.130.863 D llama_kv_cache: layer   7: dev = AMEVA0
-0.01.130.865 D llama_kv_cache: layer   8: dev = AMEVA0
-0.01.130.867 D llama_kv_cache: layer   9: dev = AMEVA0
-0.01.130.868 D llama_kv_cache: layer  10: dev = AMEVA0
-0.01.130.870 D llama_kv_cache: layer  11: dev = AMEVA0
-0.01.130.872 D llama_kv_cache: layer  12: dev = AMEVA0
-0.01.130.873 D llama_kv_cache: layer  13: dev = AMEVA0
-0.01.130.875 D llama_kv_cache: layer  14: dev = AMEVA0
-0.01.130.876 D llama_kv_cache: layer  15: dev = AMEVA0
-0.01.130.878 D llama_kv_cache: layer  16: dev = AMEVA0
-0.01.130.880 D llama_kv_cache: layer  17: dev = AMEVA0
-0.01.130.882 D llama_kv_cache: layer  18: dev = AMEVA0
-0.01.130.883 D llama_kv_cache: layer  19: dev = AMEVA0
-0.01.130.885 D llama_kv_cache: layer  20: dev = AMEVA0
-0.01.130.886 D llama_kv_cache: layer  21: dev = AMEVA0
-0.01.130.887 D llama_kv_cache: layer  22: dev = AMEVA0
-0.01.130.889 D llama_kv_cache: layer  23: dev = AMEVA0
-0.01.269.745 I llama_kv_cache:      AMEVA KV buffer size =   384.00 MiB
-0.01.374.582 I llama_kv_cache: size =  384.00 MiB ( 32768 cells,  24 layers,  1/1 seqs), K (f16):  192.00 MiB, V (f16):  192.00 MiB
-0.01.374.603 I llama_kv_cache: attn_rot_k = 0, n_embd_head_k_all = 64
-0.01.374.605 I llama_kv_cache: attn_rot_v = 0, n_embd_head_k_all = 64
-0.01.374.611 D llama_context: enumerating backends
-0.01.374.623 D llama_context: backend_ptrs.size() = 2
-0.01.374.626 I sched_reserve: reserving ...
-0.01.374.629 D sched_reserve: max_nodes = 2328
-0.01.375.759 D sched_reserve: reserving full memory module
-0.01.375.784 D sched_reserve: worst-case: n_tokens = 512, n_seqs = 1, n_outputs = 1
-0.01.375.787 D graph_reserve: reserving a graph for ubatch with n_tokens =    1, n_seqs =  1, n_outputs =    1
+0.00.460.736 D create_tensor: loading tensor blk.23.ffn_up.weight
+0.00.461.505 D done_getting_tensors: tensor 'token_embd.weight' (q5_0) (and 290 others) cannot be used with preferred buffer type AMEVA, using CPU instead
+0.00.707.084 I load_tensors: offloading output layer to GPU
+0.00.707.095 I load_tensors: offloading 23 repeating layers to GPU
+0.00.707.096 I load_tensors: offloaded 25/25 layers to GPU
+0.00.707.105 I load_tensors:   CPU_Mapped model buffer size =   325.02 MiB
+0.00.707.108 I load_tensors:   CPU_REPACK model buffer size =   208.30 MiB
+0.00.707.607 D repack: repack tensor output.weight with q8_0_4x8
+0.00.880.825 D repack: repack tensor blk.0.attn_v.weight with q8_0_4x8
+0.00.880.980 D repack: repack tensor blk.0.ffn_down.weight with q6_K_8x8
+0.00.884.759 D repack: repack tensor blk.1.attn_v.weight with q8_0_4x8
+0.00.884.915 D repack: repack tensor blk.1.ffn_down.weight with q6_K_8x8
+0.00.888.679 D repack: repack tensor blk.2.ffn_down.weight with q4_K_8x8
+0.00.891.406 D repack: repack tensor blk.3.attn_v.weight with q8_0_4x8
+0.00.891.560 D repack: repack tensor blk.3.ffn_down.weight with q6_K_8x8
+0.00.895.333 D repack: repack tensor blk.4.ffn_down.weight with q4_K_8x8
+0.00.898.041 D repack: repack tensor blk.5.ffn_down.weight with q4_K_8x8
+0.00.900.772 D repack: repack tensor blk.6.attn_v.weight with q8_0_4x8
+0.00.900.928 D repack: repack tensor blk.6.ffn_down.weight with q6_K_8x8
+0.00.904.695 D repack: repack tensor blk.7.attn_v.weight with q8_0_4x8
+0.00.904.847 D repack: repack tensor blk.7.ffn_down.weight with q6_K_8x8
+0.00.908.660 D repack: repack tensor blk.8.attn_v.weight with q8_0_4x8
+0.00.908.813 D repack: repack tensor blk.8.ffn_down.weight with q6_K_8x8
+0.00.912.572 D repack: repack tensor blk.9.attn_v.weight with q8_0_4x8
+0.00.912.727 D repack: repack tensor blk.9.ffn_down.weight with q6_K_8x8
+0.00.916.494 D repack: repack tensor blk.10.attn_v.weight with q8_0_4x8
+0.00.916.643 D repack: repack tensor blk.10.ffn_down.weight with q6_K_8x8
+0.00.920.392 D repack: repack tensor blk.11.ffn_down.weight with q4_K_8x8
+0.00.923.132 D repack: repack tensor blk.12.ffn_down.weight with q4_K_8x8
+0.00.925.787 D repack: repack tensor blk.13.attn_v.weight with q8_0_4x8
+0.00.925.933 D repack: repack tensor blk.13.ffn_down.weight with q6_K_8x8
+0.00.929.614 D repack: repack tensor blk.14.ffn_down.weight with q4_K_8x8
+0.00.932.279 D repack: repack tensor blk.15.ffn_down.weight with q4_K_8x8
+0.00.934.946 D repack: repack tensor blk.16.attn_v.weight with q8_0_4x8
+0.00.935.097 D repack: repack tensor blk.16.ffn_down.weight with q6_K_8x8
+0.00.938.787 D repack: repack tensor blk.17.ffn_down.weight with q4_K_8x8
+0.00.941.453 D repack: repack tensor blk.18.ffn_down.weight with q4_K_8x8
+0.00.944.103 D repack: repack tensor blk.19.attn_v.weight with q8_0_4x8
+0.00.944.250 D repack: repack tensor blk.19.ffn_down.weight with q6_K_8x8
+0.00.947.926 D repack: repack tensor blk.20.ffn_down.weight with q4_K_8x8
+0.00.950.596 D repack: repack tensor blk.21.attn_v.weight with q8_0_4x8
+0.00.950.751 D repack: repack tensor blk.21.ffn_down.weight with q6_K_8x8
+0.00.954.430 D repack: repack tensor blk.22.ffn_down.weight with q4_K_8x8
+0.00.957.091 D repack: repack tensor blk.23.ffn_down.weight with q4_K_8x8
+0.00.972.932 I cmn  common_init_: added </s> logit bias = -inf
+0.00.973.228 I cmn  common_init_: added <|endoftext|> logit bias = -inf
+0.00.973.234 I cmn  common_init_: added <|im_end|> logit bias = -inf
+0.00.973.236 I cmn  common_init_: added <|fim_pad|> logit bias = -inf
+0.00.973.237 I cmn  common_init_: added <|repo_name|> logit bias = -inf
+0.00.973.238 I cmn  common_init_: added <|file_sep|> logit bias = -inf
+0.00.973.305 I llama_context: constructing llama_context
+0.00.973.312 I llama_context: n_seq_max     = 1
+0.00.973.313 I llama_context: n_ctx         = 32768
+0.00.973.315 I llama_context: n_ctx_seq     = 32768
+0.00.973.316 I llama_context: n_batch       = 2048
+0.00.973.317 I llama_context: n_ubatch      = 512
+0.00.973.317 I llama_context: causal_attn   = 1
+0.00.973.318 I llama_context: flash_attn    = auto
+0.00.973.319 I llama_context: kv_unified    = false
+0.00.973.323 I llama_context: freq_base     = 1000000.0
+0.00.973.324 I llama_context: freq_scale    = 1
+0.00.973.324 I llama_context: n_rs_seq      = 0
+0.00.973.325 I llama_context: n_outputs_max = 1
+0.00.973.336 D set_abort_callback: call
+0.00.982.780 I llama_context:      AMEVA  output buffer size =     0.58 MiB
+0.00.983.361 D llama_kv_cache: layer   0: dev = AMEVA0
+0.00.983.379 D llama_kv_cache: layer   1: dev = AMEVA0
+0.00.983.382 D llama_kv_cache: layer   2: dev = AMEVA0
+0.00.983.386 D llama_kv_cache: layer   3: dev = AMEVA0
+0.00.983.388 D llama_kv_cache: layer   4: dev = AMEVA0
+0.00.983.390 D llama_kv_cache: layer   5: dev = AMEVA0
+0.00.983.392 D llama_kv_cache: layer   6: dev = AMEVA0
+0.00.983.394 D llama_kv_cache: layer   7: dev = AMEVA0
+0.00.983.395 D llama_kv_cache: layer   8: dev = AMEVA0
+0.00.983.398 D llama_kv_cache: layer   9: dev = AMEVA0
+0.00.983.399 D llama_kv_cache: layer  10: dev = AMEVA0
+0.00.983.401 D llama_kv_cache: layer  11: dev = AMEVA0
+0.00.983.403 D llama_kv_cache: layer  12: dev = AMEVA0
+0.00.983.404 D llama_kv_cache: layer  13: dev = AMEVA0
+0.00.983.406 D llama_kv_cache: layer  14: dev = AMEVA0
+0.00.983.408 D llama_kv_cache: layer  15: dev = AMEVA0
+0.00.983.409 D llama_kv_cache: layer  16: dev = AMEVA0
+0.00.983.411 D llama_kv_cache: layer  17: dev = AMEVA0
+0.00.983.413 D llama_kv_cache: layer  18: dev = AMEVA0
+0.00.983.414 D llama_kv_cache: layer  19: dev = AMEVA0
+0.00.983.416 D llama_kv_cache: layer  20: dev = AMEVA0
+0.00.983.417 D llama_kv_cache: layer  21: dev = AMEVA0
+0.00.983.419 D llama_kv_cache: layer  22: dev = AMEVA0
+0.00.983.420 D llama_kv_cache: layer  23: dev = AMEVA0
+0.01.131.714 I llama_kv_cache:      AMEVA KV buffer size =   384.00 MiB
+0.01.231.054 I llama_kv_cache: size =  384.00 MiB ( 32768 cells,  24 layers,  1/1 seqs), K (f16):  192.00 MiB, V (f16):  192.00 MiB
+0.01.231.067 I llama_kv_cache: attn_rot_k = 0, n_embd_head_k_all = 64
+0.01.231.068 I llama_kv_cache: attn_rot_v = 0, n_embd_head_k_all = 64
+0.01.231.073 D llama_context: enumerating backends
+0.01.231.704 D llama_context: backend_ptrs.size() = 2
+0.01.231.710 I sched_reserve: reserving ...
+0.01.231.850 D sched_reserve: max_nodes = 2328
+0.01.233.263 D sched_reserve: reserving full memory module
+0.01.233.534 D sched_reserve: worst-case: n_tokens = 512, n_seqs = 1, n_outputs = 1
+0.01.233.539 D graph_reserve: reserving a graph for ubatch with n_tokens =    1, n_seqs =  1, n_outputs =    1
 ggml-ameva [ACCEPT]: node='Qcur-0' (src0='blk.0.attn_q.weight', src1='attn_norm-0') accepted for AMEVA!
 ggml-ameva [ACCEPT]: node='Kcur-0' (src0='blk.0.attn_k.weight', src1='attn_norm-0') accepted for AMEVA!
 ggml-ameva [ACCEPT]: node='node_26' (src0='blk.0.attn_output.weight', src1='kqv_out-0') accepted for AMEVA!
@@ -968,10 +968,10 @@ ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
-0.01.377.318 W sched_reserve: layer 0 is assigned to device AMEVA0 but the Flash Attention tensor is assigned to device CPU (usually due to missing support)
-0.01.377.330 W sched_reserve: Flash Attention was auto, set to disabled
-0.01.377.331 I sched_reserve: resolving fused Gated Delta Net support:
-0.01.377.333 D graph_reserve: reserving a graph for ubatch with n_tokens =    1, n_seqs =  1, n_outputs =    1
+0.01.235.084 W sched_reserve: layer 0 is assigned to device AMEVA0 but the Flash Attention tensor is assigned to device CPU (usually due to missing support)
+0.01.235.119 W sched_reserve: Flash Attention was auto, set to disabled
+0.01.235.120 I sched_reserve: resolving fused Gated Delta Net support:
+0.01.235.121 D graph_reserve: reserving a graph for ubatch with n_tokens =    1, n_seqs =  1, n_outputs =    1
 ggml-ameva [ACCEPT]: node='Qcur-0' (src0='blk.0.attn_q.weight', src1='attn_norm-0') accepted for AMEVA!
 ggml-ameva [ACCEPT]: node='Kcur-0' (src0='blk.0.attn_k.weight', src1='attn_norm-0') accepted for AMEVA!
 ggml-ameva [ACCEPT]: node='node_31' (src0='blk.0.attn_output.weight', src1='kqv_out-0') accepted for AMEVA!
@@ -1237,8 +1237,8 @@ ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
-0.01.379.048 I sched_reserve: fused Gated Delta Net (autoregressive) enabled
-0.01.379.060 D graph_reserve: reserving a graph for ubatch with n_tokens =   16, n_seqs =  1, n_outputs =   16
+0.01.236.698 I sched_reserve: fused Gated Delta Net (autoregressive) enabled
+0.01.236.704 D graph_reserve: reserving a graph for ubatch with n_tokens =   16, n_seqs =  1, n_outputs =   16
 ggml-ameva [ACCEPT]: node='Qcur-0' (src0='blk.0.attn_q.weight', src1='attn_norm-0') accepted for AMEVA!
 ggml-ameva [ACCEPT]: node='Kcur-0' (src0='blk.0.attn_k.weight', src1='attn_norm-0') accepted for AMEVA!
 ggml-ameva [ACCEPT]: node='node_31' (src0='blk.0.attn_output.weight', src1='kqv_out-0') accepted for AMEVA!
@@ -1504,8 +1504,8 @@ ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
-0.01.380.567 I sched_reserve: fused Gated Delta Net (chunked) enabled
-0.01.380.580 D graph_reserve: reserving a graph for ubatch with n_tokens =  512, n_seqs =  1, n_outputs =    1
+0.01.238.105 I sched_reserve: fused Gated Delta Net (chunked) enabled
+0.01.238.110 D graph_reserve: reserving a graph for ubatch with n_tokens =  512, n_seqs =  1, n_outputs =    1
 ggml-ameva [ACCEPT]: node='Qcur-0' (src0='blk.0.attn_q.weight', src1='attn_norm-0') accepted for AMEVA!
 ggml-ameva [ACCEPT]: node='Kcur-0' (src0='blk.0.attn_k.weight', src1='attn_norm-0') accepted for AMEVA!
 ggml-ameva [ACCEPT]: node='node_31' (src0='blk.0.attn_output.weight', src1='kqv_out-0') accepted for AMEVA!
@@ -1771,7 +1771,7 @@ ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
-0.02.226.875 D graph_reserve: reserving a graph for ubatch with n_tokens =    1, n_seqs =  1, n_outputs =    1
+0.02.334.911 D graph_reserve: reserving a graph for ubatch with n_tokens =    1, n_seqs =  1, n_outputs =    1
 ggml-ameva [ACCEPT]: node='Qcur-0' (src0='blk.0.attn_q.weight', src1='attn_norm-0') accepted for AMEVA!
 ggml-ameva [ACCEPT]: node='Kcur-0' (src0='blk.0.attn_k.weight', src1='attn_norm-0') accepted for AMEVA!
 ggml-ameva [ACCEPT]: node='node_31' (src0='blk.0.attn_output.weight', src1='kqv_out-0') accepted for AMEVA!
@@ -2037,7 +2037,7 @@ ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
-0.02.228.545 D graph_reserve: reserving a graph for ubatch with n_tokens =  512, n_seqs =  1, n_outputs =    1
+0.02.336.648 D graph_reserve: reserving a graph for ubatch with n_tokens =  512, n_seqs =  1, n_outputs =    1
 ggml-ameva [ACCEPT]: node='Qcur-0' (src0='blk.0.attn_q.weight', src1='attn_norm-0') accepted for AMEVA!
 ggml-ameva [ACCEPT]: node='Kcur-0' (src0='blk.0.attn_k.weight', src1='attn_norm-0') accepted for AMEVA!
 ggml-ameva [ACCEPT]: node='node_31' (src0='blk.0.attn_output.weight', src1='kqv_out-0') accepted for AMEVA!
@@ -2303,13 +2303,13 @@ ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
-0.02.230.032 I sched_reserve:      AMEVA compute buffer size =  1872.76 MiB
-0.02.230.040 I sched_reserve: graph nodes  = 942
-0.02.230.041 I sched_reserve: graph splits = 217
-0.02.230.042 I sched_reserve: reserve took 855.41 ms, sched copies = 1
-0.02.230.227 D set_adapters_lora: adapters = 0x0
-0.02.230.232 D adapters_lora_are_same: adapters = 0x0
-0.02.230.235 I cmn  common_init_: warming up the model with an empty run - please wait ... (--no-warmup to disable)
+0.02.338.218 I sched_reserve:      AMEVA compute buffer size =  1872.76 MiB
+0.02.338.224 I sched_reserve: graph nodes  = 942
+0.02.338.225 I sched_reserve: graph splits = 217
+0.02.338.227 I sched_reserve: reserve took 1106.38 ms, sched copies = 1
+0.02.338.461 D set_adapters_lora: adapters = 0x0
+0.02.338.467 D adapters_lora_are_same: adapters = 0x0
+0.02.338.469 I cmn  common_init_: warming up the model with an empty run - please wait ... (--no-warmup to disable)
 ggml-ameva [ACCEPT]: node='Qcur-0' (src0='blk.0.attn_q.weight', src1='attn_norm-0') accepted for AMEVA!
 ggml-ameva [ACCEPT]: node='Kcur-0' (src0='blk.0.attn_k.weight', src1='attn_norm-0') accepted for AMEVA!
 ggml-ameva [ACCEPT]: node='node_31' (src0='blk.0.attn_output.weight', src1='kqv_out-0') accepted for AMEVA!
@@ -2576,25 +2576,579 @@ ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
 ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
 ggml-ameva [GRAPH_COMPUTE]: entering graph_compute n_nodes=1
-ggml-ameva [FAIL_FAST]: AMEVA_FAIL_STAGE=dispatch triggered, terminating with fail-fast exit code 1
+ggml-ameva [FAIL_FAST]: AMEVA_FAIL_STAGE=dispatch triggered, returning GGML_STATUS_FAILED
+0.02.438.224 E graph_compute: ggml_backend_sched_graph_compute_async failed with error -1
+0.02.438.242 E process_ubatch: failed to compute graph, compute status: -1
+0.02.438.247 W decode: removing memory module entries for seq_id = 0, pos = [0, +inf)
+0.02.438.297 E llama_decode: failed to decode, ret = -3
+ggml-ameva [GRAPH_COMPUTE]: entering graph_compute n_nodes=1
+ggml-ameva [FAIL_FAST]: AMEVA_FAIL_STAGE=dispatch triggered, returning GGML_STATUS_FAILED
+0.02.476.598 E graph_compute: ggml_backend_sched_graph_compute_async failed with error -1
+0.02.476.606 E process_ubatch: failed to compute graph, compute status: -1
+0.02.476.608 W decode: removing memory module entries for seq_id = 0, pos = [0, +inf)
+0.02.476.655 E llama_decode: failed to decode, ret = -3
+0.02.476.661 E cmn  common_conte: llama_decode() failed: -3
+0.02.485.294 W srv    load_model: speculative decoding not supported by this context
+0.02.485.300 I srv    load_model: initializing, n_slots = 1, n_ctx_slot = 32768, kv_unified = 'false'
+0.02.485.305 I slot   load_model: id  0 | task -1 | new slot, n_ctx = 32768
+0.02.485.307 D slot        reset: id  0 | task -1 | 
+0.02.485.436 I srv    load_model: prompt cache is enabled, size limit: 8192 MiB
+0.02.485.441 I srv    load_model: use `--cache-ram 0` to disable the prompt cache
+0.02.485.443 I srv    load_model: for more info see https://github.com/ggml-org/llama.cpp/pull/16391
+0.02.485.444 I srv    load_model: context checkpoints enabled, max = 32, min spacing = 8192
+0.02.485.463 I srv          init: idle slots will be saved to prompt cache upon starting a new task
+0.02.485.463 D srv          init: __TEST_TAG_CACHE_IDLE_SLOTS_ENABLED__
+0.02.508.331 D common_chat_templates_apply_jinja: using differential autoparser
+0.02.508.352 D [1m[38;5;126m=== Starting differential analysis ===
+[0m0.02.508.353 D [1m[38;5;214mPhase 1: Reasoning analysis
+[0m0.02.509.774 D [1m[38;5;214mPhase 2: Content analysis
+[0m0.02.511.168 D [1m[38;5;214mPhase 3: Tool call analysis
+[0m0.02.513.272 D 
+--- Reasoning & Content Structure ---
+0.02.513.280 D user_msg_start: <|im_start|>user
+0.02.513.281 D assistant_msg_start: <|im_start|>assistant
+0.02.513.282 D reasoning_mode: NONE
+0.02.513.283 D reasoning_start: ''
+0.02.513.284 D reasoning_end: ''
+0.02.513.285 D content_mode: PLAIN
+0.02.513.285 D content_start: ''
+0.02.513.285 D content_end: ''
+0.02.513.286 D 
+--- Tool Call Structure ---
+0.02.513.286 D tool_mode: JSON_NATIVE
+0.02.513.287 D supports_tools: true
+0.02.513.287 D supports_parallel_calls: true
+0.02.513.287 D tool_section_start: ''
+0.02.513.288 D tool_section_end: ''
+0.02.513.288 D per_call_start: '<tool_call>
+'
+0.02.513.289 D per_call_end: '</tool_call>'
+0.02.513.289 D func_name_prefix: ''
+0.02.513.290 D func_name_suffix: ''
+0.02.513.290 D func_close: ''
+0.02.513.290 D call_id_prefix: ''
+0.02.513.291 D call_id_suffix: ''
+0.02.513.291 D call_id_pos: 'NONE'
+0.02.513.292 D args_start: ''
+0.02.513.292 D args_end: ''
+0.02.513.292 D arg_name_prefix: ''
+0.02.513.292 D arg_name_suffix: ''
+0.02.513.293 D arg_value_prefix: ''
+0.02.513.293 D arg_value_suffix: ''
+0.02.513.293 D name_field: 'name'
+0.02.513.294 D args_field: 'arguments'
+0.02.513.294 D id_field: ''
+0.02.513.295 D gen_id_field: ''
+0.02.513.295 D parameter_order: 'name, arguments'
+0.02.513.295 D [1m[38;5;126m=== Differential analysis complete ===
+[0m0.02.514.229 D common_chat_templates_apply_jinja: generated parser:
+Sequence(Literal(<|im_start|>assistant
+), Epsilon, Tag(content, Until()), End)
 
-Loading model... 
+parser generation prompt: <|im_start|>assistant
+
+0.02.514.241 I srv          init: init: chat template, example_format: '<|im_start|>system
+You are a helpful assistant<|im_end|>
+<|im_start|>user
+Hello<|im_end|>
+<|im_start|>assistant
+Hi there<|im_end|>
+<|im_start|>user
+How are you?<|im_end|>
+<|im_start|>assistant
+'
+0.02.514.261 D common_chat_templates_apply_jinja: using differential autoparser
+0.02.514.261 D [1m[38;5;126m=== Starting differential analysis ===
+[0m0.02.514.262 D [1m[38;5;214mPhase 1: Reasoning analysis
+[0m0.02.519.533 D [1m[38;5;214mPhase 2: Content analysis
+[0m0.02.520.913 D [1m[38;5;214mPhase 3: Tool call analysis
+[0m0.02.526.967 D 
+--- Reasoning & Content Structure ---
+0.02.526.975 D user_msg_start: <|im_start|>user
+0.02.526.976 D assistant_msg_start: <|im_start|>assistant
+0.02.526.977 D reasoning_mode: NONE
+0.02.526.977 D reasoning_start: ''
+0.02.526.978 D reasoning_end: ''
+0.02.526.979 D content_mode: PLAIN
+0.02.526.979 D content_start: ''
+0.02.526.979 D content_end: ''
+0.02.526.980 D 
+--- Tool Call Structure ---
+0.02.526.980 D tool_mode: JSON_NATIVE
+0.02.526.980 D supports_tools: true
+0.02.526.981 D supports_parallel_calls: true
+0.02.526.981 D tool_section_start: ''
+0.02.526.982 D tool_section_end: ''
+0.02.526.982 D per_call_start: '<tool_call>
+'
+0.02.526.982 D per_call_end: '</tool_call>'
+0.02.526.982 D func_name_prefix: ''
+0.02.526.983 D func_name_suffix: ''
+0.02.526.983 D func_close: ''
+0.02.526.983 D call_id_prefix: ''
+0.02.526.984 D call_id_suffix: ''
+0.02.526.984 D call_id_pos: 'NONE'
+0.02.526.985 D args_start: ''
+0.02.526.985 D args_end: ''
+0.02.526.985 D arg_name_prefix: ''
+0.02.526.985 D arg_name_suffix: ''
+0.02.526.986 D arg_value_prefix: ''
+0.02.526.986 D arg_value_suffix: ''
+0.02.526.986 D name_field: 'name'
+0.02.526.987 D args_field: 'arguments'
+0.02.526.987 D id_field: ''
+0.02.526.987 D gen_id_field: ''
+0.02.526.988 D parameter_order: 'name, arguments'
+0.02.526.988 D [1m[38;5;126m=== Differential analysis complete ===
+[0m0.02.527.332 D common_chat_templates_apply_jinja: generated parser:
+Sequence(Literal(<|im_start|>assistant
+), Epsilon, Tag(content, Until()), End)
+
+parser generation prompt: <|im_start|>assistant
+
+0.02.527.335 I srv          init: init: chat template, thinking = 0
+0.02.527.463 D que    start_loop: processing new tasks
+0.02.527.468 D que    start_loop: update slots
+0.02.527.469 I srv  update_slots: all slots are idle
+0.02.527.470 D que    start_loop: waiting for new tasks
+0.02.527.479 D common_chat_templates_apply_jinja: using differential autoparser
+0.02.527.480 D [1m[38;5;126m=== Starting differential analysis ===
+[0m0.02.527.481 D [1m[38;5;214mPhase 1: Reasoning analysis
+[0m0.02.528.739 D [1m[38;5;214mPhase 2: Content analysis
+[0m0.02.530.085 D [1m[38;5;214mPhase 3: Tool call analysis
+[0m0.02.536.157 D 
+--- Reasoning & Content Structure ---
+0.02.536.163 D user_msg_start: <|im_start|>user
+0.02.536.164 D assistant_msg_start: <|im_start|>assistant
+0.02.536.165 D reasoning_mode: NONE
+0.02.536.166 D reasoning_start: ''
+0.02.536.166 D reasoning_end: ''
+0.02.536.167 D content_mode: PLAIN
+0.02.536.168 D content_start: ''
+0.02.536.169 D content_end: ''
+0.02.536.169 D 
+--- Tool Call Structure ---
+0.02.536.170 D tool_mode: JSON_NATIVE
+0.02.536.171 D supports_tools: true
+0.02.536.172 D supports_parallel_calls: true
+0.02.536.172 D tool_section_start: ''
+0.02.536.173 D tool_section_end: ''
+0.02.536.174 D per_call_start: '<tool_call>
+'
+0.02.536.175 D per_call_end: '</tool_call>'
+0.02.536.175 D func_name_prefix: ''
+0.02.536.176 D func_name_suffix: ''
+0.02.536.177 D func_close: ''
+0.02.536.178 D call_id_prefix: ''
+0.02.536.178 D call_id_suffix: ''
+0.02.536.179 D call_id_pos: 'NONE'
+0.02.536.180 D args_start: ''
+0.02.536.181 D args_end: ''
+0.02.536.181 D arg_name_prefix: ''
+0.02.536.181 D arg_name_suffix: ''
+0.02.536.182 D arg_value_prefix: ''
+0.02.536.182 D arg_value_suffix: ''
+0.02.536.182 D name_field: 'name'
+0.02.536.183 D args_field: 'arguments'
+0.02.536.183 D id_field: ''
+0.02.536.183 D gen_id_field: ''
+0.02.536.184 D parameter_order: 'name, arguments'
+0.02.536.184 D [1m[38;5;126m=== Differential analysis complete ===
+[0m0.02.536.531 D common_chat_templates_apply_jinja: generated parser:
+Sequence(Literal(<|im_start|>assistant
+), Epsilon, Tag(content, Until()), End)
+
+parser generation prompt: <|im_start|>assistant
+
+ggml-ameva [ACCEPT]: node='Qcur-0' (src0='blk.0.attn_q.weight', src1='attn_norm-0') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Kcur-0' (src0='blk.0.attn_k.weight', src1='attn_norm-0') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='node_31' (src0='blk.0.attn_output.weight', src1='kqv_out-0') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_gate-0' (src0='blk.0.ffn_gate.weight', src1='ffn_norm-0') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_up-0' (src0='blk.0.ffn_up.weight', src1='ffn_norm-0') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Qcur-1' (src0='blk.1.attn_q.weight', src1='attn_norm-1') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Kcur-1' (src0='blk.1.attn_k.weight', src1='attn_norm-1') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='node_70' (src0='blk.1.attn_output.weight', src1='kqv_out-1') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_gate-1' (src0='blk.1.ffn_gate.weight', src1='ffn_norm-1') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_up-1' (src0='blk.1.ffn_up.weight', src1='ffn_norm-1') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Qcur-2' (src0='blk.2.attn_q.weight', src1='attn_norm-2') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Vcur-2' (src0='blk.2.attn_v.weight', src1='attn_norm-2') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Kcur-2' (src0='blk.2.attn_k.weight', src1='attn_norm-2') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='node_109' (src0='blk.2.attn_output.weight', src1='kqv_out-2') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_gate-2' (src0='blk.2.ffn_gate.weight', src1='ffn_norm-2') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_up-2' (src0='blk.2.ffn_up.weight', src1='ffn_norm-2') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Qcur-3' (src0='blk.3.attn_q.weight', src1='attn_norm-3') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Kcur-3' (src0='blk.3.attn_k.weight', src1='attn_norm-3') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='node_148' (src0='blk.3.attn_output.weight', src1='kqv_out-3') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_gate-3' (src0='blk.3.ffn_gate.weight', src1='ffn_norm-3') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_up-3' (src0='blk.3.ffn_up.weight', src1='ffn_norm-3') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Qcur-4' (src0='blk.4.attn_q.weight', src1='attn_norm-4') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Vcur-4' (src0='blk.4.attn_v.weight', src1='attn_norm-4') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Kcur-4' (src0='blk.4.attn_k.weight', src1='attn_norm-4') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='node_187' (src0='blk.4.attn_output.weight', src1='kqv_out-4') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_gate-4' (src0='blk.4.ffn_gate.weight', src1='ffn_norm-4') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_up-4' (src0='blk.4.ffn_up.weight', src1='ffn_norm-4') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Qcur-5' (src0='blk.5.attn_q.weight', src1='attn_norm-5') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Vcur-5' (src0='blk.5.attn_v.weight', src1='attn_norm-5') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Kcur-5' (src0='blk.5.attn_k.weight', src1='attn_norm-5') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='node_226' (src0='blk.5.attn_output.weight', src1='kqv_out-5') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_gate-5' (src0='blk.5.ffn_gate.weight', src1='ffn_norm-5') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_up-5' (src0='blk.5.ffn_up.weight', src1='ffn_norm-5') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Qcur-6' (src0='blk.6.attn_q.weight', src1='attn_norm-6') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Kcur-6' (src0='blk.6.attn_k.weight', src1='attn_norm-6') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='node_265' (src0='blk.6.attn_output.weight', src1='kqv_out-6') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_gate-6' (src0='blk.6.ffn_gate.weight', src1='ffn_norm-6') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_up-6' (src0='blk.6.ffn_up.weight', src1='ffn_norm-6') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Qcur-7' (src0='blk.7.attn_q.weight', src1='attn_norm-7') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Kcur-7' (src0='blk.7.attn_k.weight', src1='attn_norm-7') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='node_304' (src0='blk.7.attn_output.weight', src1='kqv_out-7') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_gate-7' (src0='blk.7.ffn_gate.weight', src1='ffn_norm-7') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_up-7' (src0='blk.7.ffn_up.weight', src1='ffn_norm-7') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Qcur-8' (src0='blk.8.attn_q.weight', src1='attn_norm-8') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Kcur-8' (src0='blk.8.attn_k.weight', src1='attn_norm-8') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='node_343' (src0='blk.8.attn_output.weight', src1='kqv_out-8') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_gate-8' (src0='blk.8.ffn_gate.weight', src1='ffn_norm-8') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_up-8' (src0='blk.8.ffn_up.weight', src1='ffn_norm-8') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Qcur-9' (src0='blk.9.attn_q.weight', src1='attn_norm-9') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Kcur-9' (src0='blk.9.attn_k.weight', src1='attn_norm-9') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='node_382' (src0='blk.9.attn_output.weight', src1='kqv_out-9') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_gate-9' (src0='blk.9.ffn_gate.weight', src1='ffn_norm-9') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_up-9' (src0='blk.9.ffn_up.weight', src1='ffn_norm-9') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Qcur-10' (src0='blk.10.attn_q.weight', src1='attn_norm-10') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Kcur-10' (src0='blk.10.attn_k.weight', src1='attn_norm-10') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='node_421' (src0='blk.10.attn_output.weight', src1='kqv_out-10') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_gate-10' (src0='blk.10.ffn_gate.weight', src1='ffn_norm-10') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_up-10' (src0='blk.10.ffn_up.weight', src1='ffn_norm-10') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Qcur-11' (src0='blk.11.attn_q.weight', src1='attn_norm-11') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Vcur-11' (src0='blk.11.attn_v.weight', src1='attn_norm-11') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Kcur-11' (src0='blk.11.attn_k.weight', src1='attn_norm-11') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='node_460' (src0='blk.11.attn_output.weight', src1='kqv_out-11') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_gate-11' (src0='blk.11.ffn_gate.weight', src1='ffn_norm-11') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_up-11' (src0='blk.11.ffn_up.weight', src1='ffn_norm-11') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Qcur-12' (src0='blk.12.attn_q.weight', src1='attn_norm-12') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Vcur-12' (src0='blk.12.attn_v.weight', src1='attn_norm-12') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Kcur-12' (src0='blk.12.attn_k.weight', src1='attn_norm-12') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='node_499' (src0='blk.12.attn_output.weight', src1='kqv_out-12') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_gate-12' (src0='blk.12.ffn_gate.weight', src1='ffn_norm-12') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_up-12' (src0='blk.12.ffn_up.weight', src1='ffn_norm-12') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Qcur-13' (src0='blk.13.attn_q.weight', src1='attn_norm-13') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Kcur-13' (src0='blk.13.attn_k.weight', src1='attn_norm-13') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='node_538' (src0='blk.13.attn_output.weight', src1='kqv_out-13') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_gate-13' (src0='blk.13.ffn_gate.weight', src1='ffn_norm-13') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_up-13' (src0='blk.13.ffn_up.weight', src1='ffn_norm-13') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Qcur-14' (src0='blk.14.attn_q.weight', src1='attn_norm-14') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Vcur-14' (src0='blk.14.attn_v.weight', src1='attn_norm-14') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Kcur-14' (src0='blk.14.attn_k.weight', src1='attn_norm-14') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='node_577' (src0='blk.14.attn_output.weight', src1='kqv_out-14') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_gate-14' (src0='blk.14.ffn_gate.weight', src1='ffn_norm-14') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_up-14' (src0='blk.14.ffn_up.weight', src1='ffn_norm-14') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Qcur-15' (src0='blk.15.attn_q.weight', src1='attn_norm-15') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Vcur-15' (src0='blk.15.attn_v.weight', src1='attn_norm-15') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Kcur-15' (src0='blk.15.attn_k.weight', src1='attn_norm-15') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='node_616' (src0='blk.15.attn_output.weight', src1='kqv_out-15') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_gate-15' (src0='blk.15.ffn_gate.weight', src1='ffn_norm-15') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_up-15' (src0='blk.15.ffn_up.weight', src1='ffn_norm-15') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Qcur-16' (src0='blk.16.attn_q.weight', src1='attn_norm-16') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Kcur-16' (src0='blk.16.attn_k.weight', src1='attn_norm-16') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='node_655' (src0='blk.16.attn_output.weight', src1='kqv_out-16') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_gate-16' (src0='blk.16.ffn_gate.weight', src1='ffn_norm-16') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_up-16' (src0='blk.16.ffn_up.weight', src1='ffn_norm-16') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Qcur-17' (src0='blk.17.attn_q.weight', src1='attn_norm-17') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Vcur-17' (src0='blk.17.attn_v.weight', src1='attn_norm-17') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Kcur-17' (src0='blk.17.attn_k.weight', src1='attn_norm-17') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='node_694' (src0='blk.17.attn_output.weight', src1='kqv_out-17') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_gate-17' (src0='blk.17.ffn_gate.weight', src1='ffn_norm-17') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_up-17' (src0='blk.17.ffn_up.weight', src1='ffn_norm-17') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Qcur-18' (src0='blk.18.attn_q.weight', src1='attn_norm-18') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Vcur-18' (src0='blk.18.attn_v.weight', src1='attn_norm-18') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Kcur-18' (src0='blk.18.attn_k.weight', src1='attn_norm-18') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='node_733' (src0='blk.18.attn_output.weight', src1='kqv_out-18') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_gate-18' (src0='blk.18.ffn_gate.weight', src1='ffn_norm-18') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_up-18' (src0='blk.18.ffn_up.weight', src1='ffn_norm-18') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Qcur-19' (src0='blk.19.attn_q.weight', src1='attn_norm-19') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Kcur-19' (src0='blk.19.attn_k.weight', src1='attn_norm-19') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='node_772' (src0='blk.19.attn_output.weight', src1='kqv_out-19') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_gate-19' (src0='blk.19.ffn_gate.weight', src1='ffn_norm-19') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_up-19' (src0='blk.19.ffn_up.weight', src1='ffn_norm-19') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Qcur-20' (src0='blk.20.attn_q.weight', src1='attn_norm-20') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Vcur-20' (src0='blk.20.attn_v.weight', src1='attn_norm-20') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Kcur-20' (src0='blk.20.attn_k.weight', src1='attn_norm-20') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='node_811' (src0='blk.20.attn_output.weight', src1='kqv_out-20') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_gate-20' (src0='blk.20.ffn_gate.weight', src1='ffn_norm-20') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_up-20' (src0='blk.20.ffn_up.weight', src1='ffn_norm-20') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Qcur-21' (src0='blk.21.attn_q.weight', src1='attn_norm-21') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Kcur-21' (src0='blk.21.attn_k.weight', src1='attn_norm-21') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='node_850' (src0='blk.21.attn_output.weight', src1='kqv_out-21') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_gate-21' (src0='blk.21.ffn_gate.weight', src1='ffn_norm-21') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_up-21' (src0='blk.21.ffn_up.weight', src1='ffn_norm-21') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Qcur-22' (src0='blk.22.attn_q.weight', src1='attn_norm-22') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Vcur-22' (src0='blk.22.attn_v.weight', src1='attn_norm-22') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Kcur-22' (src0='blk.22.attn_k.weight', src1='attn_norm-22') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='node_889' (src0='blk.22.attn_output.weight', src1='kqv_out-22') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_gate-22' (src0='blk.22.ffn_gate.weight', src1='ffn_norm-22') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_up-22' (src0='blk.22.ffn_up.weight', src1='ffn_norm-22') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Qcur-23' (src0='blk.23.attn_q.weight', src1='attn_norm-23') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Vcur-23' (src0='blk.23.attn_v.weight', src1='attn_norm-23') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='Kcur-23' (src0='blk.23.attn_k.weight', src1='attn_norm-23') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='node_928' (src0='blk.23.attn_output.weight', src1='kqv_out-23') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_gate-23' (src0='blk.23.ffn_gate.weight', src1='ffn_norm-23') accepted for AMEVA!
+ggml-ameva [ACCEPT]: node='ffn_up-23' (src0='blk.23.ffn_up.weight', src1='ffn_norm-23') accepted for AMEVA!
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=14 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=1 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=12 (expected F32 or Q5_0)
+ggml-ameva [REJECT]: src0 type=8 (expected F32 or Q5_0)
+0.02.536.648 D res  add_waiting_: add task 0 to waiting list. current waiting = 0 (before add)
+0.02.536.655 D que          post: new task, id = 0, front = 0
+0.02.536.768 D que    start_loop: processing new tasks
+0.02.536.770 D que    start_loop: processing task, id = 0
+0.02.537.038 I slot get_availabl: id  0 | task -1 | selected slot by LRU, t_last = -1
+0.02.537.039 I srv  get_availabl: updating prompt cache
+0.02.537.043 I srv          load:  - looking for better prompt, base f_keep = -1.000, sim = 0.000
+0.02.537.046 I srv        update:  - cache state: 0 prompts, 0.000 MiB (limits: 8192.000 MiB, 32768 tokens, 8589934592 est)
+0.02.537.048 I srv  get_availabl: prompt cache update took 0.01 ms
+0.02.537.063 D slot launch_slot_: id  0 | task -1 | launching slot : {"id":0,"n_ctx":32768,"speculative":false,"is_processing":false}
+0.02.537.083 I slot launch_slot_: id  0 | task -1 | sampler chain: logits -> ?penalties -> ?dry -> ?top-n-sigma -> top-k -> ?typical -> top-p -> min-p -> ?xtc -> temp-ext -> dist 
+0.02.537.090 I slot launch_slot_: id  0 | task -1 | sampler params: 
+	repeat_last_n = 64, repeat_penalty = 1.000, frequency_penalty = 0.000, presence_penalty = 0.000
+	dry_multiplier = 0.000, dry_base = 1.750, dry_allowed_length = 2, dry_penalty_last_n = -1
+	top_k = 40, top_p = 0.950, min_p = 0.050, xtc_probability = 0.000, xtc_threshold = 0.100, typical_p = 1.000, top_n_sigma = -1.000, temp = 0.000
+	mirostat = 0, mirostat_lr = 0.100, mirostat_ent = 5.000, adaptive_target = -1.000, adaptive_decay = 0.900
+0.02.537.092 I slot launch_slot_: id  0 | task 0 | processing task, is_child = 0
+0.02.537.093 D que    start_loop: update slots
+0.02.537.094 D srv  update_slots: posting NEXT_RESPONSE
+0.02.537.095 D que          post: new task, id = 1, front = 0
+0.02.537.106 I slot   operator(): id  0 | task 0 | new prompt, n_ctx_slot = 32768, n_keep = 0, task.n_tokens = 36
+0.02.537.110 D res          send: sending result for task id = 0
+0.02.537.111 D res          send: task id = 0 pushed to result queue
+0.02.537.118 I slot   operator(): id  0 | task 0 | cached n_tokens = 0, memory_seq_rm [0, end)
+0.02.537.179 I slot init_sampler: id  0 | task 0 | init sampler, took 0.01 ms, tokens: text = 36, total = 36
+0.02.537.181 D slot   operator(): id  0 | task 0 | main/do_checkpoint = no, pos_min = -1, pos_max = -1
+0.02.537.186 D srv        decode: n_batch (effective) = 2048, off = 0
+0.02.537.188 D set_adapters_lora: adapters = 0x0
+0.02.537.189 D adapters_lora_are_same: adapters = 0x0
+0.02.537.190 D set_embeddings: value = 0
+ggml-ameva [GRAPH_COMPUTE]: entering graph_compute n_nodes=1
+ggml-ameva [FAIL_FAST]: AMEVA_FAIL_STAGE=dispatch triggered, returning GGML_STATUS_FAILED
+0.02.552.482 E graph_compute: ggml_backend_sched_graph_compute_async failed with error -1
+0.02.552.703 E process_ubatch: failed to compute graph, compute status: -1
+0.02.552.829 W decode: removing memory module entries for seq_id = 0, pos = [0, +inf)
+0.02.553.027 E llama_decode: failed to decode, ret = -3
+0.02.553.528 E srv        decode: Compute error. off = 0, n_batch = 2048, ret = -3
+0.02.553.660 E srv    send_error: task id = 0, error: Compute error.
+0.02.553.795 D res          send: sending result for task id = 0
+0.02.553.932 D res          send: task id = 0 pushed to result queue
+0.02.554.074 I slot      release: id  0 | task 0 | stop processing: n_tokens = 36, truncated = 0
+0.02.554.196 D res  remove_waiti: remove task 0 from waiting list. current waiting = 1 (before remove)
+0.02.554.198 W srv          stop: cancel task, id_task = 0
+0.02.554.199 D res  remove_waiti: remove task 0 from waiting list. current waiting = 0 (before remove)
+0.02.554.202 D que          post: new task, id = 2/1, front = 1
+0.02.554.203 D srv          next: received error result, stopping further processing
+0.02.554.211 D res  remove_waiti: remove task 0 from waiting list. current waiting = 0 (before remove)
+0.02.554.211 D srv          stop: all tasks already finished, no need to cancel
+0.02.554.333 D slot        reset: id  0 | task 0 | 
+0.02.554.470 I slot prompt_clear: id  0 | task -1 | clearing prompt with 36 tokens
+0.02.560.282 E srv  update_slots: decode() failed: Compute error.
+0.02.560.492 D que    start_loop: waiting for new tasks
+0.02.560.645 D que    start_loop: processing new tasks
+0.02.560.764 D que    start_loop: terminate
+
 ======================================================================
   AMEVA GGML Dynamic Backend E2E Execution Summary
 ======================================================================
 AMEVA_PLUGIN_LOADED=true
 AMEVA_BACKEND_SELECTED=true
-LLAMA_SCHEDULER_AMEVA_NODE_COUNT=1
+LLAMA_SCHEDULER_AMEVA_NODE_COUNT=3
 REAL_RUNTIME_ACTIVATION_CAPTURED=true
+PROMPT_PHASE_AMEVA_DISPATCH_COUNT=0
+GENERATION_PHASE_AMEVA_DISPATCH_COUNT=0
+TOTAL_AMEVA_DISPATCH_COUNT=0
+AMEVA_Q5_0_EXECUTION_COUNT=0
+AMEVA_NON_Q5_0_EXECUTION_COUNT=0
+CPU_RETAINED_TYPE_COUNTS=f32:121, q8_0:13, q4_K:12, q6_K:12
 Q5_0_CPU_DEQUANT_COUNT=0
 F32_GPU_SGEMM_DISPATCH_COUNT=0
 QWEN_AMEVA_DISPATCH_COUNT=0
-DISPATCH_ATTEMPT_COUNT=1
+DISPATCH_ATTEMPT_COUNT=3
 DISPATCH_SUCCESS_COUNT=0
 AMEVA_GPU_OP_COUNT=0
 CPU_FALLBACK_COUNT=0
 SILENT_FALLBACK_COUNT=0
+BACKEND_CALLED_EXIT=false
+BACKEND_PROCESS_TERMINATION_CALL_COUNT=0
+CONTEXT_CREATE_COUNT=1
+CONTEXT_DESTROY_COUNT=1
+KERNEL_CREATE_COUNT=1
+KERNEL_DESTROY_COUNT=1
+BUFFER_CREATE_COUNT=5
+BUFFER_DESTROY_COUNT=5
+EVENT_CREATE_COUNT=0
+EVENT_DESTROY_COUNT=0
+Q5_0_STAGING_ALLOC_COUNT=0
+Q5_0_STAGING_FREE_COUNT=0
+FULL_RESOURCE_LIFECYCLE_BALANCED=true
+FORCED_FAILURE_LIFECYCLE_BALANCED=true
 ======================================================================
 
+
+Loading model... 
+
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b9918-390c30775
+model      : /data/data/com.termux/files/home/.termux-llama/models/qwen2.5-0.5b-instruct-q4_k_m.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+> Reply with exactly one word: Tokyo
+
+Error: Compute error.
+
+
+[ Prompt: 0.0 t/s | Generation: 0.0 t/s ]
+
+Exiting...
 
 =======================================================================
