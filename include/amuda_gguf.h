@@ -6,7 +6,7 @@
 #ifndef AMUDA_GGUF_H
 #define AMUDA_GGUF_H
 
-#include "amuda.h"
+#include "ac_base.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -56,7 +56,7 @@ typedef struct {
     uint64_t offset;
     void*    data_ptr;   /* Direct host virtual memory pointer into mmap */
     size_t   size_bytes;
-    AcBuffer* ac_buf;    /* Optional bound zero-copy UMA buffer */
+    struct AcBuffer* ac_buf;    /* Optional bound zero-copy UMA buffer */
 } GgufTensor;
 
 typedef struct {
