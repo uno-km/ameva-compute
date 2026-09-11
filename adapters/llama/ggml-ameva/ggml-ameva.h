@@ -51,6 +51,17 @@ GGML_API const char* ggml_backend_ameva_get_build_commit(void);
 GGML_API void ggml_backend_ameva_reset_counters(void);
 GGML_API void ameva_plugin_diagnostics_dump(void);
 
+// Timing & Shape Diagnostics
+GGML_API uint64_t ggml_backend_ameva_get_cpu_dequant_time_us(void);
+GGML_API uint64_t ggml_backend_ameva_get_host_to_device_time_us(void);
+GGML_API uint64_t ggml_backend_ameva_get_gpu_sgemm_time_us(void);
+GGML_API uint64_t ggml_backend_ameva_get_device_to_host_time_us(void);
+void ameva_record_timing_and_shape(
+    uint32_t M, uint32_t N, uint32_t K,
+    uint64_t q5_bytes, uint64_t f32_bytes,
+    uint64_t dequant_us, uint64_t upload_us, uint64_t sgemm_us, uint64_t d2h_us
+);
+
 // Failure Injection Hooks (P0 Hardening Verification)
 typedef enum {
     AMEVA_FAIL_NONE = 0,

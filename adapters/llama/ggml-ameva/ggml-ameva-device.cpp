@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <atomic>
 #include <mutex>
+#include <vector>
 
 extern struct ggml_backend_buffer_type g_ameva_buft;
 
@@ -39,6 +40,67 @@ static std::atomic<int64_t> g_prompt_phase_dispatch_count{0};
 static std::atomic<int64_t> g_generation_phase_dispatch_count{0};
 static std::atomic<int64_t> g_ameva_q5_0_execution_count{0};
 static std::atomic<int64_t> g_ameva_non_q5_0_execution_count{0};
+static std::atomic<uint64_t> g_ameva_cpu_dequant_time_us{0};
+static std::atomic<uint64_t> g_ameva_host_to_device_time_us{0};
+static std::atomic<uint64_t> g_ameva_gpu_sgemm_time_us{0};
+static std::atomic<uint64_t> g_ameva_device_to_host_time_us{0};
+
+struct ShapeMetrics {
+    uint32_t M = 0;
+    uint32_t N = 0;
+    uint32_t K = 0;
+    uint64_t count = 0;
+    uint64_t q5_bytes = 0;
+    uint64_t f32_bytes = 0;
+    uint64_t dequant_us = 0;
+    uint64_t upload_us = 0;
+    uint64_t sgemm_us = 0;
+    uint64_t total_us = 0;
+};
+static std::mutex s_shape_mutex;
+static std::vector<ShapeMetrics> s_shape_metrics;
+
+extern "C" {
+void ameva_record_timing_and_shape(
+    uint32_t M, uint32_t N, uint32_t K,
+    uint64_t q5_bytes, uint64_t f32_bytes,
+    uint64_t dequant_us, uint64_t upload_us, uint64_t sgemm_us, uint64_t d2h_us
+) {
+    g_ameva_cpu_dequant_time_us += dequant_us;
+    g_ameva_host_to_device_time_us += upload_us;
+    g_ameva_gpu_sgemm_time_us += sgemm_us;
+    g_ameva_device_to_host_time_us += d2h_us;
+
+    std::lock_guard<std::mutex> lock(s_shape_mutex);
+    for (auto& sm : s_shape_metrics) {
+        if (sm.M == M && sm.N == N && sm.K == K) {
+            sm.count++;
+            sm.q5_bytes += q5_bytes;
+            sm.f32_bytes += f32_bytes;
+            sm.dequant_us += dequant_us;
+            sm.upload_us += upload_us;
+            sm.sgemm_us += sgemm_us;
+            sm.total_us += (dequant_us + upload_us + sgemm_us + d2h_us);
+            return;
+        }
+    }
+    ShapeMetrics sm;
+    sm.M = M; sm.N = N; sm.K = K;
+    sm.count = 1;
+    sm.q5_bytes = q5_bytes;
+    sm.f32_bytes = f32_bytes;
+    sm.dequant_us = dequant_us;
+    sm.upload_us = upload_us;
+    sm.sgemm_us = sgemm_us;
+    sm.total_us = (dequant_us + upload_us + sgemm_us + d2h_us);
+    s_shape_metrics.push_back(sm);
+}
+
+uint64_t ggml_backend_ameva_get_cpu_dequant_time_us(void) { return g_ameva_cpu_dequant_time_us.load(); }
+uint64_t ggml_backend_ameva_get_host_to_device_time_us(void) { return g_ameva_host_to_device_time_us.load(); }
+uint64_t ggml_backend_ameva_get_gpu_sgemm_time_us(void) { return g_ameva_gpu_sgemm_time_us.load(); }
+uint64_t ggml_backend_ameva_get_device_to_host_time_us(void) { return g_ameva_device_to_host_time_us.load(); }
+}
 
 #ifndef GGML_AMEVA_BUILD_COMMIT
 #define GGML_AMEVA_BUILD_COMMIT "bcbf3d1a7a47179e279f1085702dcbd1908b877d"
@@ -92,6 +154,14 @@ void ggml_backend_ameva_reset_counters(void) {
     g_generation_phase_dispatch_count.store(0);
     g_ameva_q5_0_execution_count.store(0);
     g_ameva_non_q5_0_execution_count.store(0);
+    g_ameva_cpu_dequant_time_us.store(0);
+    g_ameva_host_to_device_time_us.store(0);
+    g_ameva_gpu_sgemm_time_us.store(0);
+    g_ameva_device_to_host_time_us.store(0);
+    {
+        std::lock_guard<std::mutex> lock(s_shape_mutex);
+        s_shape_metrics.clear();
+    }
 }
 
 void ameva_increment_gpu_op_count(void) { g_ameva_gpu_op_count.fetch_add(1); }
@@ -425,6 +495,36 @@ extern "C" __attribute__((destructor)) void ameva_plugin_diagnostics_dump(void) 
         fprintf(stderr, "Q5_0_STAGING_FREE_COUNT=%lld\n", (long long)q5_free);
         fprintf(stderr, "FULL_RESOURCE_LIFECYCLE_BALANCED=%s\n", balanced ? "true" : "false");
         fprintf(stderr, "FORCED_FAILURE_LIFECYCLE_BALANCED=%s\n", balanced ? "true" : "false");
+
+        uint64_t dequant_us = g_ameva_cpu_dequant_time_us.load();
+        uint64_t h2d_us = g_ameva_host_to_device_time_us.load();
+        uint64_t sgemm_us = g_ameva_gpu_sgemm_time_us.load();
+        uint64_t d2h_us = g_ameva_device_to_host_time_us.load();
+        fprintf(stderr, "Q5_0_CPU_DEQUANT_TIME_US=%llu\n", (unsigned long long)dequant_us);
+        fprintf(stderr, "HOST_TO_DEVICE_UPLOAD_TIME_US=%llu\n", (unsigned long long)h2d_us);
+        fprintf(stderr, "GPU_SGEMM_TIME_US=%llu\n", (unsigned long long)sgemm_us);
+        fprintf(stderr, "DEVICE_TO_HOST_READBACK_TIME_US=%llu\n", (unsigned long long)d2h_us);
+        fprintf(stderr, "TOTAL_MUL_MAT_TIME_US=%llu\n", (unsigned long long)(dequant_us + h2d_us + sgemm_us + d2h_us));
+        fprintf(stderr, "S20_CPU_DEQUANT_TIME_MS=%.2f\n", (double)dequant_us / 1000.0);
+        fprintf(stderr, "S20_HOST_TO_DEVICE_TIME_MS=%.2f\n", (double)h2d_us / 1000.0);
+        fprintf(stderr, "S20_GPU_SGEMM_TIME_MS=%.2f\n", (double)sgemm_us / 1000.0);
+        fprintf(stderr, "S20_DEVICE_TO_HOST_TIME_MS=%.2f\n", (double)d2h_us / 1000.0);
+
+        fprintf(stderr, "\n--- SHAPE BREAKDOWN ---\n");
+        {
+            std::lock_guard<std::mutex> lock(s_shape_mutex);
+            for (const auto& sm : s_shape_metrics) {
+                fprintf(stderr, "SHAPE M=%u N=%u K=%u EXECUTION_COUNT=%llu Q5_0_WEIGHT_BYTES=%llu DEQUANTIZED_F32_BYTES=%llu CPU_DEQUANT_TOTAL_US=%llu UPLOAD_TOTAL_US=%llu GPU_SGEMM_TOTAL_US=%llu TOTAL_US=%llu\n",
+                        sm.M, sm.N, sm.K,
+                        (unsigned long long)sm.count,
+                        (unsigned long long)sm.q5_bytes,
+                        (unsigned long long)sm.f32_bytes,
+                        (unsigned long long)sm.dequant_us,
+                        (unsigned long long)sm.upload_us,
+                        (unsigned long long)sm.sgemm_us,
+                        (unsigned long long)sm.total_us);
+            }
+        }
         fprintf(stderr, "======================================================================\n\n");
         fflush(stderr);
     }

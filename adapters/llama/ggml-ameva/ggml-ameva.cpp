@@ -12,6 +12,7 @@
 #include <cmath>
 #include <mutex>
 #include <vector>
+#include <chrono>
 
 void ameva_increment_gpu_op_count(void);
 void ameva_increment_q5_0_cpu_dequant_count(void);
@@ -335,6 +336,11 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
             }
         };
 
+        uint64_t node_dequant_us = 0;
+        uint64_t node_upload_us = 0;
+        uint64_t node_sgemm_us = 0;
+        uint64_t node_readback_us = 0;
+
         // 1. Resolve SRC0
         if (src0->type == GGML_TYPE_Q5_0) {
             // Failure Injection: MAP_SRC0_FAIL
@@ -363,10 +369,13 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
             const char* q5_src_bytes = (const char*)src0->data;
             float* f32_dst_ptr = (float*)map_ptr;
 
+            auto t_deq_start = std::chrono::high_resolution_clock::now();
             for (uint32_t row = 0; row < N; ++row) {
                 const ameva_block_q5_0* row_blocks = (const ameva_block_q5_0*)(q5_src_bytes + row * q5_row_bytes);
                 ameva_dequantize_row_q5_0(row_blocks, f32_dst_ptr + row * K, K);
             }
+            auto t_deq_end = std::chrono::high_resolution_clock::now();
+            node_dequant_us += std::chrono::duration_cast<std::chrono::microseconds>(t_deq_end - t_deq_start).count();
 
             // Failure Injection: FLUSH_SRC0_FAIL
             if (fi == AMEVA_FAIL_FLUSH_SRC0) {
@@ -375,7 +384,10 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
                 return GGML_STATUS_FAILED;
             }
 
+            auto t_up0_start = std::chrono::high_resolution_clock::now();
             AcResult fres = ac_runtime_buffer_flush(temp_src0, 0, f32_bytes);
+            auto t_up0_end = std::chrono::high_resolution_clock::now();
+            node_upload_us += std::chrono::duration_cast<std::chrono::microseconds>(t_up0_end - t_up0_start).count();
             if (fres != AC_SUCCESS) {
                 cleanup_temps();
                 return GGML_STATUS_FAILED;
@@ -554,6 +566,7 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
 
         ameva_increment_dispatch_attempt_count();
 
+        auto t_sgemm_start = std::chrono::high_resolution_clock::now();
         AcEvent* ev = nullptr;
         AcResult dres = ac_runtime_dispatch(ctx, &ldesc, &ev);
         if (dres != AC_SUCCESS) {
@@ -570,6 +583,8 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
         AcResult wres = ac_runtime_event_wait(ev, wait_timeout_ns);
         ac_runtime_event_destroy(ev);
         ameva_increment_event_destroy_count();
+        auto t_sgemm_end = std::chrono::high_resolution_clock::now();
+        node_sgemm_us += std::chrono::duration_cast<std::chrono::microseconds>(t_sgemm_end - t_sgemm_start).count();
 
         if (wres != AC_SUCCESS) {
             fprintf(stderr, "ggml-ameva: event wait failed with code %d (FAIL-FAST)\n", wres);
@@ -585,6 +600,7 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
         }
 
         // Readback / Invalidate
+        auto t_rb_start = std::chrono::high_resolution_clock::now();
         if (temp_dst) {
             AcResult ires = ac_runtime_buffer_invalidate(temp_dst, 0, ggml_nbytes(node));
             if (ires != AC_SUCCESS) {
@@ -605,6 +621,15 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
                 return GGML_STATUS_FAILED;
             }
         }
+        auto t_rb_end = std::chrono::high_resolution_clock::now();
+        node_readback_us += std::chrono::duration_cast<std::chrono::microseconds>(t_rb_end - t_rb_start).count();
+
+        ameva_record_timing_and_shape(
+            M, N, K,
+            (src0->type == GGML_TYPE_Q5_0) ? ((size_t)(K / 32) * 22 * N) : 0,
+            (size_t)K * N * sizeof(float),
+            node_dequant_us, node_upload_us, node_sgemm_us, node_readback_us
+        );
 
         cleanup_temps();
 
