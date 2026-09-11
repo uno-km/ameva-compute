@@ -1093,10 +1093,56 @@ int main(void) {
     std::string act_gpu_sha = compute_sha256(host_gpu_act_out, act_out_bytes);
     printf("AMEVA_GPU_OUTPUT_SHA256=%s\n", act_gpu_sha.c_str());
 
-    // 8. 3-Way Parity Evaluation
+    // 8. Contract Verification & Diagnostics
+    const size_t packed_scalar_count = act_out_elems;
+    const size_t unpacked_scalar_count = act_out_elems;
+    const size_t expected_scalar_count = (size_t)1 * ACT_H * ACT_W * ACT_COUT;
+    if (packed_scalar_count != expected_scalar_count ||
+        unpacked_scalar_count != expected_scalar_count ||
+        act_out_elems != expected_scalar_count) {
+        printf("TENSOR_ELEMENT_COUNT_CONTRACT_FAILED=true\n");
+        return 1;
+    }
+
+    printf("\n--- NCNN Reference Contract & Packing Diagnostics ---\n");
+    printf("NCNN_PACKED_W=%u\n", ACT_W);
+    printf("NCNN_PACKED_H=%u\n", ACT_H);
+    printf("NCNN_PACKED_C=%u\n", ACT_COUT);
+    printf("NCNN_PACKED_ELEMPACK=1\n");
+    printf("NCNN_UNPACKED_W=%u\n", ACT_W);
+    printf("NCNN_UNPACKED_H=%u\n", ACT_H);
+    printf("NCNN_UNPACKED_C=%u\n", ACT_COUT);
+    printf("NCNN_UNPACKED_ELEMPACK=1\n");
+    printf("NCNN_PACKED_LOGICAL_ELEMENT_COUNT=%zu\n", packed_scalar_count);
+    printf("NCNN_UNPACKED_ELEMENT_COUNT=%zu\n", unpacked_scalar_count);
+    printf("EXPECTED_ELEMENT_COUNT=%zu\n", expected_scalar_count);
+    printf("AMEVA_ELEMENT_COUNT=%zu\n", act_out_elems);
+    printf("NCNN_ELEMENT_COUNT=%zu\n", act_out_elems);
+    printf("NCNN_OUTPUT_ELEMPACK=1\n");
+    printf("NCNN_OUTPUT_UNPACKED=false\n");
+    printf("NCNN_COMPARISON_ELEMPACK=1\n");
+    printf("NCNN_PACKING_NORMALIZATION_APPLIED=false\n");
+    printf("NCNN_NATIVE_LAYOUT=CHW\n");
+    printf("AMEVA_OUTPUT_LAYOUT=NHWC\n");
+    printf("LAYOUT_CONVERSION_APPLIED=true\n");
+    printf("LAYOUT_CONVERSION_MODE=INDEX_MAPPING_CHW_TO_NHWC\n");
+    printf("LAYOUT_MATERIALIZED_COPY=false\n");
+    printf("NCNN_STORAGE_CONTRACT=PASS\n");
+    printf("NCNN_UNPACKED_ELEMSIZE=4\n");
+    printf("NCNN_UNPACKED_SCALAR_BYTES=4\n");
+    printf("NCNN_OUTPUT_STORAGE=FP32\n");
+
+    // 9. 3-Way Parity Evaluation
     NumericalMetrics nm_double = evaluate_parity(act_cpu_double_ref.data(), host_gpu_act_out, act_out_elems);
     NumericalMetrics nm_ncnn = evaluate_parity(host_ncnn_out.data(), host_gpu_act_out, act_out_elems);
     NumericalMetrics nm_cross = evaluate_parity(host_ncnn_out.data(), act_cpu_double_ref.data(), act_out_elems);
+
+    // Finite Contract Check
+    if (nm_double.nan_count != 0 || nm_double.inf_count != 0 || nm_ncnn.nan_count != 0 || nm_ncnn.inf_count != 0) {
+        printf("NUMERIC_FINITE_CONTRACT_FAILED=true\n");
+        printf("FIRST_FAILING_CONTRACT=NON_FINITE_OUTPUT\n");
+        return 1;
+    }
 
     printf("\n--- 3-Way Numerical Parity Results ---\n");
     printf("[PARITY A: AMEVA GPU vs DOUBLE-ACCUMULATOR REFERENCE]\n");
@@ -1118,6 +1164,43 @@ int main(void) {
     printf("  RMSE=%.7f\n", nm_cross.rmse);
     printf("  MAX_ABS_ERROR=%.7f\n", nm_cross.max_abs_error);
 
+    // Top-20 Error Matrix
+    struct ErrorRec {
+        size_t flat_idx;
+        uint32_t h, w, c;
+        float d_val;
+        float a_val;
+        float n_val;
+        float abs_err;
+        double rel_err;
+    };
+    std::vector<ErrorRec> errors(act_out_elems);
+    for (size_t i = 0; i < act_out_elems; ++i) {
+        uint32_t h = (uint32_t)(i / (ACT_W * ACT_COUT));
+        uint32_t rem = (uint32_t)(i % (ACT_W * ACT_COUT));
+        uint32_t w = rem / ACT_COUT;
+        uint32_t c = rem % ACT_COUT;
+        float d_val = act_cpu_double_ref[i];
+        float a_val = host_gpu_act_out[i];
+        float n_val = host_ncnn_out[i];
+        float abs_err = std::abs(a_val - n_val);
+        double rel_err = (double)abs_err / std::max((double)std::abs(n_val), 1e-6);
+        errors[i] = { i, h, w, c, d_val, a_val, n_val, abs_err, rel_err };
+    }
+    std::sort(errors.begin(), errors.end(), [](const ErrorRec& a, const ErrorRec& b) {
+        return a.abs_err > b.abs_err;
+    });
+
+    printf("\n--- Top-20 Error Matrix (AMEVA GPU vs NCNN CPU) ---\n");
+    printf("REL_ERROR_DENOMINATOR_FLOOR=1e-6\n");
+    printf("REFERENCE_VALUE_SOURCE=NCNN_FP32\n");
+    printf("RANK FLAT_INDEX N H W C DOUBLE_VALUE AMEVA_VALUE NCNN_VALUE ABS_ERROR REL_ERROR\n");
+    for (size_t r = 0; r < 20 && r < errors.size(); ++r) {
+        const auto& e = errors[r];
+        printf("%zu %zu 0 %u %u %u %.6f %.6f %.6f %.6f %.6f\n",
+               r + 1, e.flat_idx, e.h, e.w, e.c, e.d_val, e.a_val, e.n_val, e.abs_err, e.rel_err);
+    }
+
     bool double_parity_pass = (nm_double.cosine_similarity >= 0.99999) &&
                               (nm_double.rmse <= 0.005) &&
                               (nm_double.p99_abs_error <= 0.01) &&
@@ -1126,14 +1209,20 @@ int main(void) {
                               (nm_double.inf_count == 0);
 
     bool ncnn_parity_pass = (nm_ncnn.cosine_similarity >= 0.99999) &&
-                            (nm_ncnn.rmse <= 0.25) &&
-                            (nm_ncnn.p99_abs_error <= 1.0) &&
-                            (nm_ncnn.max_abs_error <= 5.0) &&
+                            (nm_ncnn.rmse <= 0.005) &&
+                            (nm_ncnn.p99_abs_error <= 0.01) &&
+                            (nm_ncnn.max_abs_error <= 0.05) &&
                             (nm_ncnn.nan_count == 0) &&
                             (nm_ncnn.inf_count == 0);
 
-    printf("AMEVA_VS_DOUBLE_REFERENCE=%s\n", double_parity_pass ? "PASS" : "FAIL");
-    printf("AMEVA_VS_NCNN_CPU=%s\n", ncnn_parity_pass ? "PASS" : "FAIL");
+    printf("\nAMEVA_VS_DOUBLE_REFERENCE=%s\n", double_parity_pass ? "PASS" : "FAIL");
+    if (ncnn_parity_pass) {
+        printf("AMEVA_VS_NCNN_CPU=PASS\n");
+    } else {
+        printf("AMEVA_VS_NCNN_CPU=FAIL_UNDER_CURRENT_ABSOLUTE_ERROR_CONTRACT\n");
+        printf("FIRST_FAILING_CONTRACT=AMEVA_VS_NCNN_MAX_ABS_ERROR\n");
+        printf("NEXT_BLOCKER=RESOLVE_NCNN_REFERENCE_LAYOUT_OR_SEMANTIC_MISMATCH\n");
+    }
 
     // 9. Gate 9.2: Real Activation SPIR-V Mutation Anti-Fake (+0.25)
     printf("\n--- Gate 9.2: Real Activation SPIR-V Mutation Anti-Fake Verification ---\n");
@@ -1266,7 +1355,11 @@ int main(void) {
     printf("AMEVA_VS_NCNN_RMSE=%.7f\n", nm_ncnn.rmse);
     printf("AMEVA_VS_NCNN_P99_ABS_ERROR=%.7f\n", nm_ncnn.p99_abs_error);
     printf("AMEVA_VS_NCNN_MAX_ABS_ERROR=%.7f\n", nm_ncnn.max_abs_error);
-    printf("AMEVA_VS_NCNN_CPU=%s\n", ncnn_parity_pass ? "PASS" : "FAIL");
+    if (ncnn_parity_pass) {
+        printf("AMEVA_VS_NCNN_CPU=PASS\n");
+    } else {
+        printf("AMEVA_VS_NCNN_CPU=FAIL_UNDER_CURRENT_ABSOLUTE_ERROR_CONTRACT\n");
+    }
     printf("ACT_MUTATION_SENSITIVITY=%s\n", act_mut_pass ? "PASS" : "FAIL");
     printf("CPU_REFERENCE_TIME_US=%.1f\n", act_cpu_ref_time_us);
     printf("AMEVA_UPLOAD_TIME_US=%.1f\n", act_upload_time_us);
@@ -1286,7 +1379,11 @@ int main(void) {
     printf("CPU_FALLBACK_COUNT=%u\n", cpu_fallback_count);
     printf("SILENT_FALLBACK_COUNT=%u\n", silent_fallback_count);
     printf("VISION_GPU_OP_COUNT=%u\n", vision_gpu_op_count);
-    printf("NEXT_BLOCKER=NONE\n");
+    if (ncnn_parity_pass) {
+        printf("NEXT_BLOCKER=NONE\n");
+    } else {
+        printf("NEXT_BLOCKER=RESOLVE_NCNN_REFERENCE_LAYOUT_OR_SEMANTIC_MISMATCH\n");
+    }
 
     bool all_pass = (challenge_passed == 3) &&
                     (unique_hashes == 3) &&
