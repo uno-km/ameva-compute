@@ -19,11 +19,14 @@ P0-3 Final Closure : HOLD (Awaiting weighted model fixture verification)
   - Pending Gates                          : 1 (Gate 22: BitNet weighted model fixture absent on target)
   - Core Malformed & Synthetic Gates (1-19): 19 / 19 GATES PASSED
   - Real GGUF Fixture Compatibility:
-      * Gate 20: Qwen2 vocabulary GGUF     : PASS (arch=qwen2, kv=20, tensors=0, fd_delta=0)
-      * Gate 21: Llama vocabulary GGUF     : PASS (arch=llama, kv=20, tensors=0, fd_delta=0)
+      * Gate 20: Qwen2 vocabulary GGUF     : PASS (Parser compatibility for the specified vocab fixture)
+      * Gate 21: Llama vocabulary GGUF     : PASS (Parser compatibility for the specified vocab fixture)
       * Gate 22: BitNet weighted fixture   : PENDING CLASSIFICATION (missing full 2B model)
-      * Qwen2.5 weighted model             : NOT_AVAILABLE
+      * Qwen2.5 weighted model             : NOT_AVAILABLE (Pending host download & verification)
       * Llama weighted model               : NOT_AVAILABLE
+      * Tokenizer encode/decode parity     : NOT TESTED
+      * Weighted tensor compatibility      : NOT TESTED
+      * Inference compatibility            : NOT TESTED
   - Little-Endian Bit-Shift KAT (Gate 23)  : PASS (U32/U64 high-bit, all-FF, unaligned exact match)
   - Dynamic FD Leak Gate (Gate 24)         : PASS (100 iterations: init=3, final=3, delta=0)
   - Dynamic RSS Memory Slope Gate (Gate 25): PASS (200 iterations: init=2816 KB, final=2820 KB, delta=4 KB <= 64 KB limit)
@@ -33,12 +36,15 @@ P0-3 Final Closure : HOLD (Awaiting weighted model fixture verification)
       * Gate 28: FAIL_AFTER_TENSOR_NAME_ALLOCATION       : PASS
       * Gate 29: FAIL_AFTER_MULTIPLE_TENSOR_DESCRIPTORS  : PASS
       * Gate 30: FAIL_AT_FINAL_TENSOR_DATA_RANGE         : PASS
-  - Automated CTest Suite Execution        : 3 / 3 TESTS PASSED (100% PASS, 0.83s real time)
-      * amuda_dispatch_sync                : PASSED (1.42s)
+  - Automated CTest Suite Execution        : 3 / 3 TESTS PASSED (100% PASS, Single Run from s22_p0_3_ctest_raw.log)
+      * amuda_dispatch_sync                : PASSED (0.66s)
       * amuda_dispatch_validation          : PASSED (0.08s)
       * amuda_gguf_validation              : PASSED (0.07s)
+      * Total Real Time                    : 0.83s
   - Vulkan Phase 4B Regression Matrix      : 10 / 10 GATES PASSED (1,000 cycles, delta: -40 KB, EXIT_CODE=0)
   - Compiler Warning Count                 : 0 WARNINGS under -Wall -Wextra -Werror=return-type -O3 -fPIC
+  - Runtime Linker Warning Count           : 2 WARNINGS (Expected Android namespace policy: direct /vendor/lib64/
+                                             paths blocked; Termux-accessible $PREFIX/opt/vendor/lib fallback succeeded)
   - Technical Audit Verdict                : CONDITIONAL PASS / P0-3 CLOSURE ON HOLD
 
 2. GROUND-TRUTH FIXTURE MANIFEST & CLASSIFICATION
@@ -75,20 +81,19 @@ P0-3 Final Closure : HOLD (Awaiting weighted model fixture verification)
   - ARCHITECTURE_ID    : llama
   - MODEL_COMPATIBILITY: METADATA_ONLY (WEIGHTED_INFERENCE=NOT_TESTED)
 
-[Fixture 3: BitNet 6.2MB Artifact]
-  - Filename           : bitnet-2b-ggml-model-i2_s.gguf
-  - File Size          : 6,291,456 bytes (6.00 MB)
-  - SHA-256 Hash       : 342d80ca158d052374e642c19666371295edb851ea58812653e2130c3ec3b434
-  - Magic / Version    : 0x46554747 (GGUF) / Version 3
-  - Header tensor_count: 332 (declared)
-  - Header kv_count    : 24 (declared)
-  - Truncation Point   : Truncated at byte 6,291,456 during metadata KV 19/24 parsing
-  - Parsed Descriptors : 0 / 332 reachable
-  - Total Payload Bytes: 0 (tensor descriptors unreachable before EOF)
-  - Provenance         : dist_wheels packaging slice
-  - BITNET_FULL_MODEL_WEIGHT_ARTIFACT: false
-  - BITNET_TRUNCATED_ARTIFACT       : true
-  - Safety Verdict     : Bounded reader successfully detects truncation and fails closed.
+[Fixture 3: BitNet 6.2MB Incomplete Artifact]
+  - Filename                                : bitnet-2b-ggml-model-i2_s.gguf
+  - File Size                               : 6,291,456 bytes (6.00 MB)
+  - SHA-256 Hash                            : 342d80ca158d052374e642c19666371295edb851ea58812653e2130c3ec3b434
+  - Magic / Version                         : 0x46554747 (GGUF) / Version 3
+  - BITNET_ARTIFACT_CLASS                   : INCOMPLETE_GGUF
+  - BITNET_DECLARED_TENSOR_COUNT            : 332
+  - BITNET_DECLARED_METADATA_COUNT          : 24
+  - BITNET_REACHABLE_TENSOR_DESCRIPTOR_COUNT: 0 (Truncated at byte 6,291,456 during metadata KV 19/24)
+  - BITNET_EXACT_ORIGIN                     : NOT_ESTABLISHED (Found in dist_wheels directory)
+  - TRUNCATION_OR_INCOMPLETE_STRUCTURE      : true
+  - TRUNCATION_FAIL_CLOSED                  : PASS (Bounded reader safely rejected EOF, model=NULL)
+  - FULL_WEIGHTED_MODEL                     : false
 
 3. METADATA BUDGET SOURCE DEFINITION & HEADROOM AUDIT
 --------------------------------------------------------------------------------
@@ -97,16 +102,30 @@ Definition     : #define GGUF_MAX_TOTAL_METADATA_BYTES (64 * 1024 * 1024ULL)
 Actual Constant: CONFIGURED_METADATA_BUDGET_BYTES = 67,108,864 (64 MB)
 Calibrated Diff: Upgraded from legacy 16 MB limit in commit b7f63c4.
 
-Engineering Justification & Headroom:
-  - Vocabulary tokenizers with 150K~256K tokens (e.g. Qwen2.5 152K vocab, Gemma 256K vocab) require
-    between 20 MB and 35 MB of serialized string tables, tokens arrays, and merge scores.
-  - A 16 MB limit caused premature AC_ERR_BINARY_CORRUPTED rejections on production LLM vocabs.
-  - Actual Fixture Utilization:
-      * ggml-vocab-qwen2.gguf     : 5,928,657 bytes (8.8% of 64MB budget, headroom: 61,180,207 bytes)
-      * ggml-vocab-llama-bpe.gguf : 7,818,116 bytes (11.6% of 64MB budget, headroom: 59,290,748 bytes)
-      * Projected Qwen2.5 152K    : ~25-35 MB (37-52% of 64MB budget, headroom: ~29-39 MB)
+Engineering Ground Truth:
+  - 64MB is an AMEVA implementation policy limit selected to accommodate larger tokenizer metadata.
+  - Compatibility with the target weighted Qwen2.5 artifact remains pending measurement.
+  - Measured Fixture Values:
+      * MEASURED_QWEN2_VOCAB_BYTES             : 5,928,657 bytes (8.8% of 64MB budget)
+      * MEASURED_LLAMA_VOCAB_BYTES             : 7,818,116 bytes (11.6% of 64MB budget)
+      * MEASURED_FIXTURE_MAX_BYTES             : 7,818,116 bytes (headroom: 59,290,748 bytes)
+  - Estimated Values (Not yet validated by weighted model):
+      * ESTIMATED_QWEN25_METADATA_BYTES        : 25,000,000 .. 35,000,000 bytes
+      * ESTIMATE_VALIDATED_BY_WEIGHTED_MODEL   : false
 
-4. SAMSUNG GALAXY S22 REAL HARDWARE VERIFICATION PROOF
+4. RUNTIME LINKER POLICY & WARNING DISCLOSURE
+--------------------------------------------------------------------------------
+Linker Warning Analysis:
+  - During test execution on Android 14 Termux, dlopen() attempts against standard system vendor paths
+    (/vendor/lib64/libOpenCL.so, /system/vendor/lib64/libOpenCL.so) produced namespace warnings:
+    "WARNING: linker: library ... is not accessible for the namespace".
+  - This is an expected Android Bionic linker namespace security restriction.
+  - The AMUDA vendor loader gracefully falls back to $PREFIX/opt/vendor/lib/libOpenCL.so, which succeeds.
+  - Disclosed separation:
+      * COMPILER_WARNING_COUNT       : 0 (C compiler flags: -Wall -Wextra -Werror=return-type)
+      * RUNTIME_LINKER_WARNING_COUNT : 2 (Android linker namespace warnings during fallback search)
+
+5. SAMSUNG GALAXY S22 REAL HARDWARE VERIFICATION PROOF
 --------------------------------------------------------------------------------
 Host-to-Device SHA-256 Verification:
   - Qwen2 Vocab Host  : 44c2f46b715f585c6ab513970e8a006bfa5badd6108560054921cf598d154d8c
@@ -114,7 +133,7 @@ Host-to-Device SHA-256 Verification:
   - Llama Vocab Host  : 97272e430d53bc7688f52d5e0ad8ea8f163ede9f1bbd1694feaa504797d5d96e
   - Llama Vocab S22   : 97272e430d53bc7688f52d5e0ad8ea8f163ede9f1bbd1694feaa504797d5d96e (MATCH)
 
-Hardware Test Suite Execution:
+Hardware Test Suite Execution (s22_p0_3_gguf_validation_raw.log):
   [GATE 01] TRUNCATED_HEADER_REJECTED                  : PASS (Rejected file size < 24 bytes, model=NULL)
   [GATE 02] TRUNCATED_METADATA_COUNT_REJECTED          : PASS (Rejected EOF at metadata start)
   [GATE 03] TRUNCATED_METADATA_KEY_REJECTED            : PASS (Rejected key len exceeding EOF)
@@ -146,7 +165,7 @@ Hardware Test Suite Execution:
   [GATE 29] FAIL_AFTER_MULTIPLE_TENSOR_DESCRIPTORS     : PASS (All prior descriptors freed on tensor 2 error, 0 FD leak)
   [GATE 30] FAIL_AT_FINAL_TENSOR_DATA_RANGE            : PASS (Full cleanup on final data range boundary check, 0 FD leak)
 
-5. ARCHITECTURAL ROADMAP & IMPLEMENTATION STATUS
+6. ARCHITECTURAL ROADMAP & IMPLEMENTATION STATUS
 --------------------------------------------------------------------------------
 ARCHITECTURE_PROPOSAL: ACCEPTED
 IMPLEMENTATION_STATUS: NOT_STARTED_OR_PARTIAL
@@ -154,7 +173,8 @@ IMPLEMENTATION_STATUS: NOT_STARTED_OR_PARTIAL
 Component Implementation Status Matrix:
   - AMUDA OpenCL / Vulkan HAL Core      : IMPLEMENTED & PASSING (P0-2 sealed, Phase 4B 10/10)
   - Hardened GGUF Bounded Parser        : IMPLEMENTED & PASSING (Vocabulary/Metadata validated)
-  - BitNet I2_S Quantization Plugin     : ISOLATED (Not architectural center)
+  - BitNet Architectural Role           : RECLASSIFIED_AS_PLUGIN (Not architectural center)
+  - BitNet Physical Source Isolation    : NOT_IMPLEMENTED (Functions reside in amuda_ops.c)
   - Tensor / Stride Core Runtime        : NOT STARTED (Architecture proposal accepted)
   - Autograd & Backward Operators       : NOT STARTED (Planned Track 3)
   - Conv2D / GroupNorm (Vision/Diffusion): NOT STARTED (Planned Track 2)
@@ -163,7 +183,7 @@ Component Implementation Status Matrix:
   - llama.cpp ggml_backend Adapter      : NOT STARTED (Design audit only permitted)
   - whisper.cpp / Piper ONNX Adapters   : NOT STARTED (Planned Track 2)
 
-6. EVIDENCE CHECKSUMS (docs/evidence/p0-stabilization/)
+7. EVIDENCE CHECKSUMS (docs/evidence/p0-stabilization/)
 --------------------------------------------------------------------------------
 Verification Command: python SHA256SUMS integrity checker
 Outcome              : TOTAL_MISMATCHES = 0 (100% matched)
