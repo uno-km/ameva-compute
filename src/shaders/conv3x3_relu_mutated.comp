@@ -1,0 +1,51 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 4) in;
+
+layout(std430, binding = 0) readonly buffer BufferIn { float in_data[]; };
+layout(std430, binding = 1) readonly buffer BufferWeight { float weight_data[]; };
+layout(std430, binding = 2) readonly buffer BufferBias { float bias_data[]; };
+layout(std430, binding = 3) writeonly buffer BufferOut { float out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint H;
+    uint W;
+    uint Cin;
+    uint Cout;
+    uint has_bias;
+} pc;
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    uint oc = gl_GlobalInvocationID.z;
+
+    if (x >= pc.W || y >= pc.H || oc >= pc.Cout) {
+        return;
+    }
+
+    float acc = (pc.has_bias != 0u) ? bias_data[oc] : 0.0;
+
+    // NCNN Canonical Weight Layout: [Cout, Cin, Kh(3), Kw(3)]
+    uint oc_weight_base = oc * (pc.Cin * 9u);
+
+    for (int ky = 0; ky < 3; ++ky) {
+        int iy = int(y) - 1 + ky; // Pad = 1
+        for (int kx = 0; kx < 3; ++kx) {
+            int ix = int(x) - 1 + kx; // Pad = 1
+
+            if (iy >= 0 && iy < int(pc.H) && ix >= 0 && ix < int(pc.W)) {
+                uint in_pixel_base = (uint(iy) * pc.W + uint(ix)) * pc.Cin;
+                uint k_offset = uint(ky * 3 + kx);
+
+                for (uint ic = 0u; ic < pc.Cin; ++ic) {
+                    float in_val = in_data[in_pixel_base + ic];
+                    float w_val = weight_data[oc_weight_base + ic * 9u + k_offset];
+                    acc += in_val * w_val;
+                }
+            }
+        }
+    }
+
+    out_data[(y * pc.W + x) * pc.Cout + oc] = max(acc, 0.0) + 0.25;
+}

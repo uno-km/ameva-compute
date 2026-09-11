@@ -256,22 +256,199 @@ add_test(NAME amuda_ggml_backend COMMAND test_amuda_ggml_backend)
 # =============================================================================
 # AMUDA Vision Ops Subsystem (Track V1 Pointwise Conv)
 # =============================================================================
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+find_program(GLSLC_EXECUTABLE NAMES glslc glslangValidator)
+
+file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/generated)
+
+macro(add_vision_shader SHADER_NAME VAR_NAME)
+    set(SRC_COMP "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/${SHADER_NAME}.comp")
+    set(GEN_SPV "${CMAKE_CURRENT_BINARY_DIR}/generated/${SHADER_NAME}.spv")
+    set(GEN_H "${CMAKE_CURRENT_BINARY_DIR}/generated/${SHADER_NAME}_spv.h")
+    set(DST_SPV "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/${SHADER_NAME}.spv")
+    set(DST_H "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/${SHADER_NAME}_spv.h")
+
+    if(GLSLC_EXECUTABLE)
+        add_custom_command(
+            OUTPUT ${GEN_SPV} ${GEN_H}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/generated
+            COMMAND ${GLSLC_EXECUTABLE} -fshader-stage=compute ${SRC_COMP} -o ${GEN_SPV}
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_spirv.py
+                    --input ${GEN_SPV} --output ${GEN_H} --var ${VAR_NAME}
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${GEN_SPV} ${DST_SPV}
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${GEN_H} ${DST_H}
+            DEPENDS ${SRC_COMP} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_spirv.py
+            COMMENT "Compiling SPIR-V shader and generating header: ${SHADER_NAME}"
+            VERBATIM
+        )
+        list(APPEND VISION_SHADER_HEADERS ${GEN_H} ${GEN_SPV})
+    endif()
+endmacro()
+
+add_vision_shader(conv3x3_relu Conv3x3Relu)
+add_vision_shader(conv3x3_relu_mutated Conv3x3ReluMutated)
+add_vision_shader(concat2_channel Concat2Channel)
+add_vision_shader(concat2_channel_mutated Concat2ChannelMutated)
+add_vision_shader(pointwise_conv PointwiseConv)
+add_vision_shader(pointwise_conv_mutated PointwiseConvMutated)
+add_vision_shader(pointwise_conv_relu PointwiseConvRelu)
+add_vision_shader(pointwise_conv_relu_mutated PointwiseConvReluMutated)
+add_vision_shader(relu Relu)
+
+if(VISION_SHADER_HEADERS)
+    add_custom_target(vision_shaders ALL DEPENDS ${VISION_SHADER_HEADERS})
+endif()
+
 set(AC_VISION_SOURCES
     src/vision/ac_vision_pointwise_conv.cpp
 )
 
 add_library(ac_vision_core STATIC ${AC_VISION_SOURCES})
-target_include_directories(ac_vision_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(ac_vision_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_BINARY_DIR}/generated
+)
+target_link_libraries(ac_vision_core
+    PUBLIC ac_vulkan_core
+)
 if(UNIX AND NOT APPLE)
-    target_link_libraries(ac_vision_core ac_vulkan_core vulkan dl m)
+    target_link_libraries(ac_vision_core
+        PUBLIC vulkan dl m
+    )
+endif()
+if(TARGET vision_shaders)
+    add_dependencies(ac_vision_core vision_shaders)
 endif()
 
-add_executable(test_vision_pointwise_conv tests/vision/test_vision_pointwise_conv.cpp ${AC_VISION_SOURCES})
+add_executable(test_vision_pointwise_conv tests/vision/test_vision_pointwise_conv.cpp)
 target_include_directories(test_vision_pointwise_conv PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(test_vision_pointwise_conv ac_vulkan_core)
+target_link_libraries(test_vision_pointwise_conv PRIVATE ac_vision_core)
 if(UNIX AND NOT APPLE)
-    target_link_libraries(test_vision_pointwise_conv vulkan dl m pthread)
+    target_link_libraries(test_vision_pointwise_conv PRIVATE pthread)
 endif()
 
 add_test(NAME vision_pointwise_conv COMMAND test_vision_pointwise_conv)
+
+# =============================================================================
+# AMUDA Vision Diagnostics & Integration Tests (NCNN Integration)
+# =============================================================================
+option(AMEVA_BUILD_VISION_NCNN_TESTS "Build NCNN-based Vision tests" ON)
+
+if(AMEVA_BUILD_VISION_NCNN_TESTS)
+    set(NCNN_DIR "/data/data/com.termux/files/home/ncnn" CACHE PATH "Path to NCNN repository")
+
+    if(NOT EXISTS "${NCNN_DIR}/src/net.h")
+        message(FATAL_ERROR "NCNN headers not found at ${NCNN_DIR}/src/net.h")
+    endif()
+    if(NOT EXISTS "${NCNN_DIR}/build-cpu/src/libncnn.a")
+        message(FATAL_ERROR "NCNN static library not found at ${NCNN_DIR}/build-cpu/src/libncnn.a")
+    endif()
+
+    find_package(OpenMP QUIET)
+
+    add_executable(audit_ncnn_fire2 scripts/audit_ncnn_fire2.cpp)
+    target_include_directories(audit_ncnn_fire2 PRIVATE
+        ${NCNN_DIR}/src
+        ${NCNN_DIR}/build-cpu/src
+    )
+    target_link_libraries(audit_ncnn_fire2
+        ${NCNN_DIR}/build-cpu/src/libncnn.a
+    )
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(audit_ncnn_fire2 OpenMP::OpenMP_CXX)
+    else()
+        target_compile_options(audit_ncnn_fire2 PRIVATE -fopenmp)
+        target_link_libraries(audit_ncnn_fire2 -fopenmp)
+    endif()
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(audit_ncnn_fire2 dl m pthread android log)
+    endif()
+
+    add_executable(generate_strict_fixtures scripts/generate_strict_fixtures.cpp)
+    target_include_directories(generate_strict_fixtures PRIVATE
+        ${NCNN_DIR}/src
+        ${NCNN_DIR}/build-cpu/src
+    )
+    target_link_libraries(generate_strict_fixtures
+        ${NCNN_DIR}/build-cpu/src/libncnn.a
+    )
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(generate_strict_fixtures OpenMP::OpenMP_CXX)
+    else()
+        target_compile_options(generate_strict_fixtures PRIVATE -fopenmp)
+        target_link_libraries(generate_strict_fixtures -fopenmp)
+    endif()
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(generate_strict_fixtures dl m pthread android log)
+    endif()
+
+    add_executable(test_vision_cat_fire2_integration tests/vision/test_vision_cat_fire2_integration.cpp)
+    target_include_directories(test_vision_cat_fire2_integration PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${NCNN_DIR}/src
+        ${NCNN_DIR}/build-cpu/src
+    )
+    target_link_libraries(test_vision_cat_fire2_integration
+        PRIVATE
+        ac_vision_core
+        ${NCNN_DIR}/build-cpu/src/libncnn.a
+    )
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(test_vision_cat_fire2_integration PRIVATE OpenMP::OpenMP_CXX)
+    else()
+        target_compile_options(test_vision_cat_fire2_integration PRIVATE -fopenmp)
+        target_link_libraries(test_vision_cat_fire2_integration PRIVATE -fopenmp)
+    endif()
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(test_vision_cat_fire2_integration PRIVATE dl m pthread android log)
+    endif()
+
+    add_test(NAME vision_cat_fire2_integration COMMAND test_vision_cat_fire2_integration)
+
+    add_executable(test_vision_pointwise_conv_relu tests/vision/test_vision_pointwise_conv_relu.cpp)
+    target_include_directories(test_vision_pointwise_conv_relu PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${NCNN_DIR}/src
+        ${NCNN_DIR}/build-cpu/src
+    )
+    target_link_libraries(test_vision_pointwise_conv_relu
+        PRIVATE
+        ac_vision_core
+        ${NCNN_DIR}/build-cpu/src/libncnn.a
+    )
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(test_vision_pointwise_conv_relu PRIVATE OpenMP::OpenMP_CXX)
+    else()
+        target_compile_options(test_vision_pointwise_conv_relu PRIVATE -fopenmp)
+        target_link_libraries(test_vision_pointwise_conv_relu PRIVATE -fopenmp)
+    endif()
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(test_vision_pointwise_conv_relu PRIVATE dl m pthread android log)
+    endif()
+
+    add_test(NAME vision_pointwise_conv_relu COMMAND test_vision_pointwise_conv_relu)
+
+    add_executable(test_vision_fire2_device_resident tests/vision/test_vision_fire2_device_resident.cpp)
+    target_include_directories(test_vision_fire2_device_resident PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${NCNN_DIR}/src
+        ${NCNN_DIR}/build-cpu/src
+    )
+    target_link_libraries(test_vision_fire2_device_resident
+        PRIVATE
+        ac_vision_core
+        ${NCNN_DIR}/build-cpu/src/libncnn.a
+    )
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(test_vision_fire2_device_resident PRIVATE OpenMP::OpenMP_CXX)
+    else()
+        target_compile_options(test_vision_fire2_device_resident PRIVATE -fopenmp)
+        target_link_libraries(test_vision_fire2_device_resident PRIVATE -fopenmp)
+    endif()
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(test_vision_fire2_device_resident PRIVATE dl m pthread android log)
+    endif()
+
+    add_test(NAME vision_fire2_device_resident COMMAND test_vision_fire2_device_resident)
+endif()
 

@@ -23,41 +23,77 @@
 #include "../src/shaders/pointwise_conv_mutated_spv.h"
 #include "../fixtures/squeezenet_fire2_squeeze1x1_data.h"
 
-#define CANARY_VAL 0x7E7E7E7E
+constexpr uint32_t kCanary = 0x7fc12345u;
+
+static void fill_buffer_canary(float* dst, size_t elem_count) {
+    uint32_t* words = reinterpret_cast<uint32_t*>(dst);
+    for (size_t i = 0; i < elem_count; ++i) {
+        words[i] = kCanary;
+    }
+}
+
+static size_t verify_buffer_not_canary(const float* dst, size_t elem_count) {
+    const uint32_t* words = reinterpret_cast<const uint32_t*>(dst);
+    size_t count = 0;
+    for (size_t i = 0; i < elem_count; ++i) {
+        if (words[i] == kCanary) {
+            count++;
+        }
+    }
+    return count;
+}
 
 // -----------------------------------------------------------------------------
 // Fixture Loader & Portable Decoding (Zero Union Punning)
 // -----------------------------------------------------------------------------
 static int load_fixture_file(const char* filename, void* out_buf, size_t max_bytes, size_t* out_read_bytes) {
-    const char* search_paths[] = {
-        "%s",
-        "tests/fixtures/%s",
-        "fixtures/%s",
-        "../tests/fixtures/%s",
-        "../../tests/fixtures/%s",
-        "/data/data/com.termux/files/home/fixtures/%s",
-        "/data/data/com.termux/files/home/tests/fixtures/%s",
-        "/data/data/com.termux/files/home/%s",
-        "/data/data/com.termux/files/home/ameva-compute/tests/fixtures/%s",
-        NULL
-    };
     char full_path[512];
     FILE* fp = NULL;
-    for (int i = 0; search_paths[i] != NULL; i++) {
-        snprintf(full_path, sizeof(full_path), search_paths[i], filename);
+
+    const char* env_dir = getenv("AMEVA_VISION_FIXTURE_DIR");
+    if (env_dir && env_dir[0] != '\0') {
+        snprintf(full_path, sizeof(full_path), "%s/%s", env_dir, filename);
         fp = fopen(full_path, "rb");
-        if (fp != NULL) break;
+    }
+
+    if (!fp) {
+        const char* search_paths[] = {
+            "/data/data/com.termux/files/home/ameva-compute/tests/fixtures/%s",
+            "tests/fixtures/%s",
+            "../tests/fixtures/%s",
+            "../../tests/fixtures/%s",
+            "fixtures/%s",
+            "%s",
+            NULL
+        };
+        for (int i = 0; search_paths[i] != NULL; i++) {
+            snprintf(full_path, sizeof(full_path), search_paths[i], filename);
+            fp = fopen(full_path, "rb");
+            if (fp != NULL) break;
+        }
     }
     if (!fp) return -1;
-    fseek(fp, 0, SEEK_END);
-    long sz = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-    if (sz < 0 || (size_t)sz > max_bytes) {
+    if (fseek(fp, 0, SEEK_END) != 0) {
         fclose(fp);
         return -2;
     }
+    long sz = ftell(fp);
+    if (sz <= 0 || (size_t)sz > max_bytes) {
+        fclose(fp);
+        return -3;
+    }
+    if (fseek(fp, 0, SEEK_SET) != 0) {
+        fclose(fp);
+        return -4;
+    }
     size_t read_n = fread(out_buf, 1, (size_t)sz, fp);
-    fclose(fp);
+    if (read_n != (size_t)sz || ferror(fp)) {
+        fclose(fp);
+        return -5;
+    }
+    if (fclose(fp) != 0) {
+        return -6;
+    }
     if (out_read_bytes) *out_read_bytes = read_n;
     return 0;
 }
@@ -192,21 +228,38 @@ struct NumericalMetrics {
     double mean_delta;
     uint32_t nan_count;
     uint32_t inf_count;
+    uint32_t ref_non_finite_count;
+    uint32_t actual_non_finite_count;
+    bool valid;
 };
 
 static NumericalMetrics evaluate_parity(const float* ref, const float* actual, size_t n) {
     NumericalMetrics m = {};
+    if (!ref || !actual || n == 0) {
+        m.valid = false;
+        return m;
+    }
+    m.valid = true;
     double dot = 0.0, norm_ref = 0.0, norm_act = 0.0;
     double sum_sq_diff = 0.0;
     double sum_delta = 0.0;
-    std::vector<double> abs_diffs(n, 0.0);
+    std::vector<double> abs_diffs;
+    abs_diffs.reserve(n);
 
     for (size_t i = 0; i < n; ++i) {
         float r = ref[i];
         float a = actual[i];
 
-        if (isnan(a)) m.nan_count++;
-        if (isinf(a)) m.inf_count++;
+        if (!std::isfinite(r)) {
+            ++m.ref_non_finite_count;
+            continue;
+        }
+        if (!std::isfinite(a)) {
+            ++m.actual_non_finite_count;
+            if (std::isnan(a)) m.nan_count++;
+            if (std::isinf(a)) m.inf_count++;
+            continue;
+        }
 
         double dr = (double)r;
         double da = (double)a;
@@ -218,11 +271,16 @@ static NumericalMetrics evaluate_parity(const float* ref, const float* actual, s
         norm_act += da * da;
         sum_sq_diff += diff * diff;
         sum_delta += diff;
-        abs_diffs[i] = abs_diff;
+        abs_diffs.push_back(abs_diff);
 
         if (abs_diff > m.max_abs_error) {
             m.max_abs_error = abs_diff;
         }
+    }
+
+    if (abs_diffs.empty()) {
+        m.valid = false;
+        return m;
     }
 
     if (norm_ref > 0.0 && norm_act > 0.0) {
@@ -231,13 +289,12 @@ static NumericalMetrics evaluate_parity(const float* ref, const float* actual, s
         m.cosine_similarity = 0.0;
     }
 
-    m.rmse = sqrt(sum_sq_diff / (double)n);
-    m.mean_delta = sum_delta / (double)n;
+    m.rmse = sqrt(sum_sq_diff / (double)abs_diffs.size());
+    m.mean_delta = sum_delta / (double)abs_diffs.size();
 
     std::sort(abs_diffs.begin(), abs_diffs.end());
-    size_t p99_idx = (size_t)(0.99 * (double)n);
-    if (p99_idx >= n) p99_idx = n - 1;
-    m.p99_abs_error = abs_diffs[p99_idx];
+    const size_t index = static_cast<size_t>(std::ceil(0.99 * (double)abs_diffs.size())) - 1;
+    m.p99_abs_error = abs_diffs[index];
 
     return m;
 }
@@ -294,8 +351,6 @@ int main(void) {
 
     // Global counters
     uint32_t vision_gpu_op_count = 0;
-    uint32_t cpu_fallback_count = 0;
-    uint32_t silent_fallback_count = 0;
 
     // -------------------------------------------------------------------------
     // Gate 1: Context Creation & Device Probe
@@ -362,12 +417,15 @@ int main(void) {
         for (size_t i = 0; i < in_elems; ++i) host_in[i] = lcg_uniform(rng, -1.5f, 1.5f);
         for (size_t i = 0; i < w_elems; ++i) host_w[i] = lcg_uniform(rng, -0.5f, 0.5f);
         for (size_t i = 0; i < b_elems; ++i) host_b[i] = lcg_uniform(rng, -0.2f, 0.2f);
-        memset(host_out, 0, out_bytes);
+        fill_buffer_canary(host_out, out_elems);
 
-        ac_runtime_buffer_flush(buf_in, 0, in_bytes);
-        ac_runtime_buffer_flush(buf_w, 0, w_bytes);
-        ac_runtime_buffer_flush(buf_b, 0, b_bytes);
-        ac_runtime_buffer_flush(buf_out, 0, out_bytes);
+        if (ac_runtime_buffer_flush(buf_in, 0, in_bytes) != AC_SUCCESS ||
+            ac_runtime_buffer_flush(buf_w, 0, w_bytes) != AC_SUCCESS ||
+            ac_runtime_buffer_flush(buf_b, 0, b_bytes) != AC_SUCCESS ||
+            ac_runtime_buffer_flush(buf_out, 0, out_bytes) != AC_SUCCESS) {
+            fprintf(stderr, "GATE3_BUFFER_FLUSH_FAILED\n");
+            return EXIT_FAILURE;
+        }
 
         std::string in_hash = compute_sha256(host_in, in_bytes);
         std::string w_hash = compute_sha256(host_w, w_bytes);
@@ -385,8 +443,8 @@ int main(void) {
             buf_out, &out_desc, &ev
         );
         if (dres != AC_SUCCESS) {
-            printf("  -> FAIL: Seed %u GPU dispatch failed (%d)\n", seed, dres);
-            continue;
+            fprintf(stderr, "GATE3_GPU_DISPATCH_FAILED=%d\n", dres);
+            return EXIT_FAILURE;
         }
         vision_gpu_op_count++;
         if (ev) {
@@ -394,7 +452,16 @@ int main(void) {
             ac_runtime_event_wait(ev, 5000000000ull);
             track_event_destroy(ev);
         }
-        ac_runtime_buffer_invalidate(buf_out, 0, out_bytes);
+        if (ac_runtime_buffer_invalidate(buf_out, 0, out_bytes) != AC_SUCCESS) {
+            fprintf(stderr, "GATE3_BUFFER_INVALIDATE_FAILED\n");
+            return EXIT_FAILURE;
+        }
+
+        size_t unwritten_canary = verify_buffer_not_canary(host_out, out_elems);
+        if (unwritten_canary != 0) {
+            fprintf(stderr, "OUTPUT_UNWRITTEN_ELEMENT_COUNT=%zu\n", unwritten_canary);
+            return EXIT_FAILURE;
+        }
 
         std::string gpu_hash = compute_sha256(host_out, out_bytes);
         output_hashes.push_back(gpu_hash);
@@ -453,33 +520,59 @@ int main(void) {
     for (size_t i = 0; i < in_elems; ++i) host_in[i] = lcg_uniform(rng0, -1.0f, 1.0f);
     for (size_t i = 0; i < w_elems; ++i) host_w[i] = lcg_uniform(rng0, -0.5f, 0.5f);
     for (size_t i = 0; i < b_elems; ++i) host_b[i] = lcg_uniform(rng0, -0.1f, 0.1f);
-    ac_runtime_buffer_flush(buf_in, 0, in_bytes);
-    ac_runtime_buffer_flush(buf_w, 0, w_bytes);
-    ac_runtime_buffer_flush(buf_b, 0, b_bytes);
+    if (ac_runtime_buffer_flush(buf_in, 0, in_bytes) != AC_SUCCESS ||
+        ac_runtime_buffer_flush(buf_w, 0, w_bytes) != AC_SUCCESS ||
+        ac_runtime_buffer_flush(buf_b, 0, b_bytes) != AC_SUCCESS) {
+        return EXIT_FAILURE;
+    }
 
     // Normal run
-    memset(host_out, 0, out_bytes);
-    ac_runtime_buffer_flush(buf_out, 0, out_bytes);
-    ac_vision_pointwise_conv_with_kernel_f32(
+    fill_buffer_canary(host_out, out_elems);
+    if (ac_runtime_buffer_flush(buf_out, 0, out_bytes) != AC_SUCCESS) {
+        return EXIT_FAILURE;
+    }
+    AcResult norm_dres = ac_vision_pointwise_conv_with_kernel_f32(
         ctx, normal_kernel, &params,
         buf_in, &in_desc, buf_w, &weight_desc, buf_b,
         buf_out, &out_desc, nullptr
     );
+    if (norm_dres != AC_SUCCESS) {
+        fprintf(stderr, "NORMAL_GPU_DISPATCH_FAILED=%d\n", norm_dres);
+        return EXIT_FAILURE;
+    }
     vision_gpu_op_count++;
-    ac_runtime_buffer_invalidate(buf_out, 0, out_bytes);
+    if (ac_runtime_buffer_invalidate(buf_out, 0, out_bytes) != AC_SUCCESS) {
+        return EXIT_FAILURE;
+    }
+    if (verify_buffer_not_canary(host_out, out_elems) != 0) {
+        fprintf(stderr, "NORMAL_OUTPUT_CANARY_DETECTED\n");
+        return EXIT_FAILURE;
+    }
     std::string normal_out_hash = compute_sha256(host_out, out_bytes);
     std::vector<float> normal_copy(host_out, host_out + out_elems);
 
     // Mutated run
-    memset(host_out, 0, out_bytes);
-    ac_runtime_buffer_flush(buf_out, 0, out_bytes);
-    ac_vision_pointwise_conv_with_kernel_f32(
+    fill_buffer_canary(host_out, out_elems);
+    if (ac_runtime_buffer_flush(buf_out, 0, out_bytes) != AC_SUCCESS) {
+        return EXIT_FAILURE;
+    }
+    AcResult mut_dres = ac_vision_pointwise_conv_with_kernel_f32(
         ctx, mutated_kernel, &params,
         buf_in, &in_desc, buf_w, &weight_desc, buf_b,
         buf_out, &out_desc, nullptr
     );
+    if (mut_dres != AC_SUCCESS) {
+        fprintf(stderr, "MUTATED_GPU_DISPATCH_FAILED=%d\n", mut_dres);
+        return EXIT_FAILURE;
+    }
     vision_gpu_op_count++;
-    ac_runtime_buffer_invalidate(buf_out, 0, out_bytes);
+    if (ac_runtime_buffer_invalidate(buf_out, 0, out_bytes) != AC_SUCCESS) {
+        return EXIT_FAILURE;
+    }
+    if (verify_buffer_not_canary(host_out, out_elems) != 0) {
+        fprintf(stderr, "MUTATED_OUTPUT_CANARY_DETECTED\n");
+        return EXIT_FAILURE;
+    }
     std::string mutated_out_hash = compute_sha256(host_out, out_bytes);
 
     NumericalMetrics mut_m = evaluate_parity(normal_copy.data(), host_out, out_elems);
@@ -520,10 +613,8 @@ int main(void) {
     setenv("AMEVA_VISION_FAIL_STAGE", "dispatch", 1);
 #endif
 
-    uint32_t canary = CANARY_VAL;
-    uint32_t* canary_dst = (uint32_t*)host_out;
-    for (size_t i = 0; i < out_elems; ++i) canary_dst[i] = canary;
-    ac_runtime_buffer_flush(buf_out, 0, out_bytes);
+    fill_buffer_canary(host_out, out_elems);
+    if (ac_runtime_buffer_flush(buf_out, 0, out_bytes) != AC_SUCCESS) return EXIT_FAILURE;
 
     AcEvent* bad_ev = (AcEvent*)0xCAFE;
     AcResult forced_res = ac_vision_pointwise_conv_with_kernel_f32(
@@ -531,16 +622,15 @@ int main(void) {
         buf_in, &in_desc, buf_w, &weight_desc, buf_b,
         buf_out, &out_desc, &bad_ev
     );
-    ac_runtime_buffer_invalidate(buf_out, 0, out_bytes);
+    if (ac_runtime_buffer_invalidate(buf_out, 0, out_bytes) != AC_SUCCESS) return EXIT_FAILURE;
 
-    bool canary_intact = true;
-    for (size_t i = 0; i < out_elems; ++i) {
-        if (canary_dst[i] != canary) { canary_intact = false; break; }
-    }
+    size_t canary_unwritten_count = verify_buffer_not_canary(host_out, out_elems);
+    bool canary_intact = (canary_unwritten_count == out_elems);
 
     bool forced_fail_closed = (forced_res == AC_ERR_LAUNCH_TIMEOUT && bad_ev == nullptr && canary_intact);
     printf("DISPATCH_ATTEMPT_COUNT=1\n");
     printf("DISPATCH_SUCCESS_COUNT=0\n");
+    printf("FORCED_DISPATCH_CANARY_INTACT_COUNT=%zu\n", canary_unwritten_count);
     printf("FORCED_DISPATCH_FAIL_CLOSED=%s\n\n", forced_fail_closed ? "PASS" : "FAIL");
 
 #if defined(_WIN32)
@@ -734,12 +824,25 @@ int main(void) {
 
     // Portable bit-exact weight loading & decoding (zero union punning)
     size_t read_w_bytes = 0;
-    if (load_fixture_file("squeezenet_fire2_squeeze1x1_weight.bin", host_m_w, m_w_bytes, &read_w_bytes) != 0 || read_w_bytes != m_w_bytes) {
+    int ret_w = load_fixture_file("squeezenet_fire2_squeeze1x1_weight.bin", host_m_w, m_w_bytes, &read_w_bytes);
+    if (ret_w == 0 && read_w_bytes == m_w_bytes) {
+        // Successfully loaded from disk
+    } else if (ret_w == -1) {
         decode_weights_safe(kSqueezeNetFire2WeightU32, host_m_w, SQUEEZENET_FIRE2_WEIGHT_ELEMS);
+    } else {
+        fprintf(stderr, "FATAL: Weight fixture corrupted or truncated (ret=%d, read=%zu)\n", ret_w, read_w_bytes);
+        return EXIT_FAILURE;
     }
+
     size_t read_b_bytes = 0;
-    if (load_fixture_file("squeezenet_fire2_squeeze1x1_bias.bin", host_m_b, m_b_bytes, &read_b_bytes) != 0 || read_b_bytes != m_b_bytes) {
+    int ret_b = load_fixture_file("squeezenet_fire2_squeeze1x1_bias.bin", host_m_b, m_b_bytes, &read_b_bytes);
+    if (ret_b == 0 && read_b_bytes == m_b_bytes) {
+        // Successfully loaded from disk
+    } else if (ret_b == -1) {
         decode_weights_safe(kSqueezeNetFire2BiasU32, host_m_b, SQUEEZENET_FIRE2_BIAS_ELEMS);
+    } else {
+        fprintf(stderr, "FATAL: Bias fixture corrupted or truncated (ret=%d, read=%zu)\n", ret_b, read_b_bytes);
+        return EXIT_FAILURE;
     }
 
     // Verify extracted weight & bias hashes
@@ -780,14 +883,17 @@ int main(void) {
         uint32_t seed = kSeeds[s];
         uint32_t rng = seed;
         for (size_t i = 0; i < m_in_elems; ++i) host_m_in[i] = lcg_uniform(rng, -1.5f, 1.5f);
-        memset(host_m_out, 0, m_out_bytes);
+        fill_buffer_canary(host_m_out, m_out_elems);
 
         // Upload timing
         auto t_up_start = std::chrono::high_resolution_clock::now();
-        ac_runtime_buffer_flush(buf_m_in, 0, m_in_bytes);
-        ac_runtime_buffer_flush(buf_m_w, 0, m_w_bytes);
-        ac_runtime_buffer_flush(buf_m_b, 0, m_b_bytes);
-        ac_runtime_buffer_flush(buf_m_out, 0, m_out_bytes);
+        if (ac_runtime_buffer_flush(buf_m_in, 0, m_in_bytes) != AC_SUCCESS ||
+            ac_runtime_buffer_flush(buf_m_w, 0, m_w_bytes) != AC_SUCCESS ||
+            ac_runtime_buffer_flush(buf_m_b, 0, m_b_bytes) != AC_SUCCESS ||
+            ac_runtime_buffer_flush(buf_m_out, 0, m_out_bytes) != AC_SUCCESS) {
+            fprintf(stderr, "GATE6_BUFFER_FLUSH_FAILED\n");
+            return EXIT_FAILURE;
+        }
         auto t_up_end = std::chrono::high_resolution_clock::now();
         last_upload_time_us = std::chrono::duration<double, std::micro>(t_up_end - t_up_start).count();
 
@@ -811,8 +917,8 @@ int main(void) {
             buf_m_out, &m_out_desc, &ev
         );
         if (dres != AC_SUCCESS) {
-            printf("  -> FAIL: Model Weight Seed %u GPU dispatch failed (%d)\n", seed, dres);
-            continue;
+            fprintf(stderr, "GATE6_GPU_DISPATCH_FAILED=%d\n", dres);
+            return EXIT_FAILURE;
         }
         vision_gpu_op_count++;
         if (ev) {
@@ -825,10 +931,19 @@ int main(void) {
 
         // Readback timing
         auto t_rb_start = std::chrono::high_resolution_clock::now();
-        ac_runtime_buffer_invalidate(buf_m_out, 0, m_out_bytes);
+        if (ac_runtime_buffer_invalidate(buf_m_out, 0, m_out_bytes) != AC_SUCCESS) {
+            fprintf(stderr, "GATE6_BUFFER_INVALIDATE_FAILED\n");
+            return EXIT_FAILURE;
+        }
         auto t_rb_end = std::chrono::high_resolution_clock::now();
         last_readback_time_us = std::chrono::duration<double, std::micro>(t_rb_end - t_rb_start).count();
         last_total_time_us = last_upload_time_us + last_dispatch_time_us + last_readback_time_us;
+
+        size_t m_unwritten = verify_buffer_not_canary(host_m_out, m_out_elems);
+        if (m_unwritten != 0) {
+            fprintf(stderr, "OUTPUT_UNWRITTEN_ELEMENT_COUNT=%zu\n", m_unwritten);
+            return EXIT_FAILURE;
+        }
 
         std::string gpu_hash = compute_sha256(host_m_out, m_out_bytes);
         m_output_hashes.push_back(gpu_hash);
@@ -871,17 +986,25 @@ int main(void) {
     uint32_t m_seed0 = kSeeds[0];
     uint32_t m_rng0 = m_seed0;
     for (size_t i = 0; i < m_in_elems; ++i) host_m_in[i] = lcg_uniform(m_rng0, -1.0f, 1.0f);
-    ac_runtime_buffer_flush(buf_m_in, 0, m_in_bytes);
-    memset(host_m_out, 0, m_out_bytes);
-    ac_runtime_buffer_flush(buf_m_out, 0, m_out_bytes);
+    if (ac_runtime_buffer_flush(buf_m_in, 0, m_in_bytes) != AC_SUCCESS) return EXIT_FAILURE;
+    fill_buffer_canary(host_m_out, m_out_elems);
+    if (ac_runtime_buffer_flush(buf_m_out, 0, m_out_bytes) != AC_SUCCESS) return EXIT_FAILURE;
 
-    ac_vision_pointwise_conv_with_kernel_f32(
+    AcResult m_norm_res = ac_vision_pointwise_conv_with_kernel_f32(
         ctx, normal_kernel, &m_params,
         buf_m_in, &m_in_desc, buf_m_w, &m_weight_desc, buf_m_b,
         buf_m_out, &m_out_desc, nullptr
     );
+    if (m_norm_res != AC_SUCCESS) {
+        fprintf(stderr, "M_NORM_DISPATCH_FAILED=%d\n", m_norm_res);
+        return EXIT_FAILURE;
+    }
     vision_gpu_op_count++;
-    ac_runtime_buffer_invalidate(buf_m_out, 0, m_out_bytes);
+    if (ac_runtime_buffer_invalidate(buf_m_out, 0, m_out_bytes) != AC_SUCCESS) return EXIT_FAILURE;
+    if (verify_buffer_not_canary(host_m_out, m_out_elems) != 0) {
+        fprintf(stderr, "M_NORM_OUTPUT_CANARY_DETECTED\n");
+        return EXIT_FAILURE;
+    }
     std::string m_norm_hash = compute_sha256(host_m_out, m_out_bytes);
     std::vector<float> m_norm_copy(host_m_out, host_m_out + m_out_elems);
 
@@ -891,15 +1014,23 @@ int main(void) {
     );
     g_life.kernel_created++;
 
-    memset(host_m_out, 0, m_out_bytes);
-    ac_runtime_buffer_flush(buf_m_out, 0, m_out_bytes);
-    ac_vision_pointwise_conv_with_kernel_f32(
+    fill_buffer_canary(host_m_out, m_out_elems);
+    if (ac_runtime_buffer_flush(buf_m_out, 0, m_out_bytes) != AC_SUCCESS) return EXIT_FAILURE;
+    AcResult m_mut_res = ac_vision_pointwise_conv_with_kernel_f32(
         ctx, m_mut_kernel, &m_params,
         buf_m_in, &m_in_desc, buf_m_w, &m_weight_desc, buf_m_b,
         buf_m_out, &m_out_desc, nullptr
     );
+    if (m_mut_res != AC_SUCCESS) {
+        fprintf(stderr, "M_MUT_DISPATCH_FAILED=%d\n", m_mut_res);
+        return EXIT_FAILURE;
+    }
     vision_gpu_op_count++;
-    ac_runtime_buffer_invalidate(buf_m_out, 0, m_out_bytes);
+    if (ac_runtime_buffer_invalidate(buf_m_out, 0, m_out_bytes) != AC_SUCCESS) return EXIT_FAILURE;
+    if (verify_buffer_not_canary(host_m_out, m_out_elems) != 0) {
+        fprintf(stderr, "M_MUT_OUTPUT_CANARY_DETECTED\n");
+        return EXIT_FAILURE;
+    }
     std::string m_mut_hash = compute_sha256(host_m_out, m_out_bytes);
 
     NumericalMetrics m_mut_m = evaluate_parity(m_norm_copy.data(), host_m_out, m_out_elems);
@@ -955,12 +1086,25 @@ int main(void) {
 
     // 1. Load weights & biases portably (zero union punning)
     size_t read_w_sz = 0;
-    if (load_fixture_file("squeezenet_fire2_squeeze1x1_weight.bin", host_act_w.data(), act_w_bytes, &read_w_sz) != 0 || read_w_sz != act_w_bytes) {
+    int ret_w9 = load_fixture_file("squeezenet_fire2_squeeze1x1_weight.bin", host_act_w.data(), act_w_bytes, &read_w_sz);
+    if (ret_w9 == 0 && read_w_sz == act_w_bytes) {
+        // Successfully loaded from disk
+    } else if (ret_w9 == -1) {
         decode_weights_safe(kSqueezeNetFire2WeightU32, host_act_w.data(), SQUEEZENET_FIRE2_WEIGHT_ELEMS);
+    } else {
+        fprintf(stderr, "FATAL: Gate 9 weight fixture corrupted or truncated (ret=%d, read=%zu)\n", ret_w9, read_w_sz);
+        return EXIT_FAILURE;
     }
+
     size_t read_b_sz = 0;
-    if (load_fixture_file("squeezenet_fire2_squeeze1x1_bias.bin", host_act_b.data(), act_b_bytes, &read_b_sz) != 0 || read_b_sz != act_b_bytes) {
+    int ret_b9 = load_fixture_file("squeezenet_fire2_squeeze1x1_bias.bin", host_act_b.data(), act_b_bytes, &read_b_sz);
+    if (ret_b9 == 0 && read_b_sz == act_b_bytes) {
+        // Successfully loaded from disk
+    } else if (ret_b9 == -1) {
         decode_weights_safe(kSqueezeNetFire2BiasU32, host_act_b.data(), SQUEEZENET_FIRE2_BIAS_ELEMS);
+    } else {
+        fprintf(stderr, "FATAL: Gate 9 bias fixture corrupted or truncated (ret=%d, read=%zu)\n", ret_b9, read_b_sz);
+        return EXIT_FAILURE;
     }
     std::string act_w_sha = compute_sha256(host_act_w.data(), act_w_bytes);
     std::string act_b_sha = compute_sha256(host_act_b.data(), act_b_bytes);
@@ -985,20 +1129,29 @@ int main(void) {
         return 1;
     }
 
-    // 3. Load NCNN CPU reference output tensor
+    // 3. Load NCNN CPU reference output tensors (Strict FP32 and Legacy FP16 baseline)
+    std::vector<float> host_ncnn_fp16_out(act_out_elems);
     size_t read_ncnn_sz = 0;
-    int ncnn_res = load_fixture_file("squeezenet_fire2_ncnn_cpu_output_nhwc.bin", host_ncnn_out.data(), act_out_bytes, &read_ncnn_sz);
+    int ncnn_res = load_fixture_file("squeezenet_fire2_ncnn_strict_fp32_output_nhwc.bin", host_ncnn_out.data(), act_out_bytes, &read_ncnn_sz);
     if (ncnn_res != 0 || read_ncnn_sz != act_out_bytes) {
-        printf("FATAL: Failed to load squeezenet_fire2_ncnn_cpu_output_nhwc.bin (ret=%d, read=%zu)\n", ncnn_res, read_ncnn_sz);
+        printf("FATAL: Failed to load squeezenet_fire2_ncnn_strict_fp32_output_nhwc.bin (ret=%d, read=%zu)\n", ncnn_res, read_ncnn_sz);
         return 1;
     }
     std::string ncnn_out_sha = compute_sha256(host_ncnn_out.data(), act_out_bytes);
-    printf("NCNN_CPU_OUTPUT_FILE=squeezenet_fire2_ncnn_cpu_output_nhwc.bin\n");
-    printf("NCNN_CPU_OUTPUT_BYTES=%zu\n", act_out_bytes);
-    printf("NCNN_LAYER_OUTPUT_SHA256=%s\n", ncnn_out_sha.c_str());
-    if (ncnn_out_sha != "4193da87fd924070ba77117923e8324bc9d44e51dce3efbc1190ffdac8db9afc") {
-        printf("FATAL: NCNN CPU output SHA-256 mismatch!\n");
+    printf("NCNN_STRICT_FP32_OUTPUT_FILE=squeezenet_fire2_ncnn_strict_fp32_output_nhwc.bin\n");
+    printf("NCNN_STRICT_FP32_OUTPUT_BYTES=%zu\n", act_out_bytes);
+    printf("NCNN_STRICT_FP32_OUTPUT_SHA256=%s\n", ncnn_out_sha.c_str());
+    if (ncnn_out_sha != "62969214ce7a1a4cab8aee8b791286c5b87db12fed6f3b0ba1d9bf38ab807139") {
+        printf("FATAL: NCNN Strict FP32 output SHA-256 mismatch!\n");
         return 1;
+    }
+
+    size_t read_fp16_sz = 0;
+    int fp16_res = load_fixture_file("squeezenet_fire2_ncnn_cpu_output_nhwc.bin", host_ncnn_fp16_out.data(), act_out_bytes, &read_fp16_sz);
+    if (fp16_res == 0 && read_fp16_sz == act_out_bytes) {
+        std::string fp16_sha = compute_sha256(host_ncnn_fp16_out.data(), act_out_bytes);
+        printf("NCNN_LEGACY_FP16_OUTPUT_FILE=squeezenet_fire2_ncnn_cpu_output_nhwc.bin\n");
+        printf("NCNN_LEGACY_FP16_OUTPUT_SHA256=%s\n", fp16_sha.c_str());
     }
 
     // 4. Setup Descriptors
@@ -1046,11 +1199,15 @@ int main(void) {
     memcpy(host_gpu_act_b, host_act_b.data(), act_b_bytes);
     memset(host_gpu_act_out, 0, act_out_bytes);
 
+    fill_buffer_canary(host_gpu_act_out, act_out_elems);
     auto t_act_up_start = std::chrono::high_resolution_clock::now();
-    ac_runtime_buffer_flush(buf_act_in, 0, act_in_bytes);
-    ac_runtime_buffer_flush(buf_act_w, 0, act_w_bytes);
-    ac_runtime_buffer_flush(buf_act_b, 0, act_b_bytes);
-    ac_runtime_buffer_flush(buf_act_out, 0, act_out_bytes);
+    if (ac_runtime_buffer_flush(buf_act_in, 0, act_in_bytes) != AC_SUCCESS ||
+        ac_runtime_buffer_flush(buf_act_w, 0, act_w_bytes) != AC_SUCCESS ||
+        ac_runtime_buffer_flush(buf_act_b, 0, act_b_bytes) != AC_SUCCESS ||
+        ac_runtime_buffer_flush(buf_act_out, 0, act_out_bytes) != AC_SUCCESS) {
+        fprintf(stderr, "GATE9_FLUSH_FAILED\n");
+        return EXIT_FAILURE;
+    }
     auto t_act_up_end = std::chrono::high_resolution_clock::now();
     double act_upload_time_us = std::chrono::duration<double, std::micro>(t_act_up_end - t_act_up_start).count();
 
@@ -1072,8 +1229,8 @@ int main(void) {
         buf_act_out, &act_out_desc, &act_ev
     );
     if (act_dres != AC_SUCCESS) {
-        printf("FATAL: Gate 9 GPU dispatch failed (%d)\n", act_dres);
-        return 1;
+        fprintf(stderr, "GATE9_GPU_DISPATCH_FAILED=%d\n", act_dres);
+        return EXIT_FAILURE;
     }
     vision_gpu_op_count++;
     if (act_ev) {
@@ -1085,10 +1242,19 @@ int main(void) {
     double act_dispatch_time_us = std::chrono::duration<double, std::micro>(t_act_disp_end - t_act_disp_start).count();
 
     auto t_act_rb_start = std::chrono::high_resolution_clock::now();
-    ac_runtime_buffer_invalidate(buf_act_out, 0, act_out_bytes);
+    if (ac_runtime_buffer_invalidate(buf_act_out, 0, act_out_bytes) != AC_SUCCESS) {
+        fprintf(stderr, "GATE9_INVALIDATE_FAILED\n");
+        return EXIT_FAILURE;
+    }
     auto t_act_rb_end = std::chrono::high_resolution_clock::now();
     double act_readback_time_us = std::chrono::duration<double, std::micro>(t_act_rb_end - t_act_rb_start).count();
     double act_total_gpu_time_us = act_upload_time_us + act_dispatch_time_us + act_readback_time_us;
+
+    size_t act_unwritten = verify_buffer_not_canary(host_gpu_act_out, act_out_elems);
+    if (act_unwritten != 0) {
+        fprintf(stderr, "OUTPUT_UNWRITTEN_ELEMENT_COUNT=%zu\n", act_unwritten);
+        return EXIT_FAILURE;
+    }
 
     std::string act_gpu_sha = compute_sha256(host_gpu_act_out, act_out_bytes);
     printf("AMEVA_GPU_OUTPUT_SHA256=%s\n", act_gpu_sha.c_str());
@@ -1233,15 +1399,23 @@ int main(void) {
     );
     g_life.kernel_created++;
 
-    memset(host_gpu_act_out, 0, act_out_bytes);
-    ac_runtime_buffer_flush(buf_act_out, 0, act_out_bytes);
-    ac_vision_pointwise_conv_with_kernel_f32(
+    fill_buffer_canary(host_gpu_act_out, act_out_elems);
+    if (ac_runtime_buffer_flush(buf_act_out, 0, act_out_bytes) != AC_SUCCESS) return EXIT_FAILURE;
+    AcResult act_mut_dres = ac_vision_pointwise_conv_with_kernel_f32(
         ctx, act_mut_kernel, &act_params,
         buf_act_in, &act_in_desc, buf_act_w, &act_weight_desc, buf_act_b,
         buf_act_out, &act_out_desc, nullptr
     );
+    if (act_mut_dres != AC_SUCCESS) {
+        fprintf(stderr, "ACT_MUT_DISPATCH_FAILED=%d\n", act_mut_dres);
+        return EXIT_FAILURE;
+    }
     vision_gpu_op_count++;
-    ac_runtime_buffer_invalidate(buf_act_out, 0, act_out_bytes);
+    if (ac_runtime_buffer_invalidate(buf_act_out, 0, act_out_bytes) != AC_SUCCESS) return EXIT_FAILURE;
+    if (verify_buffer_not_canary(host_gpu_act_out, act_out_elems) != 0) {
+        fprintf(stderr, "ACT_MUT_OUTPUT_CANARY_DETECTED\n");
+        return EXIT_FAILURE;
+    }
     std::string act_mut_sha = compute_sha256(host_gpu_act_out, act_out_bytes);
 
     NumericalMetrics nm_act_mut = evaluate_parity(act_norm_copy.data(), host_gpu_act_out, act_out_elems);
@@ -1254,6 +1428,102 @@ int main(void) {
     printf("ACT_OUTPUT_HASH_CHANGED=%s\n", act_hash_changed ? "true" : "false");
     printf("ACT_OBSERVED_MEAN_DELTA=%.6f\n", nm_act_mut.mean_delta);
     printf("ACT_MUTATION_SENSITIVITY=%s\n\n", act_mut_pass ? "PASS" : "FAIL");
+
+    // -------------------------------------------------------------------------
+    // Gate 10: Real Copilot Cat Image Input Verification (227x227 -> SqueezeNet Pool1 -> Fire2/Squeeze1x1)
+    // -------------------------------------------------------------------------
+    printf("--- Gate 10: Real Copilot Cat Image Input Verification ---\n");
+    std::vector<float> host_cat_in(act_in_elems);
+    std::vector<float> host_cat_ncnn_out(act_out_elems);
+    std::vector<float> cat_cpu_double_ref(act_out_elems);
+
+    size_t cat_in_read = 0;
+    int cat_in_res = load_fixture_file("cat_copilot_fire2_input_activation_nhwc.bin", host_cat_in.data(), act_in_bytes, &cat_in_read);
+    if (cat_in_res != 0 || cat_in_read != act_in_bytes) {
+        printf("FATAL: Failed to load cat_copilot_fire2_input_activation_nhwc.bin (ret=%d, read=%zu)\n", cat_in_res, cat_in_read);
+        return EXIT_FAILURE;
+    }
+    size_t cat_out_read = 0;
+    int cat_out_res = load_fixture_file("cat_copilot_fire2_ncnn_strict_fp32_output_nhwc.bin", host_cat_ncnn_out.data(), act_out_bytes, &cat_out_read);
+    if (cat_out_res != 0 || cat_out_read != act_out_bytes) {
+        printf("FATAL: Failed to load cat_copilot_fire2_ncnn_strict_fp32_output_nhwc.bin (ret=%d, read=%zu)\n", cat_out_res, cat_out_read);
+        return EXIT_FAILURE;
+    }
+
+    std::string cat_in_sha = compute_sha256(host_cat_in.data(), act_in_bytes);
+    std::string cat_ncnn_sha = compute_sha256(host_cat_ncnn_out.data(), act_out_bytes);
+    printf("CAT_INPUT_ACTIVATION_FILE=cat_copilot_fire2_input_activation_nhwc.bin\n");
+    printf("CAT_INPUT_SHA256=%s\n", cat_in_sha.c_str());
+    printf("CAT_NCNN_STRICT_FP32_OUTPUT_FILE=cat_copilot_fire2_ncnn_strict_fp32_output_nhwc.bin\n");
+    printf("CAT_NCNN_STRICT_FP32_SHA256=%s\n", cat_ncnn_sha.c_str());
+
+    if (cat_in_sha != "efd76b451db0a92b12085a6f66beb8f2eb72eb62d2f7fc864f3b7ad027bfd163") {
+        printf("FATAL: Cat input activation SHA-256 mismatch!\n");
+        return EXIT_FAILURE;
+    }
+    if (cat_ncnn_sha != "7009eff14c198737c5eb9461dec98d7356dd3c502e7708dff2ea89e81f750c86") {
+        printf("FATAL: Cat NCNN Strict FP32 output SHA-256 mismatch!\n");
+        return EXIT_FAILURE;
+    }
+
+    // 1. Compute Cat Double Reference
+    cpu_pointwise_conv_f32(
+        host_cat_in.data(), host_act_w.data(), host_act_b.data(), cat_cpu_double_ref.data(),
+        ACT_H, ACT_W, ACT_CIN, ACT_COUT, 1
+    );
+
+    // 2. Upload Cat Input to GPU
+    memcpy(host_gpu_act_in, host_cat_in.data(), act_in_bytes);
+    if (ac_runtime_buffer_flush(buf_act_in, 0, act_in_bytes) != AC_SUCCESS) return EXIT_FAILURE;
+    fill_buffer_canary(host_gpu_act_out, act_out_elems);
+    if (ac_runtime_buffer_flush(buf_act_out, 0, act_out_bytes) != AC_SUCCESS) return EXIT_FAILURE;
+
+    // 3. Dispatch AMEVA GPU Kernel
+    AcResult cat_dres = ac_vision_pointwise_conv_with_kernel_f32(
+        ctx, normal_kernel, &act_params,
+        buf_act_in, &act_in_desc, buf_act_w, &act_weight_desc, buf_act_b,
+        buf_act_out, &act_out_desc, nullptr
+    );
+    if (cat_dres != AC_SUCCESS) {
+        fprintf(stderr, "CAT_GPU_DISPATCH_FAILED=%d\n", cat_dres);
+        return EXIT_FAILURE;
+    }
+    vision_gpu_op_count++;
+
+    // 4. Readback and Parity Check
+    if (ac_runtime_buffer_invalidate(buf_act_out, 0, act_out_bytes) != AC_SUCCESS) return EXIT_FAILURE;
+    size_t cat_unwritten = verify_buffer_not_canary(host_gpu_act_out, act_out_elems);
+    if (cat_unwritten != 0) {
+        fprintf(stderr, "CAT_OUTPUT_UNWRITTEN_ELEMENT_COUNT=%zu\n", cat_unwritten);
+        return EXIT_FAILURE;
+    }
+    std::string cat_gpu_sha = compute_sha256(host_gpu_act_out, act_out_bytes);
+    printf("CAT_AMEVA_GPU_OUTPUT_SHA256=%s\n", cat_gpu_sha.c_str());
+
+    NumericalMetrics nm_cat_double = evaluate_parity(cat_cpu_double_ref.data(), host_gpu_act_out, act_out_elems);
+    NumericalMetrics nm_cat_ncnn = evaluate_parity(host_cat_ncnn_out.data(), host_gpu_act_out, act_out_elems);
+
+    printf("  [CAT PARITY A: AMEVA GPU vs DOUBLE REF]\n");
+    printf("    COSINE=%.7f, RMSE=%.7f, P99=%.7f, MAX_ABS=%.7f\n",
+           nm_cat_double.cosine_similarity, nm_cat_double.rmse, nm_cat_double.p99_abs_error, nm_cat_double.max_abs_error);
+    printf("  [CAT PARITY B: AMEVA GPU vs NCNN STRICT FP32]\n");
+    printf("    COSINE=%.7f, RMSE=%.7f, P99=%.7f, MAX_ABS=%.7f\n",
+           nm_cat_ncnn.cosine_similarity, nm_cat_ncnn.rmse, nm_cat_ncnn.p99_abs_error, nm_cat_ncnn.max_abs_error);
+
+    bool cat_double_parity_pass = (nm_cat_double.cosine_similarity >= 0.99999) &&
+                                  (nm_cat_double.rmse <= 0.005) &&
+                                  (nm_cat_double.p99_abs_error <= 0.01) &&
+                                  (nm_cat_double.max_abs_error <= 0.05) &&
+                                  (nm_cat_double.nan_count == 0) &&
+                                  (nm_cat_double.inf_count == 0);
+    bool cat_ncnn_parity_pass = (nm_cat_ncnn.cosine_similarity >= 0.99999) &&
+                                (nm_cat_ncnn.rmse <= 0.005) &&
+                                (nm_cat_ncnn.p99_abs_error <= 0.01) &&
+                                (nm_cat_ncnn.max_abs_error <= 0.05) &&
+                                (nm_cat_ncnn.nan_count == 0) &&
+                                (nm_cat_ncnn.inf_count == 0);
+    bool cat_gate_pass = cat_double_parity_pass && cat_ncnn_parity_pass;
+    printf("CAT_ACTIVATION_FIXTURE_PARITY=%s\n\n", cat_gate_pass ? "PASS" : "FAIL");
 
     track_kernel_destroy(act_mut_kernel);
     track_buffer_destroy(buf_act_in);
@@ -1310,9 +1580,10 @@ int main(void) {
     uint32_t m_mut_shader_ops = 1;
     uint32_t act_baseline_ops = 1;
     uint32_t act_mut_shader_ops = 1;
+    uint32_t cat_baseline_ops = 1;
     uint32_t total_expected_ops = syn_challenge_ops + syn_mut_baseline_ops + syn_mut_shader_ops +
                                   m_challenge_ops + m_mut_baseline_ops + m_mut_shader_ops +
-                                  act_baseline_ops + act_mut_shader_ops;
+                                  act_baseline_ops + act_mut_shader_ops + cat_baseline_ops;
     bool count_reconciled = (total_expected_ops == vision_gpu_op_count);
 
     printf("======================================================================\n");
@@ -1326,6 +1597,7 @@ int main(void) {
     printf("MODEL_PARAM_SHA256=1e37b434d50e59dd924777d26bdacee36e30c446139681931005c89f53ace25c\n");
     printf("REAL_IMAGE_PATH=/data/data/com.termux/files/home/test_shapes_224x224.png\n");
     printf("REAL_IMAGE_SHA256=5a8a28fd663d595d211257c20e43d92b8d3211092a04701ad3d939e5cb6d360c\n");
+    printf("REAL_CAT_IMAGE_PATH=/data/data/com.termux/files/home/cat_copilot_input.png\n");
     printf("REAL_IMAGE_AVAILABLE=true\n");
     printf("REAL_MODEL_WEIGHT_USED=true\n");
     printf("REAL_IMAGE_USED=true\n");
@@ -1343,7 +1615,7 @@ int main(void) {
     printf("ACTIVATION_INPUT_SHAPE=[1,56,56,64]\n");
     printf("ACTIVATION_OUTPUT_SHAPE=[1,56,56,16]\n");
     printf("ACTIVATION_SHA256=%s\n", act_in_sha.c_str());
-    printf("NCNN_LAYER_OUTPUT_SHA256=%s\n", ncnn_out_sha.c_str());
+    printf("NCNN_STRICT_FP32_OUTPUT_SHA256=%s\n", ncnn_out_sha.c_str());
     printf("AMEVA_GPU_OUTPUT_SHA256=%s\n", act_gpu_sha.c_str());
     printf("DOUBLE_REF_OUTPUT_SHA256=%s\n", act_cpu_double_sha.c_str());
     printf("AMEVA_VS_DOUBLE_COSINE_SIMILARITY=%.7f\n", nm_double.cosine_similarity);
@@ -1360,6 +1632,8 @@ int main(void) {
     } else {
         printf("AMEVA_VS_NCNN_CPU=FAIL_UNDER_CURRENT_ABSOLUTE_ERROR_CONTRACT\n");
     }
+    printf("NCNN_STRICT_FP32_REFERENCE=%s\n", ncnn_parity_pass ? "PASS" : "FAIL");
+    printf("CAT_ACTIVATION_FIXTURE_PARITY=%s\n", cat_gate_pass ? "PASS" : "FAIL");
     printf("ACT_MUTATION_SENSITIVITY=%s\n", act_mut_pass ? "PASS" : "FAIL");
     printf("CPU_REFERENCE_TIME_US=%.1f\n", act_cpu_ref_time_us);
     printf("AMEVA_UPLOAD_TIME_US=%.1f\n", act_upload_time_us);
@@ -1374,15 +1648,15 @@ int main(void) {
     printf("MODEL_WEIGHT_MUTATED_GPU_OP_COUNT=%u\n", m_mut_shader_ops);
     printf("REAL_ACTIVATION_NORMAL_GPU_OP_COUNT=%u\n", act_baseline_ops);
     printf("REAL_ACTIVATION_MUTATED_GPU_OP_COUNT=%u\n", act_mut_shader_ops);
+    printf("REAL_CAT_ACTIVATION_GPU_OP_COUNT=%u\n", cat_baseline_ops);
     printf("TOTAL_VISION_GPU_OP_COUNT=%u\n", vision_gpu_op_count);
     printf("COUNT_RECONCILED=%s\n", count_reconciled ? "true" : "false");
-    printf("CPU_FALLBACK_COUNT=%u\n", cpu_fallback_count);
-    printf("SILENT_FALLBACK_COUNT=%u\n", silent_fallback_count);
+    printf("FALLBACK_PATH_IMPLEMENTED=false\n");
     printf("VISION_GPU_OP_COUNT=%u\n", vision_gpu_op_count);
-    if (ncnn_parity_pass) {
+    if (ncnn_parity_pass && cat_gate_pass) {
         printf("NEXT_BLOCKER=NONE\n");
     } else {
-        printf("NEXT_BLOCKER=RESOLVE_NCNN_REFERENCE_LAYOUT_OR_SEMANTIC_MISMATCH\n");
+        printf("NEXT_BLOCKER=INVESTIGATE_GATE_FAILURE\n");
     }
 
     bool all_pass = (challenge_passed == 3) &&
@@ -1391,14 +1665,13 @@ int main(void) {
                     (forced_fail_closed) &&
                     (gates_passed == total_validation_gates) &&
                     (lifecycle_balanced) &&
-                    (cpu_fallback_count == 0) &&
-                    (silent_fallback_count == 0) &&
                     (model_weight_parity_pass) &&
                     (m_mut_pass) &&
                     (double_parity_pass) &&
                     (ncnn_parity_pass) &&
+                    (cat_gate_pass) &&
                     (act_mut_pass) &&
                     (count_reconciled);
 
-    return all_pass ? 0 : 1;
+    return all_pass ? EXIT_SUCCESS : EXIT_FAILURE;
 }

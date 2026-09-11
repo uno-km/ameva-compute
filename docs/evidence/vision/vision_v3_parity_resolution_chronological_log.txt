@@ -1,0 +1,428 @@
+================================================================================
+AMEVA COMPUTE VISION V3 - NCNN PARITY RESOLUTION & COPILOT CAT VALIDATION
+FULL CHRONOLOGICAL COMMAND, CODE, AND EXECUTION LOG
+================================================================================
+Target Device: Samsung Galaxy S25 (SM-S931N, Snapdragon 8 Elite / Adreno 830, aarch64 Android Termux)
+Date: 2026-09-11
+Classification: Zero-Hype Strict Engineering Evidence Audit Log
+Author: AMEVA Compute - Vision Part
+================================================================================
+
+[TIMELINE ITEM 01: 2026-09-11 19:42:08 KST]
+COMMAND:
+ssh -n -o BatchMode=yes s25 "uname -a; free -h; ls -l /data/data/com.termux/files/home/cat_copilot_input.png"
+
+OUTPUT:
+Linux localhost 6.6.98-android15-8-pd6ff1cd-abogkiS931NKSSCCZH2-4k #1 SMP PREEMPT Tue Aug 11 06:22:21 UTC 2026 aarch64 Android
+               total        used        free      shared  buff/cache   available
+Mem:            10Gi       6.6Gi       432Mi        26Mi       3.9Gi       3.9Gi
+Swap:           15Gi       5.4Gi        10Gi
+-rw-------. 1 u0_a466 u0_a466 2181715 Sep 11 19:29 /data/data/com.termux/files/home/cat_copilot_input.png
+RC=0
+
+--------------------------------------------------------------------------------
+
+[TIMELINE ITEM 02: 2026-09-11 19:43:07 KST]
+COMMAND:
+ssh -n -o BatchMode=yes s25 "cd /data/data/com.termux/files/home/ameva-compute/tests/fixtures && sha256sum squeezenet_fire2_*"
+
+OUTPUT:
+0ba02d2aa7d0b2aba053b146b18345fb172e5ca56a1ff2035cb6365c707543b4  squeezenet_fire2_input_activation_nhwc.bin
+4193da87fd924070ba77117923e8324bc9d44e51dce3efbc1190ffdac8db9afc  squeezenet_fire2_ncnn_cpu_output_nhwc.bin
+b38cfdd1c6cd695186eaf84a84d8fcafab76e83ece87df9c4af81e55db41583e  squeezenet_fire2_squeeze1x1_bias.bin
+a8230603f032c220671b1126b3ce035783f9b72f60e5f5a6c33a521b9eb31c57  squeezenet_fire2_squeeze1x1_data.h
+9e420c4f34d556158e2214d023191c0d7c0e167aa5432845030b459e718b5918  squeezenet_fire2_squeeze1x1_weight.bin
+RC=0
+
+--------------------------------------------------------------------------------
+
+[TIMELINE ITEM 03: 2026-09-11 19:48:13 KST]
+COMMAND:
+ssh -n -o BatchMode=yes s25 "python /data/data/com.termux/files/home/ameva-compute/scripts/parse_ncnn_model.py"
+
+OUTPUT:
+NCNN Magic: 7767517
+Layers: 75, Blobs: 83
+Binary file size: 4942088 bytes
+[1] Conv 'conv1': K=[3,3], S=2, D=1, Cout=64, W_size=1728, W_dtype=float32, W_off=4, B_off=6916
+[4] Conv 'fire2/squeeze1x1': K=[1,1], S=1, D=1, Cout=16, W_size=1024, W_dtype=float32, W_off=7176, B_off=11272
+[7] Conv 'fire2/expand1x1': K=[1,1], S=1, D=1, Cout=64, W_size=1024, W_dtype=float32, W_off=11340, B_off=15436
+[9] Conv 'fire2/expand3x3': K=[3,3], S=1, D=1, Cout=64, W_size=9216, W_dtype=float32, W_off=15696, B_off=52560
+...
+Final parsed offset: 4942088 / 4942088 bytes (Match: True)
+--- Target 1x1 Conv Layer Selected ---
+  index: 4
+  name: fire2/squeeze1x1
+  type: Convolution
+  kernel: [1, 1]
+  stride: [1, 1]
+  dilation: [1, 1]
+  group: 1
+  output_channels: 16
+  input_channels: 64
+  weight_elements: 1024
+  bias_elements: 16
+  weight_offset: 7176
+  weight_bytes: 4096
+  weight_dtype: float32
+  bias_offset: 11272
+  bias_bytes: 64
+  next_layer_offset: 11336
+  weight_tag: 0x0
+  WEIGHT_SHA256: 9e420c4f34d556158e2214d023191c0d7c0e167aa5432845030b459e718b5918
+  BIAS_SHA256: b38cfdd1c6cd695186eaf84a84d8fcafab76e83ece87df9c4af81e55db41583e
+RC=0
+
+--------------------------------------------------------------------------------
+
+[TIMELINE ITEM 04: 2026-09-11 19:48:41 KST]
+COMMAND:
+scp -o BatchMode=yes scripts/audit_ncnn_fire2.cpp s25:/data/data/com.termux/files/home/ameva-compute/scripts/audit_ncnn_fire2.cpp; \
+ssh -n -o BatchMode=yes s25 "clang++ -O3 -I/data/data/com.termux/files/home/ncnn/src -I/data/data/com.termux/files/home/ncnn/build-cpu/src /data/data/com.termux/files/home/ameva-compute/scripts/audit_ncnn_fire2.cpp /data/data/com.termux/files/home/ncnn/build-cpu/src/libncnn.a -fopenmp -lpthread -lm -llog -landroid -o /data/data/com.termux/files/home/audit_ncnn_fire2"
+
+OUTPUT:
+RC=0
+
+--------------------------------------------------------------------------------
+
+[TIMELINE ITEM 05: 2026-09-11 19:48:57 KST]
+COMMAND:
+ssh -n -o BatchMode=yes s25 "/data/data/com.termux/files/home/audit_ncnn_fire2"
+
+OUTPUT:
+======================================================================
+AMEVA Vision - NCNN Fire2/Squeeze1x1 Rigorous Diagnostic Suite
+======================================================================
+
+--- [STEP 1: BYTE-FOR-BYTE CONTRACT IDENTITY VERIFICATION] ---
+FIXTURE_INPUT_ACTIVATION_BYTES=802816, SHA256=0ba02d2aa7d0b2aba053b146b18345fb172e5ca56a1ff2035cb6365c707543b4
+FIXTURE_WEIGHT_BYTES=4096, SHA256=9e420c4f34d556158e2214d023191c0d7c0e167aa5432845030b459e718b5918
+FIXTURE_BIAS_BYTES=64, SHA256=b38cfdd1c6cd695186eaf84a84d8fcafab76e83ece87df9c4af81e55db41583e
+FIXTURE_NCNN_OUTPUT_BYTES=200704, SHA256=4193da87fd924070ba77117923e8324bc9d44e51dce3efbc1190ffdac8db9afc
+NCNN_LAYER_INDEX=4, TYPE=Convolution, NAME=fire2/squeeze1x1
+NCNN_LAYER_NUM_OUTPUT=16
+NCNN_LAYER_KERNEL_W=1, KERNEL_H=1
+NCNN_LAYER_STRIDE_W=1, STRIDE_H=1
+NCNN_LAYER_DILATION_W=1, DILATION_H=1
+NCNN_LAYER_BIAS_TERM=1
+NCNN_LAYER_WEIGHT_DATA_SIZE=1024
+LAYER_PARAMETER_IDENTITY=MATCH
+NCNN_MEM_WEIGHT_BYTES=4096, SHA256=9e420c4f34d556158e2214d023191c0d7c0e167aa5432845030b459e718b5918
+NCNN_MEM_BIAS_BYTES=64, SHA256=b38cfdd1c6cd695186eaf84a84d8fcafab76e83ece87df9c4af81e55db41583e
+WEIGHT_BYTE_IDENTITY=MATCH
+BIAS_BYTE_IDENTITY=MATCH
+NCNN_EXTRACTED_POOL1_BYTES=802816, SHA256=0ba02d2aa7d0b2aba053b146b18345fb172e5ca56a1ff2035cb6365c707543b4
+INPUT_BYTE_IDENTITY=MATCH
+
+DOUBLE_REFERENCE_COMPUTED: ELEMS=50176, DTYPE=FLOAT64
+
+--- [STEP 2: NCNN OPTION MATRIX EXPERIMENT] ---
+
+>> Testing: CASE_1 (Strict FP32, No SGEMM, No Packing)
+   fp16_p=0, fp16_s=0, fp16_a=0, bf16_s=0, packing=0, sgemm=0
+   OUTPUT_SHA256=bee0d26bee405576b7599edad9704ab400cd68fdc6d74e2532518442ddb56f77
+   MIN=-1275.0773, MAX=1177.9922, ELEMS=50176, ELEMPACK=1
+   INT_OR_HALF_RATIO=0.00% (int=0, half=1, total=50176)
+   VS_DOUBLE_REF: COSINE=0.9999995, RMSE=0.1734293, P99=0.4448599, MAX_ABS=1.3319706
+   TARGET_COORD(18,24,5): TEST_VAL=1121.121460, DOUBLE_REF=1120.971291, DELTA=0.150169
+
+>> Testing: CASE_1B (Strict FP32, With SGEMM, No Packing)
+   fp16_p=0, fp16_s=0, fp16_a=0, bf16_s=0, packing=0, sgemm=1
+   OUTPUT_SHA256=ebdabee539f4e8d7889d8ab266276ecc8f6df3bd2757317a43a268861a5c2b44
+   MIN=-1275.0773, MAX=1177.9922, ELEMS=50176, ELEMPACK=1
+   INT_OR_HALF_RATIO=0.00% (int=0, half=1, total=50176)
+   VS_DOUBLE_REF: COSINE=0.9999995, RMSE=0.1734293, P99=0.4448599, MAX_ABS=1.3319706
+   TARGET_COORD(18,24,5): TEST_VAL=1121.121460, DOUBLE_REF=1120.971291, DELTA=0.150169
+
+>> Testing: CASE_2 (Strict FP32, With Packing Layout)
+   fp16_p=0, fp16_s=0, fp16_a=0, bf16_s=0, packing=1, sgemm=0
+   OUTPUT_SHA256=17089cb65f70a6e799efed554b54c01babd7a71a610591c5fced4a077e87a5a7
+   MIN=-1275.0773, MAX=1177.9922, ELEMS=50176, ELEMPACK=1
+   INT_OR_HALF_RATIO=0.00% (int=0, half=1, total=50176)
+   VS_DOUBLE_REF: COSINE=0.9999995, RMSE=0.1734293, P99=0.4448599, MAX_ABS=1.3319706
+   TARGET_COORD(18,24,5): TEST_VAL=1121.121460, DOUBLE_REF=1120.971291, DELTA=0.150169
+
+>> Testing: CASE_2B (Strict FP32, Packing + SGEMM)
+   fp16_p=0, fp16_s=0, fp16_a=0, bf16_s=0, packing=1, sgemm=1
+   OUTPUT_SHA256=17089cb65f70a6e799efed554b54c01babd7a71a610591c5fced4a077e87a5a7
+   MIN=-1275.0773, MAX=1177.9922, ELEMS=50176, ELEMPACK=1
+   INT_OR_HALF_RATIO=0.00% (int=0, half=1, total=50176)
+   VS_DOUBLE_REF: COSINE=0.9999995, RMSE=0.1734293, P99=0.4448599, MAX_ABS=1.3319706
+   TARGET_COORD(18,24,5): TEST_VAL=1121.121460, DOUBLE_REF=1120.971291, DELTA=0.150169
+
+>> Testing: CASE_3 (Production Defaults)
+   fp16_p=1, fp16_s=1, fp16_a=0, bf16_s=0, packing=1, sgemm=1
+   OUTPUT_SHA256=21f3fb8197f41692639a7d716bd0bbd29d17f26f51f9ce0f83f8860f56733877
+   MIN=-1275.0000, MAX=1178.0000, ELEMS=50176, ELEMPACK=1
+   INT_OR_HALF_RATIO=11.09% (int=3825, half=1740, total=50176)
+   VS_DOUBLE_REF: COSINE=0.9999996, RMSE=0.1540104, P99=0.4138922, MAX_ABS=1.1113061
+   TARGET_COORD(18,24,5): TEST_VAL=1121.000000, DOUBLE_REF=1120.971291, DELTA=0.028709
+
+>> Testing: CASE_4 (Forced FP16 Arithmetic)
+   fp16_p=1, fp16_s=1, fp16_a=1, bf16_s=0, packing=1, sgemm=1
+   OUTPUT_SHA256=4193da87fd924070ba77117923e8324bc9d44e51dce3efbc1190ffdac8db9afc
+   MIN=-1277.0000, MAX=1180.0000, ELEMS=50176, ELEMPACK=1
+   INT_OR_HALF_RATIO=18.20% (int=5912, half=3220, total=50176)
+   VS_DOUBLE_REF: COSINE=0.9999997, RMSE=0.1454683, P99=0.6138028, MAX_ABS=2.9712910
+   TARGET_COORD(18,24,5): TEST_VAL=1118.000000, DOUBLE_REF=1120.971291, DELTA=2.971291
+
+--- [STEP 2B: ISOLATED SINGLE-LAYER EXECUTION (Direct pool1 input)] ---
+ISOLATED_1LAYER_STRICT_FP32: COSINE=1.0000000, RMSE=0.0000187, MAX_ABS=0.0003913, TARGET_VAL=1120.971069, DREF=1120.971291
+
+--- [STEP 3: TRACE EXECUTION BRANCH & COORDINATE SCALAR CALCULATION] ---
+COORDINATE: N=0, H=18, W=24, C=5 (Spatial index: y*W+x = 1032, Flat NHWC = 16517)
+BIAS[5] = 0.12309234 (0x3dfc17d6)
+
+First 8 terms of scalar sum:
+CI | INPUT_VAL       | WEIGHT_VAL      | PROD_DOUBLE       | ACC_DOUBLE
+---|-----------------|-----------------|-------------------|-------------------
+ 0 |    194.00000000 |      0.00020583 |        0.03993110 |        0.16302344
+ 1 |     18.45312500 |     -0.05927037 |       -1.09372363 |       -0.93070019
+ 2 |    189.62500000 |     -0.05359005 |      -10.16201287 |      -11.09271306
+ 3 |    245.25000000 |      0.39964819 |       98.01371849 |       86.92100543
+ 4 |     94.93750000 |      0.06726567 |        6.38603497 |       93.30704040
+ 5 |    139.25000000 |      0.09399419 |       13.08869031 |      106.39573070
+ 6 |      0.00000000 |      0.24741156 |        0.00000000 |      106.39573070
+ 7 |     18.29687500 |      0.04074344 |        0.74547757 |      107.14120827
+...| ...             | ...             | ...               | ...
+60 |    347.75000000 |     -0.17426036 |      -60.59904123 |     1126.29049631
+61 |    162.00000000 |     -0.05650936 |       -9.15451583 |     1117.13598048
+62 |     99.25000000 |      0.03455289 |        3.42937404 |     1120.56535452
+63 |      9.09375000 |      0.04463906 |        0.40593644 |     1120.97129096
+
+SUMMARY AT COORDINATE (18, 24, 5):
+  DOUBLE_ACCUMULATOR = 1120.97129096
+  FLOAT32_SEQUENTIAL = 1120.97106934
+  FLOAT32_FMAF       = 1120.97106934
+  NEON_VMLAQ_F32     = 1120.97131348
+  FIXTURE_NCNN_VAL   = 1118.00000000
+
+--- [STEP 4: REAL CAT IMAGE VALIDATION] ---
+Cat image loaded: 1254x1254, channels=3
+CAT_POOL1_SHA256=efd76b451db0a92b12085a6f66beb8f2eb72eb62d2f7fc864f3b7ad027bfd163
+CAT_NCNN_FIRE2_SHA256=7009eff14c198737c5eb9461dec98d7356dd3c502e7708dff2ea89e81f750c86
+CAT_VS_DOUBLE_REF: COSINE=1.0000000, RMSE=0.0000191, P99=0.0000733, MAX_ABS=0.0003526
+CAT_INT_OR_HALF_RATIO=0.00% (int=0, half=0, total=50176)
+
+======================================================================
+Diagnostic Complete.
+======================================================================
+RC=0
+
+--------------------------------------------------------------------------------
+
+[TIMELINE ITEM 06: 2026-09-11 19:50:03 KST]
+COMMAND:
+scp -o BatchMode=yes scripts/generate_strict_fixtures.cpp s25:/data/data/com.termux/files/home/generate_strict_fixtures.cpp; \
+ssh -n -o BatchMode=yes s25 "clang++ -O3 -I/data/data/com.termux/files/home/ncnn/src -I/data/data/com.termux/files/home/ncnn/build-cpu/src /data/data/com.termux/files/home/generate_strict_fixtures.cpp /data/data/com.termux/files/home/ncnn/build-cpu/src/libncnn.a -fopenmp -lpthread -lm -llog -landroid -o /data/data/com.termux/files/home/generate_strict_fixtures && /data/data/com.termux/files/home/generate_strict_fixtures"
+
+OUTPUT:
+STRICT_FP32_OUTPUT_SHA256=62969214ce7a1a4cab8aee8b791286c5b87db12fed6f3b0ba1d9bf38ab807139
+Wrote /data/data/com.termux/files/home/squeezenet_fire2_ncnn_strict_fp32_output_nhwc.bin (200704 bytes)
+CAT_POOL1_SHA256=efd76b451db0a92b12085a6f66beb8f2eb72eb62d2f7fc864f3b7ad027bfd163
+Wrote /data/data/com.termux/files/home/cat_copilot_fire2_input_activation_nhwc.bin (802816 bytes)
+CAT_FIRE2_STRICT_FP32_SHA256=7009eff14c198737c5eb9461dec98d7356dd3c502e7708dff2ea89e81f750c86
+Wrote /data/data/com.termux/files/home/cat_copilot_fire2_ncnn_strict_fp32_output_nhwc.bin (200704 bytes)
+RC=0
+
+--------------------------------------------------------------------------------
+
+[TIMELINE ITEM 07: 2026-09-11 19:53:16 KST]
+COMMAND:
+ssh -n -o BatchMode=yes s25 "sha256sum /data/data/com.termux/files/home/ameva-compute/build-audit/test_vision_pointwise_conv; cd /data/data/com.termux/files/home/ameva-compute && ./build-audit/test_vision_pointwise_conv"
+
+OUTPUT:
+893fcff5bbce8f9c185bb8582f3ef423bc272cbbab48bc95c6ec9fb314d3c61b  /data/data/com.termux/files/home/ameva-compute/build-audit/test_vision_pointwise_conv
+
+=== AMUDA Vision Pointwise Conv2D 1x1 Verification Suite (V1 Milestone) ===
+[Init] AMUDA Vulkan Context Initialized Successfully.
+Vulkan Physical Device: Adreno (TM) 830
+Driver Version: 0.0.0
+API Version: 1.3.128
+
+... (Challenge 1-3 PASS, Gates 1-8 PASS, SPIR-V Mutation Sensitivity PASS) ...
+
+--- Gate 9: Real Runtime Activation Verification Suite (SqueezeNet v1.1) ---
+ACTIVATION_INPUT_FILE=squeezenet_fire2_input_activation_nhwc.bin
+ACTIVATION_INPUT_BYTES=802816
+ACTIVATION_SHA256=0ba02d2aa7d0b2aba053b146b18345fb172e5ca56a1ff2035cb6365c707543b4
+NCNN_STRICT_FP32_OUTPUT_FILE=squeezenet_fire2_ncnn_strict_fp32_output_nhwc.bin
+NCNN_STRICT_FP32_OUTPUT_BYTES=200704
+NCNN_STRICT_FP32_OUTPUT_SHA256=62969214ce7a1a4cab8aee8b791286c5b87db12fed6f3b0ba1d9bf38ab807139
+NCNN_LEGACY_FP16_OUTPUT_FILE=squeezenet_fire2_ncnn_cpu_output_nhwc.bin
+NCNN_LEGACY_FP16_OUTPUT_SHA256=4193da87fd924070ba77117923e8324bc9d44e51dce3efbc1190ffdac8db9afc
+DOUBLE_REF_OUTPUT_SHA256=4a0070c4b0784783a3817056c4eece2d4aff353ff2012d0251074a3986cdae3a
+AMEVA_GPU_OUTPUT_SHA256=fb0c8b33a5507eb060ff2874e7eb8aacc9f4ed4eaf362593f78bcfcb04f51190
+
+--- NCNN Reference Contract & Packing Diagnostics ---
+NCNN_PACKED_W=56
+NCNN_PACKED_H=56
+NCNN_PACKED_C=16
+NCNN_PACKED_ELEMPACK=1
+NCNN_UNPACKED_W=56
+NCNN_UNPACKED_H=56
+NCNN_UNPACKED_C=16
+NCNN_UNPACKED_ELEMPACK=1
+NCNN_PACKED_LOGICAL_ELEMENT_COUNT=50176
+NCNN_UNPACKED_ELEMENT_COUNT=50176
+EXPECTED_ELEMENT_COUNT=50176
+AMEVA_ELEMENT_COUNT=50176
+NCNN_ELEMENT_COUNT=50176
+NCNN_OUTPUT_ELEMPACK=1
+NCNN_OUTPUT_UNPACKED=false
+NCNN_COMPARISON_ELEMPACK=1
+NCNN_PACKING_NORMALIZATION_APPLIED=false
+NCNN_NATIVE_LAYOUT=CHW
+AMEVA_OUTPUT_LAYOUT=NHWC
+LAYOUT_CONVERSION_APPLIED=true
+LAYOUT_CONVERSION_MODE=INDEX_MAPPING_CHW_TO_NHWC
+LAYOUT_MATERIALIZED_COPY=false
+NCNN_STORAGE_CONTRACT=PASS
+NCNN_UNPACKED_ELEMSIZE=4
+NCNN_UNPACKED_SCALAR_BYTES=4
+NCNN_OUTPUT_STORAGE=FP32
+
+--- 3-Way Numerical Parity Results ---
+[PARITY A: AMEVA GPU vs DOUBLE-ACCUMULATOR REFERENCE]
+  COSINE_SIMILARITY=1.0000000
+  RMSE=0.0000218
+  P99_ABS_ERROR=0.0000763
+  MAX_ABS_ERROR=0.0004883
+  NAN_COUNT=0, INF_COUNT=0
+[PARITY B: AMEVA GPU vs NCNN CPU REFERENCE]
+  COSINE_SIMILARITY=1.0000000
+  RMSE=0.0000122
+  P99_ABS_ERROR=0.0000610
+  MAX_ABS_ERROR=0.0002441
+  NAN_COUNT=0, INF_COUNT=0
+[PARITY C: CROSS-REFERENCE (NCNN CPU vs DOUBLE REF)]
+  COSINE_SIMILARITY=1.0000000
+  RMSE=0.0000188
+  MAX_ABS_ERROR=0.0003662
+
+--- Top-20 Error Matrix (AMEVA GPU vs NCNN CPU) ---
+REL_ERROR_DENOMINATOR_FLOOR=1e-6
+REFERENCE_VALUE_SOURCE=NCNN_FP32
+RANK FLAT_INDEX N H W C DOUBLE_VALUE AMEVA_VALUE NCNN_VALUE ABS_ERROR REL_ERROR
+1 5669 0 6 18 5 1061.576294 1061.576172 1061.576416 0.000244 0.000000
+2 11989 0 13 21 5 1127.747070 1127.746826 1127.747070 0.000244 0.000000
+3 4757 0 5 17 5 756.346375 756.346619 756.346436 0.000183 0.000000
+4 27267 0 30 24 3 -814.528931 -814.529053 -814.528870 0.000183 0.000000
+5 29894 0 33 20 6 933.350342 933.350281 933.350159 0.000122 0.000000
+6 29014 0 32 21 6 939.563599 939.563843 939.563721 0.000122 0.000000
+7 6564 0 7 18 4 525.561951 525.561951 525.561829 0.000122 0.000000
+8 13781 0 15 21 5 808.791138 808.791199 808.791077 0.000122 0.000000
+9 18325 0 20 25 5 1073.069946 1073.070190 1073.070068 0.000122 0.000000
+10 31670 0 35 19 6 932.511230 932.511292 932.511169 0.000122 0.000000
+11 18321 0 20 25 1 -1083.345703 -1083.345947 -1083.345825 0.000122 0.000000
+12 10069 0 11 13 5 720.650452 720.650452 720.650330 0.000122 0.000000
+13 10074 0 11 13 10 837.122498 837.122375 837.122498 0.000122 0.000000
+14 10090 0 11 14 10 756.174866 756.174744 756.174866 0.000122 0.000000
+15 18145 0 20 14 1 -1275.046143 -1275.046021 -1275.046143 0.000122 0.000000
+16 10181 0 11 20 5 1146.723999 1146.723999 1146.724121 0.000122 0.000000
+17 10207 0 11 21 15 564.371216 564.371338 564.371216 0.000122 0.000000
+18 14709 0 16 23 5 1140.597778 1140.597656 1140.597778 0.000122 0.000000
+19 40694 0 45 23 6 964.295227 964.295227 964.295105 0.000122 0.000000
+20 17439 0 19 25 15 530.541626 530.541748 530.541626 0.000122 0.000000
+
+AMEVA_VS_DOUBLE_REFERENCE=PASS
+AMEVA_VS_NCNN_CPU=PASS
+
+--- Gate 9.2: Real Activation SPIR-V Mutation Anti-Fake Verification ---
+NORMAL_ACT_OUTPUT_SHA256=fb0c8b33a5507eb060ff2874e7eb8aacc9f4ed4eaf362593f78bcfcb04f51190
+MUTATED_ACT_OUTPUT_SHA256=d334bd0c6c0c81664ac6ba7e6bd0500919f533c3aaf0ed8b25fd67063e33628a
+ACT_OUTPUT_HASH_CHANGED=true
+ACT_OBSERVED_MEAN_DELTA=0.250000
+ACT_MUTATION_SENSITIVITY=PASS
+
+--- Gate 10: Real Copilot Cat Image Input Verification ---
+CAT_INPUT_ACTIVATION_FILE=cat_copilot_fire2_input_activation_nhwc.bin
+CAT_INPUT_SHA256=efd76b451db0a92b12085a6f66beb8f2eb72eb62d2f7fc864f3b7ad027bfd163
+CAT_NCNN_STRICT_FP32_OUTPUT_FILE=cat_copilot_fire2_ncnn_strict_fp32_output_nhwc.bin
+CAT_NCNN_STRICT_FP32_SHA256=7009eff14c198737c5eb9461dec98d7356dd3c502e7708dff2ea89e81f750c86
+CAT_AMEVA_GPU_OUTPUT_SHA256=7bc03f8dd1b27beb9c390f4e6d3628b8f0c634a090852dfb61ecfb8b1e94005c
+  [CAT PARITY A: AMEVA GPU vs DOUBLE REF]
+    COSINE=1.0000000, RMSE=0.0000199, P99=0.0000763, MAX_ABS=0.0003662
+  [CAT PARITY B: AMEVA GPU vs NCNN STRICT FP32]
+    COSINE=1.0000000, RMSE=0.0000114, P99=0.0000381, MAX_ABS=0.0001221
+CAT_IMAGE_REAL_INPUT_VALIDATION=PASS
+
+--- Gate 7: Partial Initialization Rollback & Lifecycle Balance ---
+CONTEXT_CREATE_COUNT=3, CONTEXT_DESTROY_COUNT=3
+KERNEL_CREATE_COUNT=5, KERNEL_DESTROY_COUNT=5
+BUFFER_CREATE_COUNT=13, BUFFER_DESTROY_COUNT=13
+EVENT_CREATE_COUNT=7, EVENT_DESTROY_COUNT=7
+NORMAL_LIFECYCLE_BALANCED=true
+FAILURE_LIFECYCLE_BALANCED=true
+
+======================================================================
+  AMUDA Vision V3 Real Runtime Activation Verification Summary
+======================================================================
+MODEL_NAME=SqueezeNet_v1.1
+MODEL_FORMAT=NCNN
+MODEL_BIN_PATH=/data/data/com.termux/files/home/ncnn/examples/squeezenet_v1.1.bin
+MODEL_PARAM_PATH=/data/data/com.termux/files/home/ncnn/examples/squeezenet_v1.1.param
+MODEL_BIN_SHA256=d0f7370ab3c163778c449a93b76799ea770e629b1b3c7afdb3981c1cd1e20243
+MODEL_PARAM_SHA256=1e37b434d50e59dd924777d26bdacee36e30c446139681931005c89f53ace25c
+REAL_IMAGE_PATH=/data/data/com.termux/files/home/test_shapes_224x224.png
+REAL_IMAGE_SHA256=5a8a28fd663d595d211257c20e43d92b8d3211092a04701ad3d939e5cb6d360c
+REAL_CAT_IMAGE_PATH=/data/data/com.termux/files/home/cat_copilot_input.png
+REAL_IMAGE_AVAILABLE=true
+REAL_MODEL_WEIGHT_USED=true
+REAL_IMAGE_USED=true
+REAL_RUNTIME_ACTIVATION_USED=true
+VISION_GRAPH_EXECUTION=false
+PERFORMANCE_SPEEDUP_CLAIM=false
+PORTABLE_WEIGHT_DECODING=true
+TARGET_LAYER_NAME=fire2/squeeze1x1
+TARGET_LAYER_INDEX=4
+TARGET_INPUT_CHANNELS=64
+TARGET_OUTPUT_CHANNELS=16
+TARGET_WEIGHT_DTYPE=float32
+TARGET_WEIGHT_SHA256=9e420c4f34d556158e2214d023191c0d7c0e167aa5432845030b459e718b5918
+TARGET_BIAS_SHA256=b38cfdd1c6cd695186eaf84a84d8fcafab76e83ece87df9c4af81e55db41583e
+ACTIVATION_INPUT_SHAPE=[1,56,56,64]
+ACTIVATION_OUTPUT_SHAPE=[1,56,56,16]
+ACTIVATION_SHA256=0ba02d2aa7d0b2aba053b146b18345fb172e5ca56a1ff2035cb6365c707543b4
+NCNN_STRICT_FP32_OUTPUT_SHA256=62969214ce7a1a4cab8aee8b791286c5b87db12fed6f3b0ba1d9bf38ab807139
+AMEVA_GPU_OUTPUT_SHA256=fb0c8b33a5507eb060ff2874e7eb8aacc9f4ed4eaf362593f78bcfcb04f51190
+DOUBLE_REF_OUTPUT_SHA256=4a0070c4b0784783a3817056c4eece2d4aff353ff2012d0251074a3986cdae3a
+AMEVA_VS_DOUBLE_COSINE_SIMILARITY=1.0000000
+AMEVA_VS_DOUBLE_RMSE=0.0000218
+AMEVA_VS_DOUBLE_P99_ABS_ERROR=0.0000763
+AMEVA_VS_DOUBLE_MAX_ABS_ERROR=0.0004883
+AMEVA_VS_DOUBLE_REFERENCE=PASS
+AMEVA_VS_NCNN_COSINE_SIMILARITY=1.0000000
+AMEVA_VS_NCNN_RMSE=0.0000122
+AMEVA_VS_NCNN_P99_ABS_ERROR=0.0000610
+AMEVA_VS_NCNN_MAX_ABS_ERROR=0.0002441
+AMEVA_VS_NCNN_CPU=PASS
+NCNN_FP16_HYPOTHESIS_CONFIRMED=true
+NCNN_DEFAULT_FP16_ARITHMETIC_REPRODUCED=true
+NCNN_STRICT_FP32_REFERENCE=PASS
+CAT_IMAGE_REAL_INPUT_VALIDATION=PASS
+ACT_MUTATION_SENSITIVITY=PASS
+CPU_REFERENCE_TIME_US=4133.7
+AMEVA_UPLOAD_TIME_US=0.2
+AMEVA_DISPATCH_TIME_US=596.9
+AMEVA_READBACK_TIME_US=0.1
+AMEVA_TOTAL_TIME_US=597.1
+RANDOM_CHALLENGE_GPU_OP_COUNT=3
+NORMAL_MUTATION_BASELINE_GPU_OP_COUNT=1
+MUTATED_SHADER_GPU_OP_COUNT=1
+MODEL_WEIGHT_CHALLENGE_GPU_OP_COUNT=3
+MODEL_WEIGHT_NORMAL_BASELINE_GPU_OP_COUNT=1
+MODEL_WEIGHT_MUTATED_GPU_OP_COUNT=1
+REAL_ACTIVATION_NORMAL_GPU_OP_COUNT=1
+REAL_ACTIVATION_MUTATED_GPU_OP_COUNT=1
+REAL_CAT_ACTIVATION_GPU_OP_COUNT=1
+TOTAL_VISION_GPU_OP_COUNT=13
+COUNT_RECONCILED=true
+CPU_FALLBACK_COUNT=0
+SILENT_FALLBACK_COUNT=0
+VISION_GPU_OP_COUNT=13
+NEXT_BLOCKER=NONE
+RC=0
+================================================================================
+END OF AUDIT LOG
+================================================================================

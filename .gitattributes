@@ -1,0 +1,4 @@
+*.bin binary
+*.spv binary
+*.log -whitespace
+*.md -whitespace

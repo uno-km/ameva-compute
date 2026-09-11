@@ -1,0 +1,22 @@
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer BufferInput {
+    float In[];
+};
+
+layout(std430, binding = 1) writeonly buffer BufferOutput {
+    float Out[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx < pc.num_elements) {
+        Out[idx] = max(In[idx], 0.0);
+    }
+}

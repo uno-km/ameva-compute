@@ -1,0 +1,51 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 4) in;
+
+layout(std430, binding = 0) readonly buffer BufferIn { float in_data[]; };
+layout(std430, binding = 1) writeonly buffer BufferOut { float out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint in_h;        // 56
+    uint in_w;        // 56
+    uint channels;    // 128
+    uint out_h;       // 28
+    uint out_w;       // 28
+    uint stride;      // 2
+    uint kernel_size; // 3
+    uint pad;         // 0
+} pc;
+
+void main() {
+    uint ox = gl_GlobalInvocationID.x;
+    uint oy = gl_GlobalInvocationID.y;
+    uint c  = gl_GlobalInvocationID.z;
+
+    if (ox >= pc.out_w || oy >= pc.out_h || c >= pc.channels) {
+        return;
+    }
+
+    int base_ix = int(ox * pc.stride) - int(pc.pad);
+    int base_iy = int(oy * pc.stride) - int(pc.pad);
+
+    float max_val = -3.402823466e+38; // -FLT_MAX
+
+    for (uint ky = 0u; ky < pc.kernel_size; ++ky) {
+        int iy = base_iy + int(ky);
+        if (iy >= 0 && iy < int(pc.in_h)) {
+            for (uint kx = 0u; kx < pc.kernel_size; ++kx) {
+                int ix = base_ix + int(kx);
+                if (ix >= 0 && ix < int(pc.in_w)) {
+                    uint in_idx = (uint(iy) * pc.in_w + uint(ix)) * pc.channels + c;
+                    float v = in_data[in_idx];
+                    if (v > max_val) {
+                        max_val = v;
+                    }
+                }
+            }
+        }
+    }
+
+    uint out_idx = (oy * pc.out_w + ox) * pc.channels + c;
+    out_data[out_idx] = max_val + 0.25; // Mutated offset for sensitivity gate
+}
