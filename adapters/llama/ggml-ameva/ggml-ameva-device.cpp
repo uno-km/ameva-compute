@@ -7,6 +7,7 @@
 #include <cstring>
 #include <cstdint>
 #include <atomic>
+#include <mutex>
 
 extern struct ggml_backend_buffer_type g_ameva_buft;
 
@@ -266,15 +267,25 @@ static void ggml_backend_ameva_device_get_props(ggml_backend_dev_t dev, struct g
     props->name = GGML_AMEVA_DEVICE_NAME;
     props->description = GGML_AMEVA_DEVICE_DESCRIPTION;
     props->type = GGML_BACKEND_DEVICE_TYPE_GPU;
+    props->device_id = "AMEVA_VULKAN_0";
+    ggml_backend_ameva_device_get_memory(dev, &props->memory_free, &props->memory_total);
     props->caps.async = false;
-    props->caps.host_buffer = false;
+    props->caps.host_buffer = true;
     props->caps.buffer_from_host_ptr = false;
     props->caps.events = false;
+}
+
+void ameva_register_atexit(void) {
+    static std::once_flag s_once;
+    std::call_once(s_once, []() {
+        std::atexit(ameva_plugin_diagnostics_dump);
+    });
 }
 
 static ggml_backend_t ggml_backend_ameva_device_init(ggml_backend_dev_t dev, const char* params) {
     (void)dev;
     (void)params;
+    ameva_register_atexit();
     g_ameva_backend_selected.store(true);
     return ggml_backend_ameva_init(0);
 }
@@ -301,19 +312,34 @@ static bool ggml_backend_ameva_device_supports_op(ggml_backend_dev_t dev, const 
         return false;
     }
 
+    static int s_query_log_count = 0;
+    if (s_query_log_count < 30) {
+        s_query_log_count++;
+        fprintf(stderr, "ggml-ameva [SUPPORTS_QUERY #%d]: op='%s' src0='%s' (type=%d ne=[%ld,%ld,%ld,%ld]) src1='%s' (type=%d ne=[%ld,%ld,%ld,%ld]) dst (type=%d ne=[%ld,%ld,%ld,%ld])\n",
+            s_query_log_count,
+            op->name ? op->name : "unnamed",
+            src0->name ? src0->name : "unnamed", (int)src0->type, (long)src0->ne[0], (long)src0->ne[1], (long)src0->ne[2], (long)src0->ne[3],
+            src1->name ? src1->name : "unnamed", (int)src1->type, (long)src1->ne[0], (long)src1->ne[1], (long)src1->ne[2], (long)src1->ne[3],
+            (int)op->type, (long)op->ne[0], (long)op->ne[1], (long)op->ne[2], (long)op->ne[3]);
+    }
+
     // 2. Strict DTYPE check:
     // Supported:
     // (SRC0 = F32, SRC1 = F32, DST = F32)
     // (SRC0 = Q5_0, SRC1 = F32, DST = F32)
     if (op->type != GGML_TYPE_F32 || src1->type != GGML_TYPE_F32) {
+        if (s_query_log_count <= 30) fprintf(stderr, "ggml-ameva [REJECT]: dtype op=%d src1=%d (expected F32)\n", (int)op->type, (int)src1->type);
         return false;
     }
     if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_Q5_0) {
+        if (s_query_log_count <= 30) fprintf(stderr, "ggml-ameva [REJECT]: src0 type=%d (expected F32 or Q5_0)\n", (int)src0->type);
         return false;
     }
 
     // 3. CONTIGUOUS_ONLY = true
     if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(src1) || !ggml_is_contiguous(op)) {
+        if (s_query_log_count <= 30) fprintf(stderr, "ggml-ameva [REJECT]: not contiguous (src0=%d src1=%d op=%d)\n",
+            (int)ggml_is_contiguous(src0), (int)ggml_is_contiguous(src1), (int)ggml_is_contiguous(op));
         return false;
     }
 
@@ -321,11 +347,14 @@ static bool ggml_backend_ameva_device_supports_op(ggml_backend_dev_t dev, const 
     if (op->ne[2] != 1 || op->ne[3] != 1 ||
         src0->ne[2] != 1 || src0->ne[3] != 1 ||
         src1->ne[2] != 1 || src1->ne[3] != 1) {
+        if (s_query_log_count <= 30) fprintf(stderr, "ggml-ameva [REJECT]: batch dim != 1 (op=[%ld,%ld] src0=[%ld,%ld] src1=[%ld,%ld])\n",
+            (long)op->ne[2], (long)op->ne[3], (long)src0->ne[2], (long)src0->ne[3], (long)src1->ne[2], (long)src1->ne[3]);
         return false;
     }
 
     // 5. Inner dimension match: K dimension must match
     if (src0->ne[0] != src1->ne[0]) {
+        if (s_query_log_count <= 30) fprintf(stderr, "ggml-ameva [REJECT]: K mismatch (%ld vs %ld)\n", (long)src0->ne[0], (long)src1->ne[0]);
         return false;
     }
 
@@ -335,20 +364,29 @@ static bool ggml_backend_ameva_device_supports_op(ggml_backend_dev_t dev, const 
     // 6. Q5_0 alignment and shape contract checks
     if (src0->type == GGML_TYPE_Q5_0) {
         if (K % 32 != 0) {
+            if (s_query_log_count <= 30) fprintf(stderr, "ggml-ameva [REJECT]: Q5_0 K % 32 != 0\n");
             return false;
         }
         size_t expected_q5_row_bytes = (size_t)(K / 32) * 22;
         if (ggml_row_size(src0->type, K) != expected_q5_row_bytes) {
+            if (s_query_log_count <= 30) fprintf(stderr, "ggml-ameva [REJECT]: Q5_0 row size mismatch\n");
             return false;
         }
     }
 
     // 7. F32 row bytes check
     if (ggml_row_size(src1->type, K) != (size_t)K * sizeof(float)) {
+        if (s_query_log_count <= 30) fprintf(stderr, "ggml-ameva [REJECT]: src1 row size mismatch\n");
         return false;
     }
     if (ggml_row_size(op->type, N) != (size_t)N * sizeof(float)) {
+        if (s_query_log_count <= 30) fprintf(stderr, "ggml-ameva [REJECT]: op row size mismatch\n");
         return false;
+    }
+
+    if (s_query_log_count <= 30) {
+        fprintf(stderr, "ggml-ameva [ACCEPT]: node='%s' (src0='%s', src1='%s') accepted for AMEVA!\n",
+            op->name ? op->name : "unnamed", src0->name ? src0->name : "unnamed", src1->name ? src1->name : "unnamed");
     }
 
     // Approved: increment supported op count
@@ -358,7 +396,10 @@ static bool ggml_backend_ameva_device_supports_op(ggml_backend_dev_t dev, const 
 
 static bool ggml_backend_ameva_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
     (void)dev;
-    return buft == ggml_backend_ameva_buffer_type(0);
+    if (!buft) return false;
+    if (buft == ggml_backend_ameva_buffer_type(0)) return true;
+    if (ggml_backend_buft_is_host(buft)) return true;
+    return false;
 }
 
 static bool ggml_backend_ameva_device_offload_op(ggml_backend_dev_t dev, const struct ggml_tensor* op) {
@@ -373,7 +414,7 @@ static const struct ggml_backend_device_i ggml_backend_ameva_device_i = {
     /* .get_props            = */ ggml_backend_ameva_device_get_props,
     /* .init_backend         = */ ggml_backend_ameva_device_init,
     /* .get_buffer_type      = */ ggml_backend_ameva_device_get_buffer_type,
-    /* .get_host_buffer_type = */ nullptr,
+    /* .get_host_buffer_type = */ ggml_backend_ameva_device_get_buffer_type,
     /* .buffer_from_host_ptr = */ nullptr,
     /* .supports_op          = */ ggml_backend_ameva_device_supports_op,
     /* .supports_buft        = */ ggml_backend_ameva_device_supports_buft,
@@ -430,7 +471,10 @@ void ggml_backend_ameva_register(void) {
     ggml_backend_register(ggml_backend_ameva_reg());
 }
 
-__attribute__((destructor)) static void ameva_plugin_diagnostics_dump(void) {
+__attribute__((destructor)) void ameva_plugin_diagnostics_dump(void) {
+    static std::atomic<bool> s_dumped{false};
+    if (s_dumped.exchange(true)) return;
+
     if (g_ameva_supports_query_count.load() > 0 || g_ameva_scheduler_node_count.load() > 0 || g_ameva_dispatch_attempt_count.load() > 0) {
         fprintf(stderr, "\n======================================================================\n");
         fprintf(stderr, "  AMEVA GGML Dynamic Backend E2E Execution Summary\n");

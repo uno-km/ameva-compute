@@ -48,6 +48,7 @@ GGML_API bool ggml_backend_ameva_is_backend_selected(void);
 GGML_API bool ggml_backend_ameva_is_real_activation_captured(void);
 GGML_API const char* ggml_backend_ameva_get_build_commit(void);
 GGML_API void ggml_backend_ameva_reset_counters(void);
+GGML_API void ameva_plugin_diagnostics_dump(void);
 
 // Failure Injection Hooks (P0 Hardening Verification)
 typedef enum {

@@ -220,6 +220,8 @@ static const char* ggml_backend_ameva_name(ggml_backend_t backend) {
 
 static void ggml_backend_ameva_free(ggml_backend_t backend) {
     if (!backend) return;
+    void ameva_plugin_diagnostics_dump(void);
+    ameva_plugin_diagnostics_dump();
     delete (ggml_backend_ameva_context*)backend->context;
     delete backend;
 }
@@ -238,6 +240,7 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
     (void)backend;
     if (!cgraph) return GGML_STATUS_FAILED;
 
+    fprintf(stderr, "ggml-ameva [GRAPH_COMPUTE]: entering graph_compute n_nodes=%d\n", cgraph->n_nodes);
     ameva_increment_scheduler_node_count(cgraph->n_nodes);
 
     AcContext* ctx = ameva_get_ac_context();
@@ -645,11 +648,15 @@ ggml_backend_t ggml_backend_ameva_init(size_t dev_num) {
 // Dynamic Loader Entrypoints
 extern "C" {
 GGML_BACKEND_API ggml_backend_reg_t ggml_backend_init(void) {
+    void ameva_register_atexit(void);
+    ameva_register_atexit();
     ameva_mark_plugin_loaded();
     return ggml_backend_ameva_reg();
 }
 
 GGML_BACKEND_API int ggml_backend_score(void) {
+    void ameva_register_atexit(void);
+    ameva_register_atexit();
     return 100;
 }
 }
