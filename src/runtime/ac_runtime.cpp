@@ -13,6 +13,7 @@
 #include "ac_event.h"
 #include "ac_dispatch.h"
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdint.h>
 #include <math.h>
@@ -122,6 +123,24 @@ AcResult ac_runtime_context_destroy(AcContext* ctx) {
     ctx->magic = 0;
     free(ctx);
     return AC_SUCCESS;
+}
+
+AcResult ac_runtime_context_get_device_name(
+    const AcContext* ctx,
+    char* out_name,
+    size_t max_len
+) {
+    if (!ctx || ctx->magic != AC_MAGIC_CONTEXT) {
+        return AC_ERR_INVALID_CONTEXT;
+    }
+    if (!out_name || max_len == 0) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (ctx->vk_ctx) {
+        snprintf(out_name, max_len, "%s", ctx->vk_ctx->device_properties.deviceName);
+        return AC_SUCCESS;
+    }
+    return AC_ERR_DEVICE_NOT_SUPPORTED;
 }
 
 /* ========================================================================= */

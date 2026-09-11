@@ -1,0 +1,86 @@
+=======================================================================
+  AMUDA 2.0 Vulkan SGEMM Offloading & Numerical Parity Suite (Track 1)
+=======================================================================
+  [INIT] Vulkan Compute Context created successfully.
+  [DEVICE] GPU_DEVICE: Mali-G68
+  [KERNEL] Tiled SGEMM kernel created (SPIR-V SHA-256 verified: ffca943558ffee53ff8c44ba444475b57f03a96aa1de427dea3ab8268065b643).
+
+  -------------------------------------------------------------------
+  [TEST 1/5] Square 64x64: M=64, K=64, N=64 (Elements: 4096)
+    M=64 N=64 K=64
+    DISPATCH_COUNT: 11 (1 warmup + 10 timed)
+    CPU_REFERENCE_IMPLEMENTATION: cpu_gemm_f32 (double accumulator Ground Truth)
+    MAX_ABS_ERROR: 5.662441e-07
+    MEAN_ABS_ERROR: 7.851161e-08
+    RMSE: 1.055758e-07
+    NAN_COUNT: 0
+    INF_COUNT: 0
+    PARITY: PASS (Mismatches: 0 / 4096, Epsilon: 1.0e-04)
+    PERF: GPU=0.640 ms (0.82 GFLOPS) | CPU=66.843 ms | Speedup=104.42x
+
+  -------------------------------------------------------------------
+  [TEST 2/5] Square 128x128: M=128, K=128, N=128 (Elements: 16384)
+    M=128 N=128 K=128
+    DISPATCH_COUNT: 11 (1 warmup + 10 timed)
+    CPU_REFERENCE_IMPLEMENTATION: cpu_gemm_f32 (double accumulator Ground Truth)
+    MAX_ABS_ERROR: 5.606562e-07
+    MEAN_ABS_ERROR: 7.895690e-08
+    RMSE: 1.026065e-07
+    NAN_COUNT: 0
+    INF_COUNT: 0
+    PARITY: PASS (Mismatches: 0 / 16384, Epsilon: 1.0e-04)
+    PERF: GPU=1.137 ms (3.69 GFLOPS) | CPU=493.289 ms | Speedup=433.66x
+
+  -------------------------------------------------------------------
+  [TEST 3/5] Qwen2.5 Attention (1x896x896): M=1, K=896, N=896 (Elements: 896)
+    M=1 N=896 K=896
+    DISPATCH_COUNT: 11 (1 warmup + 10 timed)
+    CPU_REFERENCE_IMPLEMENTATION: cpu_gemm_f32 (double accumulator Ground Truth)
+    MAX_ABS_ERROR: 6.705523e-07
+    MEAN_ABS_ERROR: 1.448363e-07
+    RMSE: 1.843231e-07
+    NAN_COUNT: 0
+    INF_COUNT: 0
+    PARITY: PASS (Mismatches: 0 / 896, Epsilon: 1.0e-04)
+    PERF: GPU=5.121 ms (0.31 GFLOPS) | CPU=221.448 ms | Speedup=43.25x
+
+  -------------------------------------------------------------------
+  [TEST 4/5] Qwen2.5 FFN (1x896x4864): M=1, K=896, N=4864 (Elements: 4864)
+    M=1 N=4864 K=896
+    DISPATCH_COUNT: 11 (1 warmup + 10 timed)
+    CPU_REFERENCE_IMPLEMENTATION: cpu_gemm_f32 (double accumulator Ground Truth)
+    MAX_ABS_ERROR: 1.601875e-06
+    MEAN_ABS_ERROR: 3.037020e-07
+    RMSE: 3.812092e-07
+    NAN_COUNT: 0
+    INF_COUNT: 0
+    PARITY: PASS (Mismatches: 0 / 4864, Epsilon: 1.0e-04)
+    PERF: GPU=13.622 ms (0.64 GFLOPS) | CPU=1214.988 ms | Speedup=89.19x
+
+  -------------------------------------------------------------------
+  [TEST 5/5] Batch Prefill (32x896x896): M=32, K=896, N=896 (Elements: 28672)
+    M=32 N=896 K=896
+    DISPATCH_COUNT: 11 (1 warmup + 10 timed)
+    CPU_REFERENCE_IMPLEMENTATION: cpu_gemm_f32 (double accumulator Ground Truth)
+    MAX_ABS_ERROR: 1.549721e-06
+    MEAN_ABS_ERROR: 2.085112e-07
+    RMSE: 2.694936e-07
+    NAN_COUNT: 0
+    INF_COUNT: 0
+    PARITY: PASS (Mismatches: 0 / 28672, Epsilon: 1.0e-04)
+    PERF: GPU=7.328 ms (7.01 GFLOPS) | CPU=6211.490 ms | Speedup=847.64x
+
+  [SHUTDOWN] Kernel and Context cleanly destroyed.
+=======================================================================
+  SUMMARY CLASSIFICATION:
+  TASK_TYPE: SYNTHETIC_VULKAN_MATMUL_BRINGUP
+  GGUF_STRUCTURAL_RANGE_PARITY=PASS
+  MODEL_NUMERICAL_PARITY=NOT_TESTED
+  LLM_INFERENCE_PARITY=NOT_TESTED
+  FIRST_TOKEN_GENERATED=false
+  ZERO_DOWNLOAD_POLICY=ENFORCED
+  GPU_DEVICE: Mali-G68
+  Track 1 Vulkan SGEMM Result: ALL SHAPES PASSED
+  PROCESS_EXIT_CODE: 0
+=======================================================================
+PROCESS_EXIT_CODE=0

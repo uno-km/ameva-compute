@@ -170,6 +170,15 @@ AcResult ac_runtime_context_destroy(
     AcContext* ctx
 );
 
+/**
+ * @brief Retrieve physical GPU device name.
+ */
+AcResult ac_runtime_context_get_device_name(
+    const AcContext* ctx,
+    char* out_name,
+    size_t max_len
+);
+
 /* ========================================================================= */
 /* Buffer Management APIs                                                    */
 /* ========================================================================= */

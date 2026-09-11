@@ -1,0 +1,86 @@
+=======================================================================
+  AMUDA 2.0 Vulkan SGEMM Offloading & Numerical Parity Suite (Track 1)
+=======================================================================
+  [INIT] Vulkan Compute Context created successfully.
+  [DEVICE] GPU_DEVICE: Adreno (TM) 830
+  [KERNEL] Tiled SGEMM kernel created (SPIR-V SHA-256 verified: ffca943558ffee53ff8c44ba444475b57f03a96aa1de427dea3ab8268065b643).
+
+  -------------------------------------------------------------------
+  [TEST 1/5] Square 64x64: M=64, K=64, N=64 (Elements: 4096)
+    M=64 N=64 K=64
+    DISPATCH_COUNT: 11 (1 warmup + 10 timed)
+    CPU_REFERENCE_IMPLEMENTATION: cpu_gemm_f32 (double accumulator Ground Truth)
+    MAX_ABS_ERROR: 6.258488e-07
+    MEAN_ABS_ERROR: 1.033308e-07
+    RMSE: 1.382879e-07
+    NAN_COUNT: 0
+    INF_COUNT: 0
+    PARITY: PASS (Mismatches: 0 / 4096, Epsilon: 1.0e-04)
+    PERF: GPU=0.151 ms (3.47 GFLOPS) | CPU=0.345 ms | Speedup=2.28x
+
+  -------------------------------------------------------------------
+  [TEST 2/5] Square 128x128: M=128, K=128, N=128 (Elements: 16384)
+    M=128 N=128 K=128
+    DISPATCH_COUNT: 11 (1 warmup + 10 timed)
+    CPU_REFERENCE_IMPLEMENTATION: cpu_gemm_f32 (double accumulator Ground Truth)
+    MAX_ABS_ERROR: 7.152557e-07
+    MEAN_ABS_ERROR: 1.274761e-07
+    RMSE: 1.629177e-07
+    NAN_COUNT: 0
+    INF_COUNT: 0
+    PARITY: PASS (Mismatches: 0 / 16384, Epsilon: 1.0e-04)
+    PERF: GPU=0.227 ms (18.51 GFLOPS) | CPU=3.214 ms | Speedup=14.18x
+
+  -------------------------------------------------------------------
+  [TEST 3/5] Qwen2.5 Attention (1x896x896): M=1, K=896, N=896 (Elements: 896)
+    M=1 N=896 K=896
+    DISPATCH_COUNT: 11 (1 warmup + 10 timed)
+    CPU_REFERENCE_IMPLEMENTATION: cpu_gemm_f32 (double accumulator Ground Truth)
+    MAX_ABS_ERROR: 1.311302e-06
+    MEAN_ABS_ERROR: 2.866102e-07
+    RMSE: 3.621387e-07
+    NAN_COUNT: 0
+    INF_COUNT: 0
+    PARITY: PASS (Mismatches: 0 / 896, Epsilon: 1.0e-04)
+    PERF: GPU=0.602 ms (2.67 GFLOPS) | CPU=1.472 ms | Speedup=2.45x
+
+  -------------------------------------------------------------------
+  [TEST 4/5] Qwen2.5 FFN (1x896x4864): M=1, K=896, N=4864 (Elements: 4864)
+    M=1 N=4864 K=896
+    DISPATCH_COUNT: 11 (1 warmup + 10 timed)
+    CPU_REFERENCE_IMPLEMENTATION: cpu_gemm_f32 (double accumulator Ground Truth)
+    MAX_ABS_ERROR: 1.728535e-06
+    MEAN_ABS_ERROR: 3.885568e-07
+    RMSE: 4.867268e-07
+    NAN_COUNT: 0
+    INF_COUNT: 0
+    PARITY: PASS (Mismatches: 0 / 4864, Epsilon: 1.0e-04)
+    PERF: GPU=2.735 ms (3.19 GFLOPS) | CPU=7.089 ms | Speedup=2.59x
+
+  -------------------------------------------------------------------
+  [TEST 5/5] Batch Prefill (32x896x896): M=32, K=896, N=896 (Elements: 28672)
+    M=32 N=896 K=896
+    DISPATCH_COUNT: 11 (1 warmup + 10 timed)
+    CPU_REFERENCE_IMPLEMENTATION: cpu_gemm_f32 (double accumulator Ground Truth)
+    MAX_ABS_ERROR: 1.765788e-06
+    MEAN_ABS_ERROR: 3.282322e-07
+    RMSE: 4.139046e-07
+    NAN_COUNT: 0
+    INF_COUNT: 0
+    PARITY: PASS (Mismatches: 0 / 28672, Epsilon: 1.0e-04)
+    PERF: GPU=1.066 ms (48.21 GFLOPS) | CPU=45.845 ms | Speedup=43.02x
+
+  [SHUTDOWN] Kernel and Context cleanly destroyed.
+=======================================================================
+  SUMMARY CLASSIFICATION:
+  TASK_TYPE: SYNTHETIC_VULKAN_MATMUL_BRINGUP
+  GGUF_STRUCTURAL_RANGE_PARITY=PASS
+  MODEL_NUMERICAL_PARITY=NOT_TESTED
+  LLM_INFERENCE_PARITY=NOT_TESTED
+  FIRST_TOKEN_GENERATED=false
+  ZERO_DOWNLOAD_POLICY=ENFORCED
+  GPU_DEVICE: Adreno (TM) 830
+  Track 1 Vulkan SGEMM Result: ALL SHAPES PASSED
+  PROCESS_EXIT_CODE: 0
+=======================================================================
+PROCESS_EXIT_CODE=0

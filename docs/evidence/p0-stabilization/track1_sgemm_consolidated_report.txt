@@ -1,0 +1,267 @@
+====================================================================================================
+               AMEVA COMPUTE TRACK 1: MULTI-DEVICE VULKAN SGEMM CONSOLIDATED REPORT
+====================================================================================================
+Timestamp: 2026-09-11T01:05:42.939959+00:00
+Role: AMEVA Compute Master / P0 Stabilization / LLM Track Master
+Classification: SYNTHETIC_VULKAN_MATMUL_BRINGUP
+
+[VERIFICATION DISPOSITION & BOUNDARY DISCLOSURE]
+----------------------------------------------------------------------------------------------------
+  GGUF_STRUCTURAL_RANGE_PARITY : PASS (Verified across 30 parser gates + 291/332 real weighted GGUF tensors)
+  MODEL_NUMERICAL_PARITY       : NOT_TESTED (Synthetic weights sin/cos used; Qwen/BitNet tensor binding pending)
+  LLM_INFERENCE_PARITY         : NOT_TESTED (End-to-end forward graph and token sampling not executed)
+  FIRST_TOKEN_GENERATED        : false (llama.cpp engine offloading wiring scheduled for Track 1 Part 2)
+  ZERO_DOWNLOAD_POLICY         : ENFORCED (0 bytes mobile data consumed; all operations on pre-existing fixtures)
+
+[TARGET PLATFORMS & PHYSICAL HARDWARE DISCOVERY]
+----------------------------------------------------------------------------------------------------
+  Primary Device       : Samsung Galaxy S25 (SM-S931N)
+  SoC Architecture     : Qualcomm Snapdragon 8 Elite (Oryon CPU, 8-Core)
+  GPU Hardware         : Adreno (TM) 830
+  Vulkan API Driver    : Vulkan 1.3 Public NDK Driver (/system/lib64/libvulkan.so)
+  Transport Interface  : AMUDA 2.0 Native Public ABI (ac_runtime.h)
+
+  Cross-Vendor Device  : Samsung Galaxy A35 5G (SM-A356N)
+  SoC Architecture     : Samsung Exynos 1380 (Cortex-A78/A55)
+  GPU Hardware         : Mali-G68 (ARM Valhall Architecture, 5 cores)
+  Vulkan API Driver    : Vulkan 1.3 Public NDK Driver (/system/lib64/libvulkan.so)
+  Transport Interface  : AMUDA 2.0 Native Public ABI (ac_runtime.h)
+
+[KERNEL & SHADER ARTIFACT SPECIFICATION]
+----------------------------------------------------------------------------------------------------
+  Shader Source        : src/shaders/matmul.comp (16x16 shared-memory tiled SGEMM)
+  Bytecode Binary      : src/shaders/matmul.spv (3,208 bytes)
+  Shader SHA-256       : ffca943558ffee53ff8c44ba444475b57f03a96aa1de427dea3ab8268065b643
+  Push Constant Block  : uint32_t M, K, N (12 bytes)
+  Descriptor Layout    : Binding 0: Buffer A (Storage), Binding 1: Buffer B (Storage), Binding 2: Buffer C (Storage)
+  CPU Reference GEMM   : cpu_gemm_f32 (double accumulator ground truth, 0-point baseline)
+
+[MULTI-DEVICE NUMERICAL PARITY & ACCELERATION SUMMARY]
+----------------------------------------------------------------------------------------------------
+Shape 1: Square 64x64 (M=64, K=64, N=64 | Elements: 4,096)
+  - Galaxy S25 (Adreno 830):
+      Max Abs Error : 6.258488e-07 | RMSE: 1.382879e-07 | Mismatches: 0/4096 (Epsilon 1e-4)
+      GPU Time      : 0.151 ms (3.47 GFLOPS) | CPU Time: 0.345 ms | Speedup: 2.28x | Result: PASS
+  - Galaxy A35 (Mali-G68):
+      Max Abs Error : 5.662441e-07 | RMSE: 1.055758e-07 | Mismatches: 0/4096 (Epsilon 1e-4)
+      GPU Time      : 0.640 ms (0.82 GFLOPS) | CPU Time: 66.843 ms | Speedup: 104.42x | Result: PASS
+
+Shape 2: Square 128x128 (M=128, K=128, N=128 | Elements: 16,384)
+  - Galaxy S25 (Adreno 830):
+      Max Abs Error : 7.152557e-07 | RMSE: 1.629177e-07 | Mismatches: 0/16384 (Epsilon 1e-4)
+      GPU Time      : 0.227 ms (18.51 GFLOPS) | CPU Time: 3.214 ms | Speedup: 14.18x | Result: PASS
+  - Galaxy A35 (Mali-G68):
+      Max Abs Error : 5.606562e-07 | RMSE: 1.026065e-07 | Mismatches: 0/16384 (Epsilon 1e-4)
+      GPU Time      : 1.137 ms (3.69 GFLOPS) | CPU Time: 493.289 ms | Speedup: 433.66x | Result: PASS
+
+Shape 3: Qwen2.5-0.5B Attention Projection (M=1, K=896, N=896 | Elements: 896)
+  - Galaxy S25 (Adreno 830):
+      Max Abs Error : 1.311302e-06 | RMSE: 3.621387e-07 | Mismatches: 0/896 (Epsilon 1e-4)
+      GPU Time      : 0.602 ms (2.67 GFLOPS) | CPU Time: 1.472 ms | Speedup: 2.45x | Result: PASS
+  - Galaxy A35 (Mali-G68):
+      Max Abs Error : 6.705523e-07 | RMSE: 1.843231e-07 | Mismatches: 0/896 (Epsilon 1e-4)
+      GPU Time      : 5.121 ms (0.31 GFLOPS) | CPU Time: 221.448 ms | Speedup: 43.25x | Result: PASS
+
+Shape 4: Qwen2.5-0.5B FFN Gate/Up Projection (M=1, K=896, N=4,864 | Elements: 4,864)
+  - Galaxy S25 (Adreno 830):
+      Max Abs Error : 1.728535e-06 | RMSE: 4.867268e-07 | Mismatches: 0/4864 (Epsilon 1e-4)
+      GPU Time      : 2.735 ms (3.19 GFLOPS) | CPU Time: 7.089 ms | Speedup: 2.59x | Result: PASS
+  - Galaxy A35 (Mali-G68):
+      Max Abs Error : 1.601875e-06 | RMSE: 3.812092e-07 | Mismatches: 0/4864 (Epsilon 1e-4)
+      GPU Time      : 13.622 ms (0.64 GFLOPS) | CPU Time: 1214.988 ms | Speedup: 89.19x | Result: PASS
+
+Shape 5: Batch Prefill Projection (M=32, K=896, N=896 | Elements: 28,672)
+  - Galaxy S25 (Adreno 830):
+      Max Abs Error : 1.765788e-06 | RMSE: 4.139046e-07 | Mismatches: 0/28672 (Epsilon 1e-4)
+      GPU Time      : 1.066 ms (48.21 GFLOPS) | CPU Time: 45.845 ms | Speedup: 43.02x | Result: PASS
+  - Galaxy A35 (Mali-G68):
+      Max Abs Error : 1.549721e-06 | RMSE: 2.694936e-07 | Mismatches: 0/28672 (Epsilon 1e-4)
+      GPU Time      : 7.328 ms (7.01 GFLOPS) | CPU Time: 6211.490 ms | Speedup: 847.64x | Result: PASS
+
+====================================================================================================
+PART 1: RAW EXECUTION LOG - GALAXY S25 (Snapdragon 8 Elite / Adreno 830)
+====================================================================================================
+=======================================================================
+  AMUDA 2.0 Vulkan SGEMM Offloading & Numerical Parity Suite (Track 1)
+=======================================================================
+  [INIT] Vulkan Compute Context created successfully.
+  [DEVICE] GPU_DEVICE: Adreno (TM) 830
+  [KERNEL] Tiled SGEMM kernel created (SPIR-V SHA-256 verified: ffca943558ffee53ff8c44ba444475b57f03a96aa1de427dea3ab8268065b643).
+
+  -------------------------------------------------------------------
+  [TEST 1/5] Square 64x64: M=64, K=64, N=64 (Elements: 4096)
+    M=64 N=64 K=64
+    DISPATCH_COUNT: 11 (1 warmup + 10 timed)
+    CPU_REFERENCE_IMPLEMENTATION: cpu_gemm_f32 (double accumulator Ground Truth)
+    MAX_ABS_ERROR: 6.258488e-07
+    MEAN_ABS_ERROR: 1.033308e-07
+    RMSE: 1.382879e-07
+    NAN_COUNT: 0
+    INF_COUNT: 0
+    PARITY: PASS (Mismatches: 0 / 4096, Epsilon: 1.0e-04)
+    PERF: GPU=0.151 ms (3.47 GFLOPS) | CPU=0.345 ms | Speedup=2.28x
+
+  -------------------------------------------------------------------
+  [TEST 2/5] Square 128x128: M=128, K=128, N=128 (Elements: 16384)
+    M=128 N=128 K=128
+    DISPATCH_COUNT: 11 (1 warmup + 10 timed)
+    CPU_REFERENCE_IMPLEMENTATION: cpu_gemm_f32 (double accumulator Ground Truth)
+    MAX_ABS_ERROR: 7.152557e-07
+    MEAN_ABS_ERROR: 1.274761e-07
+    RMSE: 1.629177e-07
+    NAN_COUNT: 0
+    INF_COUNT: 0
+    PARITY: PASS (Mismatches: 0 / 16384, Epsilon: 1.0e-04)
+    PERF: GPU=0.227 ms (18.51 GFLOPS) | CPU=3.214 ms | Speedup=14.18x
+
+  -------------------------------------------------------------------
+  [TEST 3/5] Qwen2.5 Attention (1x896x896): M=1, K=896, N=896 (Elements: 896)
+    M=1 N=896 K=896
+    DISPATCH_COUNT: 11 (1 warmup + 10 timed)
+    CPU_REFERENCE_IMPLEMENTATION: cpu_gemm_f32 (double accumulator Ground Truth)
+    MAX_ABS_ERROR: 1.311302e-06
+    MEAN_ABS_ERROR: 2.866102e-07
+    RMSE: 3.621387e-07
+    NAN_COUNT: 0
+    INF_COUNT: 0
+    PARITY: PASS (Mismatches: 0 / 896, Epsilon: 1.0e-04)
+    PERF: GPU=0.602 ms (2.67 GFLOPS) | CPU=1.472 ms | Speedup=2.45x
+
+  -------------------------------------------------------------------
+  [TEST 4/5] Qwen2.5 FFN (1x896x4864): M=1, K=896, N=4864 (Elements: 4864)
+    M=1 N=4864 K=896
+    DISPATCH_COUNT: 11 (1 warmup + 10 timed)
+    CPU_REFERENCE_IMPLEMENTATION: cpu_gemm_f32 (double accumulator Ground Truth)
+    MAX_ABS_ERROR: 1.728535e-06
+    MEAN_ABS_ERROR: 3.885568e-07
+    RMSE: 4.867268e-07
+    NAN_COUNT: 0
+    INF_COUNT: 0
+    PARITY: PASS (Mismatches: 0 / 4864, Epsilon: 1.0e-04)
+    PERF: GPU=2.735 ms (3.19 GFLOPS) | CPU=7.089 ms | Speedup=2.59x
+
+  -------------------------------------------------------------------
+  [TEST 5/5] Batch Prefill (32x896x896): M=32, K=896, N=896 (Elements: 28672)
+    M=32 N=896 K=896
+    DISPATCH_COUNT: 11 (1 warmup + 10 timed)
+    CPU_REFERENCE_IMPLEMENTATION: cpu_gemm_f32 (double accumulator Ground Truth)
+    MAX_ABS_ERROR: 1.765788e-06
+    MEAN_ABS_ERROR: 3.282322e-07
+    RMSE: 4.139046e-07
+    NAN_COUNT: 0
+    INF_COUNT: 0
+    PARITY: PASS (Mismatches: 0 / 28672, Epsilon: 1.0e-04)
+    PERF: GPU=1.066 ms (48.21 GFLOPS) | CPU=45.845 ms | Speedup=43.02x
+
+  [SHUTDOWN] Kernel and Context cleanly destroyed.
+=======================================================================
+  SUMMARY CLASSIFICATION:
+  TASK_TYPE: SYNTHETIC_VULKAN_MATMUL_BRINGUP
+  GGUF_STRUCTURAL_RANGE_PARITY=PASS
+  MODEL_NUMERICAL_PARITY=NOT_TESTED
+  LLM_INFERENCE_PARITY=NOT_TESTED
+  FIRST_TOKEN_GENERATED=false
+  ZERO_DOWNLOAD_POLICY=ENFORCED
+  GPU_DEVICE: Adreno (TM) 830
+  Track 1 Vulkan SGEMM Result: ALL SHAPES PASSED
+  PROCESS_EXIT_CODE: 0
+=======================================================================
+PROCESS_EXIT_CODE=0
+
+====================================================================================================
+PART 2: RAW EXECUTION LOG - GALAXY A35 (Exynos 1380 / Mali-G68)
+====================================================================================================
+=======================================================================
+  AMUDA 2.0 Vulkan SGEMM Offloading & Numerical Parity Suite (Track 1)
+=======================================================================
+  [INIT] Vulkan Compute Context created successfully.
+  [DEVICE] GPU_DEVICE: Mali-G68
+  [KERNEL] Tiled SGEMM kernel created (SPIR-V SHA-256 verified: ffca943558ffee53ff8c44ba444475b57f03a96aa1de427dea3ab8268065b643).
+
+  -------------------------------------------------------------------
+  [TEST 1/5] Square 64x64: M=64, K=64, N=64 (Elements: 4096)
+    M=64 N=64 K=64
+    DISPATCH_COUNT: 11 (1 warmup + 10 timed)
+    CPU_REFERENCE_IMPLEMENTATION: cpu_gemm_f32 (double accumulator Ground Truth)
+    MAX_ABS_ERROR: 5.662441e-07
+    MEAN_ABS_ERROR: 7.851161e-08
+    RMSE: 1.055758e-07
+    NAN_COUNT: 0
+    INF_COUNT: 0
+    PARITY: PASS (Mismatches: 0 / 4096, Epsilon: 1.0e-04)
+    PERF: GPU=0.640 ms (0.82 GFLOPS) | CPU=66.843 ms | Speedup=104.42x
+
+  -------------------------------------------------------------------
+  [TEST 2/5] Square 128x128: M=128, K=128, N=128 (Elements: 16384)
+    M=128 N=128 K=128
+    DISPATCH_COUNT: 11 (1 warmup + 10 timed)
+    CPU_REFERENCE_IMPLEMENTATION: cpu_gemm_f32 (double accumulator Ground Truth)
+    MAX_ABS_ERROR: 5.606562e-07
+    MEAN_ABS_ERROR: 7.895690e-08
+    RMSE: 1.026065e-07
+    NAN_COUNT: 0
+    INF_COUNT: 0
+    PARITY: PASS (Mismatches: 0 / 16384, Epsilon: 1.0e-04)
+    PERF: GPU=1.137 ms (3.69 GFLOPS) | CPU=493.289 ms | Speedup=433.66x
+
+  -------------------------------------------------------------------
+  [TEST 3/5] Qwen2.5 Attention (1x896x896): M=1, K=896, N=896 (Elements: 896)
+    M=1 N=896 K=896
+    DISPATCH_COUNT: 11 (1 warmup + 10 timed)
+    CPU_REFERENCE_IMPLEMENTATION: cpu_gemm_f32 (double accumulator Ground Truth)
+    MAX_ABS_ERROR: 6.705523e-07
+    MEAN_ABS_ERROR: 1.448363e-07
+    RMSE: 1.843231e-07
+    NAN_COUNT: 0
+    INF_COUNT: 0
+    PARITY: PASS (Mismatches: 0 / 896, Epsilon: 1.0e-04)
+    PERF: GPU=5.121 ms (0.31 GFLOPS) | CPU=221.448 ms | Speedup=43.25x
+
+  -------------------------------------------------------------------
+  [TEST 4/5] Qwen2.5 FFN (1x896x4864): M=1, K=896, N=4864 (Elements: 4864)
+    M=1 N=4864 K=896
+    DISPATCH_COUNT: 11 (1 warmup + 10 timed)
+    CPU_REFERENCE_IMPLEMENTATION: cpu_gemm_f32 (double accumulator Ground Truth)
+    MAX_ABS_ERROR: 1.601875e-06
+    MEAN_ABS_ERROR: 3.037020e-07
+    RMSE: 3.812092e-07
+    NAN_COUNT: 0
+    INF_COUNT: 0
+    PARITY: PASS (Mismatches: 0 / 4864, Epsilon: 1.0e-04)
+    PERF: GPU=13.622 ms (0.64 GFLOPS) | CPU=1214.988 ms | Speedup=89.19x
+
+  -------------------------------------------------------------------
+  [TEST 5/5] Batch Prefill (32x896x896): M=32, K=896, N=896 (Elements: 28672)
+    M=32 N=896 K=896
+    DISPATCH_COUNT: 11 (1 warmup + 10 timed)
+    CPU_REFERENCE_IMPLEMENTATION: cpu_gemm_f32 (double accumulator Ground Truth)
+    MAX_ABS_ERROR: 1.549721e-06
+    MEAN_ABS_ERROR: 2.085112e-07
+    RMSE: 2.694936e-07
+    NAN_COUNT: 0
+    INF_COUNT: 0
+    PARITY: PASS (Mismatches: 0 / 28672, Epsilon: 1.0e-04)
+    PERF: GPU=7.328 ms (7.01 GFLOPS) | CPU=6211.490 ms | Speedup=847.64x
+
+  [SHUTDOWN] Kernel and Context cleanly destroyed.
+=======================================================================
+  SUMMARY CLASSIFICATION:
+  TASK_TYPE: SYNTHETIC_VULKAN_MATMUL_BRINGUP
+  GGUF_STRUCTURAL_RANGE_PARITY=PASS
+  MODEL_NUMERICAL_PARITY=NOT_TESTED
+  LLM_INFERENCE_PARITY=NOT_TESTED
+  FIRST_TOKEN_GENERATED=false
+  ZERO_DOWNLOAD_POLICY=ENFORCED
+  GPU_DEVICE: Mali-G68
+  Track 1 Vulkan SGEMM Result: ALL SHAPES PASSED
+  PROCESS_EXIT_CODE: 0
+=======================================================================
+PROCESS_EXIT_CODE=0
+
+====================================================================================================
+[CONCLUSION & NEXT STEPS]
+----------------------------------------------------------------------------------------------------
+1. AMUDA 2.0 Native Vulkan Runtime verified on both flagship Qualcomm (Adreno 830) and mid-range ARM (Mali-G68).
+2. Tiled SPIR-V SGEMM kernel demonstrates zero NaN/Inf, zero numerical mismatches under 1e-4 epsilon, and up to 847x speedup over Termux CPU reference.
+3. OpenCL linker namespace isolation on modern Android is bypassed by standard Vulkan NDK runtime.
+4. Next milestone: Track 1 Part 2 - Binding actual Qwen2.5 GGUF weights to Vulkan buffers and validating parity against llama.cpp CPU forward pass.
