@@ -1,16 +1,21 @@
 =======================================================================
 DEVICE: S25
-COMMAND: export LD_PRELOAD=/data/data/com.termux/files/usr/lib/libomp.so && export LD_LIBRARY_PATH=/data/data/com.termux/files/home/BitNet_ms/3rdparty/llama.cpp/build/bin:/data/data/com.termux/files/home/ameva-compute/build-audit:$LD_LIBRARY_PATH && cd /data/data/com.termux/files/home/ameva-compute/build-audit && ./test_amuda_ggml_backend
-WORKTREE_HEAD_COMMIT: 8fb6acbead15c7fee666f7570961019639dcb891
-LOCAL_SOURCE_MANIFEST_SHA256: af61c6bf588a8a5f3a8bffe81d2f5ec0b271483a9044de298f2ba75edd38f32b
-REMOTE_SOURCE_MANIFEST_SHA256: af61c6bf588a8a5f3a8bffe81d2f5ec0b271483a9044de298f2ba75edd38f32b
+COMMAND: export LD_PRELOAD=/data/data/com.termux/files/usr/lib/libomp.so
+export LD_LIBRARY_PATH=/data/data/com.termux/files/home/BitNet_ms/3rdparty/llama.cpp/build/bin:/data/data/com.termux/files/home/ameva-compute/build-audit:$LD_LIBRARY_PATH
+cd /data/data/com.termux/files/home/ameva-compute/build-audit && ./test_amuda_ggml_backend
+WORKTREE_HEAD_COMMIT: abfb159a132e3d55f6f78c6c0392e3aa1fa2a7a8
+LOCAL_SOURCE_MANIFEST_SHA256: 98a7fc1f6e112cab1f7f575ad7c9ba00f747b30b586e943f235585e4045584a1
+REMOTE_SOURCE_MANIFEST_SHA256: 98a7fc1f6e112cab1f7f575ad7c9ba00f747b30b586e943f235585e4045584a1
 SOURCE_MANIFEST_MATCH: true
-BINARY_SOURCE_COMMIT: 8fb6acbead15c7fee666f7570961019639dcb891
+BINARY_SOURCE_COMMIT: abfb159a132e3d55f6f78c6c0392e3aa1fa2a7a8
 SOURCE_BINARY_CORRESPONDENCE: ESTABLISHED
-BINARY_SHA256: 1a4d5bf54a3e4d0e0af9c7f7683b4276344a29cfcbc02540adfb2c66d6fe5a0d
+LLAMA_CLI_SHA256: 19437ccb66561c56a39e3d8663ce5453aa354797c8fb6060f938516d850d93ab
+LIBGGML_AMEVA_SHA256: ee893eee15d1dc9fffd8224dba248ffa1ac6e8f00f04eb3f61128ef75e773cb3
+LIBGGML_BASE_SHA256: 12a07f532c39672461030504b0afc91a4a35c2069ab816a41abf0c7ac04b4a2b
+LIBGGML_CPU_SHA256: 51c2144030963eae66bd742e5656adb64c2a5674ac41fc8c16cad14ede18d9d8
 MODEL_SHA256: 74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db
-START_TIMESTAMP: 2026-09-11T05:31:45.711469+00:00
-END_TIMESTAMP: 2026-09-11T05:31:46.061419+00:00
+START_TIMESTAMP: 2026-09-11T07:57:11.845763+00:00
+END_TIMESTAMP: 2026-09-11T07:57:12.158839+00:00
 PROCESS_EXIT_CODE: 0
 =======================================================================
 [STDOUT]
@@ -20,12 +25,12 @@ PROCESS_EXIT_CODE: 0
 
 --- PART 1: Backend Registration & Buffer Smoke Test ---
 AMEVA_GGML_BACKEND_REGISTERED=true
-AMEVA_BUILD_COMMIT=8fb6acbead15c7fee666f7570961019639dcb891
+AMEVA_BUILD_COMMIT=abfb159a132e3d55f6f78c6c0392e3aa1fa2a7a8
 AMEVA_BACKEND_DEVICE_COUNT=1
 AMEVA_BACKEND_NAME=AMEVA
 AMEVA_DEVICE_NAME=AMEVA0
-AMEVA_MEMORY_QUERY_FREE=0
-AMEVA_MEMORY_QUERY_TOTAL=0
+AMEVA_MEMORY_QUERY_FREE=4294967296
+AMEVA_MEMORY_QUERY_TOTAL=17179869184
 AMEVA_MAX_BUFFER_SIZE=536870912
 AMEVA_BUFFER_ALLOC=PASS
 AMEVA_TENSOR_SET=PASS
@@ -61,9 +66,9 @@ BLOCK_Q5_0_SIZE=22
 BLOCK_Q5_0_ALIGNMENT=2
 ROW_SIZE_MATCH=true
 UPSTREAM_DEQUANT_SYMBOL_RESOLVED=true
-UPSTREAM_DEQUANT_SYMBOL_ADDRESS=0x72d0ee4160
+UPSTREAM_DEQUANT_SYMBOL_ADDRESS=0x74f3519160
 UPSTREAM_DEQUANT_SYMBOL_LIBRARY=/data/data/com.termux/files/home/BitNet_ms/3rdparty/llama.cpp/build/bin/libggml-base.so.0.15.3
-CANDIDATE_DEQUANT_SYMBOL_ADDRESS=0x72d395a7a8
+CANDIDATE_DEQUANT_SYMBOL_ADDRESS=0x74f6ee0198
 REFERENCE_CANDIDATE_FUNCTION_POINTER_DIFFERENT=true
 DEQUANT_KAT_ZERO: max_diff=0.000000e+00, mismatches=0 (PASS)
 DEQUANT_KAT_MAX_POS: max_diff=0.000000e+00, mismatches=0 (PASS)
@@ -145,16 +150,54 @@ FAILURE_LIFECYCLE_GATES=10/10
 PROCESS_EXIT_CODE=0
 
 [STDERR]
+ggml-ameva [GRAPH_COMPUTE]: entering graph_compute n_nodes=1
 ggml-ameva [FAILURE_INJECTION]: MAP_SRC0_FAIL triggered
+ggml-ameva [GRAPH_COMPUTE]: entering graph_compute n_nodes=1
 ggml-ameva [FAILURE_INJECTION]: MAP_SRC1_FAIL triggered
+ggml-ameva [GRAPH_COMPUTE]: entering graph_compute n_nodes=1
 ggml-ameva [FAILURE_INJECTION]: MAP_DST_FAIL triggered
+ggml-ameva [GRAPH_COMPUTE]: entering graph_compute n_nodes=1
 ggml-ameva [FAILURE_INJECTION]: FLUSH_SRC0_FAIL triggered
+ggml-ameva [GRAPH_COMPUTE]: entering graph_compute n_nodes=1
 ggml-ameva [FAILURE_INJECTION]: FLUSH_SRC1_FAIL triggered
+ggml-ameva [GRAPH_COMPUTE]: entering graph_compute n_nodes=1
 ggml-ameva [FAILURE_INJECTION]: DISPATCH_FAIL triggered
+ggml-ameva [GRAPH_COMPUTE]: entering graph_compute n_nodes=1
 ggml-ameva: event wait failed with code -405 (FAIL-FAST)
+ggml-ameva [GRAPH_COMPUTE]: entering graph_compute n_nodes=1
 ggml-ameva [FAILURE_INJECTION]: INVALIDATE_DST_FAIL triggered
+ggml-ameva [GRAPH_COMPUTE]: entering graph_compute n_nodes=1
 ggml-ameva [FAILURE_INJECTION]: OFFSET_OVERFLOW triggered
+ggml-ameva [GRAPH_COMPUTE]: entering graph_compute n_nodes=1
 ggml-ameva [FAILURE_INJECTION]: TENSOR_RANGE_OOB triggered
+ggml-ameva [SUPPORTS_QUERY #1]: op='unnamed' src0='unnamed' (type=0 ne=[41,29,1,1]) src1='unnamed' (type=0 ne=[41,37,1,1]) dst (type=0 ne=[29,37,1,1])
+ggml-ameva [ACCEPT]: node='unnamed' (src0='unnamed', src1='unnamed') accepted for AMEVA!
+ggml-ameva [GRAPH_COMPUTE]: entering graph_compute n_nodes=1
+ggml-ameva [SUPPORTS_QUERY #2]: op='unnamed' src0='unnamed' (type=6 ne=[896,896,1,1]) src1='unnamed' (type=0 ne=[896,1,1,1]) dst (type=0 ne=[896,1,1,1])
+ggml-ameva [ACCEPT]: node='unnamed' (src0='unnamed', src1='unnamed') accepted for AMEVA!
+ggml-ameva [GRAPH_COMPUTE]: entering graph_compute n_nodes=1
+ggml-ameva [GRAPH_COMPUTE]: entering graph_compute n_nodes=1
+ggml-ameva [GRAPH_COMPUTE]: entering graph_compute n_nodes=1
+ggml-ameva [GRAPH_COMPUTE]: entering graph_compute n_nodes=1
+ggml-ameva [GRAPH_COMPUTE]: entering graph_compute n_nodes=1
 ggml-ameva [FAILURE_INJECTION]: DISPATCH_FAIL triggered
+
+======================================================================
+  AMEVA GGML Dynamic Backend E2E Execution Summary
+======================================================================
+AMEVA_PLUGIN_LOADED=true
+AMEVA_BACKEND_SELECTED=true
+LLAMA_SCHEDULER_AMEVA_NODE_COUNT=6
+REAL_RUNTIME_ACTIVATION_CAPTURED=true
+Q5_0_CPU_DEQUANT_COUNT=1
+F32_GPU_SGEMM_DISPATCH_COUNT=5
+QWEN_AMEVA_DISPATCH_COUNT=5
+DISPATCH_ATTEMPT_COUNT=6
+DISPATCH_SUCCESS_COUNT=5
+AMEVA_GPU_OP_COUNT=5
+CPU_FALLBACK_COUNT=0
+SILENT_FALLBACK_COUNT=0
+======================================================================
+
 
 =======================================================================
