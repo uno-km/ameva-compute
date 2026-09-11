@@ -1,13 +1,16 @@
 =======================================================================
 DEVICE: S25
 COMMAND: export LD_PRELOAD=/data/data/com.termux/files/usr/lib/libomp.so && export LD_LIBRARY_PATH=/data/data/com.termux/files/home/BitNet_ms/3rdparty/llama.cpp/build/bin:/data/data/com.termux/files/home/ameva-compute/build-audit:$LD_LIBRARY_PATH && export GGML_BACKEND_PATH=/data/data/com.termux/files/home/ameva-compute/build-audit/libggml-ameva.so && /data/data/com.termux/files/home/BitNet_ms/3rdparty/llama.cpp/build/bin/llama-cli --list-devices
-WORKTREE_HEAD_COMMIT: bcbf3d1a7a47179e279f1085702dcbd1908b877d
-BINARY_SOURCE_COMMIT: UNKNOWN
-SOURCE_BINARY_CORRESPONDENCE: NOT_ESTABLISHED
+WORKTREE_HEAD_COMMIT: 8fb6acbead15c7fee666f7570961019639dcb891
+LOCAL_SOURCE_MANIFEST_SHA256: af61c6bf588a8a5f3a8bffe81d2f5ec0b271483a9044de298f2ba75edd38f32b
+REMOTE_SOURCE_MANIFEST_SHA256: af61c6bf588a8a5f3a8bffe81d2f5ec0b271483a9044de298f2ba75edd38f32b
+SOURCE_MANIFEST_MATCH: true
+BINARY_SOURCE_COMMIT: 8fb6acbead15c7fee666f7570961019639dcb891
+SOURCE_BINARY_CORRESPONDENCE: ESTABLISHED
 BINARY_SHA256: 19437ccb66561c56a39e3d8663ce5453aa354797c8fb6060f938516d850d93ab
 MODEL_SHA256: N/A
-START_TIMESTAMP: 2026-09-11T05:11:43.415905+00:00
-END_TIMESTAMP: 2026-09-11T05:11:44.002320+00:00
+START_TIMESTAMP: 2026-09-11T05:31:47.281046+00:00
+END_TIMESTAMP: 2026-09-11T05:31:47.471119+00:00
 PROCESS_EXIT_CODE: 0
 =======================================================================
 [STDOUT]
