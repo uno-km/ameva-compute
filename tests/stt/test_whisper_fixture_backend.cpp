@@ -324,18 +324,22 @@ int main() {
 
     for (int i = 0; i < 6; ++i) {
         setenv("AMEVA_BACKEND_FAIL_STAGE", fail_stages[i], 1);
-        ameva_backend_reset_counters();
+        AmevaBackendCounters c_before = {};
+        ameva_backend_get_counters(&c_before);
 
         // Fill destination with canary pattern
         memset(dst->data, CANARY_VAL, expected_out_bytes);
 
         enum ggml_status fail_stat = ggml_backend_graph_compute(backend, gf);
-        AmevaBackendCounters c_fail = {};
-        ameva_backend_get_counters(&c_fail);
+        AmevaBackendCounters c_after = {};
+        ameva_backend_get_counters(&c_after);
+
+        uint64_t fail_delta = c_after.ameva_dispatch_failure_count - c_before.ameva_dispatch_failure_count;
+        uint64_t op_delta   = c_after.ameva_gpu_op_count - c_before.ameva_gpu_op_count;
 
         bool stage_ok = (fail_stat == GGML_STATUS_FAILED &&
-                         c_fail.ameva_gpu_op_count == 0 &&
-                         c_fail.ameva_dispatch_failure_count == 1);
+                         op_delta == 0 &&
+                         fail_delta == 1);
         if (stage_ok) fail_stage_passed++;
 
         // Canary check: destination tensor MUST retain canary pattern completely untouched
@@ -349,10 +353,10 @@ int main() {
         }
         if (canary_intact) dst_canary_passed++;
 
-        printf("FAIL_STAGE_%s: %s (status=%d, gpu_op=%llu, fail=%llu, canary=%s)\n",
+        printf("FAIL_STAGE_%s: %s (status=%d, gpu_op_delta=%llu, fail_delta=%llu, canary=%s)\n",
                fail_stages[i], stage_ok ? "PASS" : "FAIL", (int)fail_stat,
-               (unsigned long long)c_fail.ameva_gpu_op_count,
-               (unsigned long long)c_fail.ameva_dispatch_failure_count,
+               (unsigned long long)op_delta,
+               (unsigned long long)fail_delta,
                canary_intact ? "INTACT" : "CORRUPTED");
     }
     unsetenv("AMEVA_BACKEND_FAIL_STAGE");
