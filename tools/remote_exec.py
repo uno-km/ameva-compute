@@ -125,4 +125,9 @@ if __name__ == "__main__":
     cmd = sys.argv[4]
     dev = sys.argv[5] if len(sys.argv) > 5 else "GenericDevice"
     out = sys.argv[6] if len(sys.argv) > 6 else None
-    execute_remote(h, u, p, cmd, dev, out)
+    res = execute_remote(h, u, p, cmd, dev, out)
+    if not out:
+        sys.stdout.write(res["stdout"])
+        if res["stderr"]:
+            sys.stderr.write(res["stderr"])
+
