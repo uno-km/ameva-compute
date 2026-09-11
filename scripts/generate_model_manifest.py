@@ -1,0 +1,38 @@
+import hashlib
+import os
+
+manifest_content = """# AMEVA COMPUTE - TTS MODEL BUNDLE MANIFEST
+ORIGINAL_MODEL_BUNDLE=vits-piper-en_US-lessac-high-fp16
+PATCHED_MODEL_BUNDLE=vits-piper-en_US-lessac-high-fp16-patched-ameva-lexicon-v1
+
+# FILE CHECKSUMS (SHA-256)
+LEXICON_SHA256_BEFORE=079f8deb3b2b1356d56b3d5411ca6f3bed65387b04994a1b4fec2ec4635af267
+LEXICON_SHA256_AFTER=a5e1d6eddd443c76a86b19f8be92fc6b980456201b1392f8851b75c03dd579c8
+CONFIG_SHA256=cfca12129d745285afbb6b22335d1a3471a00f1c114f4348a62ca24f3bf1c3f7
+TOKENS_SHA256=e8a50ae0c75612d18cfcf3f90800dca79f961e3ed97f9574f3535194469187fd
+
+# MODEL BINARIES (SHA-256)
+DECODER_BIN_SHA256=4b2bbdbd79f9cf90ba4a4850eb14ab2ffc683c73e1f72db9ff4fb0bffada850d
+DECODER_PARAM_SHA256=04d903f56260bd65677d3141e37a9589352f9a83690f7173aca9290a0d24536b
+ENCODER_BIN_SHA256=488d0825fe01368f7178ba772f48d4214a70768a2e8ae138bb799553b96dfc62
+ENCODER_PARAM_SHA256=bb834ee1ed7b5babd1ab839ef789e197269b13b252b41ae89eb61d9af9f6b63a
+DP_BIN_SHA256=c1519e3f6507c640e9abe31b7bbcd2dd892763714df478586b712b69972f2bb5
+DP_PARAM_SHA256=12a5a766af69e6782af102a4dd7621feb447f7e07f4d015219de7509941c94bc
+FLOW_BIN_SHA256=66884c6907e80d9d2b7ef993b1f98a63c61b1076f6ec6901fd13bfedbe1f7b0b
+FLOW_PARAM_SHA256=48f5532b507c8040eefd3ed8fa85887dac761a78b780a77b28f8e489eed4a753
+"""
+
+# Calculate SHA256 of the manifest content itself (normalized LF)
+normalized = manifest_content.strip().replace("\r\n", "\n") + "\n"
+manifest_sha256 = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+full_doc = normalized + f"\nPATCHED_MODEL_BUNDLE_MANIFEST_SHA256={manifest_sha256}\n"
+
+out_path = r"c:\Users\GAME\Desktop\uno-km\dev\ameva-compute-tts\docs\evidence\patched_model_bundle_manifest.txt"
+with open(out_path, "w", encoding="utf-8", newline="\n") as f:
+    f.write(full_doc)
+
+print("Generated manifest at:", out_path)
+print("PATCHED_MODEL_BUNDLE_MANIFEST_SHA256:", manifest_sha256)
+print("\n--- MANIFEST CONTENT ---")
+print(full_doc)
