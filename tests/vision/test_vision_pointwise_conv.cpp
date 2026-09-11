@@ -456,8 +456,7 @@ int main(void) {
     printf("MUTATED_NUMERICAL_PARITY=FAIL_EXPECTED\n");
     printf("SPIRV_DATAFLOW_SENSITIVITY=%s\n\n", (hash_changed && delta_match) ? "PASS" : "FAIL");
 
-    AcResult mut_dres = track_kernel_destroy(mutated_kernel);
-    printf("DEBUG: mutated_kernel destroy res=%d, total_destroyed=%u\n\n", mut_dres, g_life.kernel_destroyed);
+    track_kernel_destroy(mutated_kernel);
 
     // -------------------------------------------------------------------------
     // Gate 5: Corrupted SPIR-V & Forced Failure
@@ -647,11 +646,12 @@ int main(void) {
 
         track_context_create(&cdesc, &rb_ctx);
         AcKernel* rb_k = nullptr;
-        ac_vision_pointwise_conv_kernel_create(rb_ctx, kPointwiseConvSpv, kPointwiseConvSpvByteSize, nullptr, &rb_k);
-        g_life.kernel_created++;
-        // FAIL_AFTER_KERNEL_CREATE rollback
-        AcResult rb_res = track_kernel_destroy(rb_k);
-        printf("DEBUG: rb_k destroy res=%d, total_destroyed=%u\n", rb_res, g_life.kernel_destroyed);
+        AcResult kres = ac_vision_pointwise_conv_kernel_create(rb_ctx, kPointwiseConvSpv, kPointwiseConvSpvByteSize, kPointwiseConvSpvSha256, &rb_k);
+        if (kres == AC_SUCCESS && rb_k) {
+            g_life.kernel_created++;
+            // FAIL_AFTER_KERNEL_CREATE rollback
+            track_kernel_destroy(rb_k);
+        }
         track_context_destroy(rb_ctx);
     }
 
@@ -660,8 +660,7 @@ int main(void) {
     track_buffer_destroy(buf_w);
     track_buffer_destroy(buf_b);
     track_buffer_destroy(buf_out);
-    AcResult nk_res = track_kernel_destroy(normal_kernel);
-    printf("DEBUG: normal_kernel destroy res=%d, total_destroyed=%u\n", nk_res, g_life.kernel_destroyed);
+    track_kernel_destroy(normal_kernel);
     track_context_destroy(ctx);
 
     bool lifecycle_balanced = g_life.is_balanced();

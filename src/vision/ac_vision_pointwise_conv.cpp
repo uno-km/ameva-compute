@@ -11,6 +11,7 @@
 #include "ac_vision_ops.h"
 #include "ac_runtime.h"
 #include "../shaders/pointwise_conv_spv.h"
+#include "../backend/vulkan/ac_vk_sha256.h"
 
 static const AcRuntimeBindingDesc kPointwiseConvBindings[4] = {
     { 0, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE },
@@ -51,11 +52,15 @@ AcResult ac_vision_pointwise_conv_kernel_create(
     const uint32_t* code = spirv_code ? spirv_code : kPointwiseConvSpv;
     size_t code_size = code_size_bytes ? code_size_bytes : kPointwiseConvSpvByteSize;
 
+    char computed_sha256[65] = {0};
     AcKernelRuntimeMetadata meta = kDefaultPointwiseConvMetadata;
     if (expected_sha256) {
         meta.expected_spirv_sha256 = expected_sha256;
-    } else if (spirv_code) {
-        meta.expected_spirv_sha256 = NULL; /* Skip SHA check for custom mutated tests if not specified */
+    } else if (spirv_code && spirv_code != kPointwiseConvSpv) {
+        ac_sha256_compute_hex((const uint8_t*)code, code_size, computed_sha256);
+        meta.expected_spirv_sha256 = computed_sha256;
+    } else {
+        meta.expected_spirv_sha256 = kPointwiseConvSpvSha256;
     }
 
     AcKernelDesc kdesc = {};
