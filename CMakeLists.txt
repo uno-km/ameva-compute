@@ -225,6 +225,25 @@ target_link_libraries(test_amuda_ggml_backend
 if(UNIX AND NOT APPLE)
     target_link_libraries(test_amuda_ggml_backend vulkan dl m pthread)
 endif()
+add_library(ggml-ameva SHARED
+    ${AMEVA_GGML_SOURCES}
+)
+target_include_directories(ggml-ameva PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/adapters/llama/ggml-ameva
+    ${LLAMA_CPP_DIR}/ggml/include
+    ${LLAMA_CPP_DIR}/ggml/src
+)
+target_link_directories(ggml-ameva PRIVATE
+    ${LLAMA_CPP_DIR}/build/bin
+)
+target_link_libraries(ggml-ameva
+    ac_vulkan_core
+    ggml
+    ggml-base
+    ggml-cpu
+)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(ggml-ameva vulkan dl m pthread)
+endif()
 add_test(NAME amuda_ggml_backend COMMAND test_amuda_ggml_backend)
-
-

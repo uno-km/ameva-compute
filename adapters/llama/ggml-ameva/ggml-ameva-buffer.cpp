@@ -40,32 +40,80 @@ static enum ggml_status ggml_backend_ameva_buffer_init_tensor(ggml_backend_buffe
 }
 
 static void ggml_backend_ameva_buffer_memset_tensor(ggml_backend_buffer_t buffer, struct ggml_tensor* tensor, uint8_t value, size_t offset, size_t size) {
+    if (!buffer || !buffer->context || !tensor || !tensor->data) {
+        return;
+    }
+    size_t tensor_nbytes = ggml_nbytes(tensor);
+    if (offset > tensor_nbytes || size > tensor_nbytes - offset) {
+        fprintf(stderr, "ggml-ameva-buffer: memset_tensor range violation (offset=%zu, size=%zu, tensor=%zu)\n",
+                offset, size, tensor_nbytes);
+        return;
+    }
     auto* ctx = (ggml_backend_ameva_buffer_context*)buffer->context;
     char* dst = (char*)tensor->data + offset;
+    if (dst < (char*)ctx->mapped_ptr || (size_t)(dst - (char*)ctx->mapped_ptr) > ctx->size || size > ctx->size - (size_t)(dst - (char*)ctx->mapped_ptr)) {
+        fprintf(stderr, "ggml-ameva-buffer: memset_tensor buffer limit violation\n");
+        return;
+    }
     memset(dst, value, size);
     size_t byte_offset = (size_t)(dst - (char*)ctx->mapped_ptr);
-    ac_runtime_buffer_flush(ctx->ac_buf, byte_offset, size);
+    AcResult fres = ac_runtime_buffer_flush(ctx->ac_buf, byte_offset, size);
+    if (fres != AC_SUCCESS) {
+        fprintf(stderr, "ggml-ameva-buffer: flush failed in memset_tensor (code %d)\n", fres);
+    }
 }
 
 static void ggml_backend_ameva_buffer_set_tensor(ggml_backend_buffer_t buffer, struct ggml_tensor* tensor, const void* data, size_t offset, size_t size) {
+    if (!buffer || !buffer->context || !tensor || !tensor->data || !data) {
+        return;
+    }
+    size_t tensor_nbytes = ggml_nbytes(tensor);
+    if (offset > tensor_nbytes || size > tensor_nbytes - offset) {
+        fprintf(stderr, "ggml-ameva-buffer: set_tensor range violation (offset=%zu, size=%zu, tensor=%zu)\n",
+                offset, size, tensor_nbytes);
+        return;
+    }
     auto* ctx = (ggml_backend_ameva_buffer_context*)buffer->context;
     char* dst = (char*)tensor->data + offset;
+    if (dst < (char*)ctx->mapped_ptr || (size_t)(dst - (char*)ctx->mapped_ptr) > ctx->size || size > ctx->size - (size_t)(dst - (char*)ctx->mapped_ptr)) {
+        fprintf(stderr, "ggml-ameva-buffer: set_tensor buffer limit violation\n");
+        return;
+    }
     memcpy(dst, data, size);
     size_t byte_offset = (size_t)(dst - (char*)ctx->mapped_ptr);
-    ac_runtime_buffer_flush(ctx->ac_buf, byte_offset, size);
+    AcResult fres = ac_runtime_buffer_flush(ctx->ac_buf, byte_offset, size);
+    if (fres != AC_SUCCESS) {
+        fprintf(stderr, "ggml-ameva-buffer: flush failed in set_tensor (code %d)\n", fres);
+    }
 }
 
 static void ggml_backend_ameva_buffer_get_tensor(ggml_backend_buffer_t buffer, const struct ggml_tensor* tensor, void* data, size_t offset, size_t size) {
+    if (!buffer || !buffer->context || !tensor || !tensor->data || !data) {
+        return;
+    }
+    size_t tensor_nbytes = ggml_nbytes(tensor);
+    if (offset > tensor_nbytes || size > tensor_nbytes - offset) {
+        fprintf(stderr, "ggml-ameva-buffer: get_tensor range violation (offset=%zu, size=%zu, tensor=%zu)\n",
+                offset, size, tensor_nbytes);
+        return;
+    }
     auto* ctx = (ggml_backend_ameva_buffer_context*)buffer->context;
     const char* src = (const char*)tensor->data + offset;
+    if (src < (const char*)ctx->mapped_ptr || (size_t)(src - (const char*)ctx->mapped_ptr) > ctx->size || size > ctx->size - (size_t)(src - (const char*)ctx->mapped_ptr)) {
+        fprintf(stderr, "ggml-ameva-buffer: get_tensor buffer limit violation\n");
+        return;
+    }
     size_t byte_offset = (size_t)(src - (const char*)ctx->mapped_ptr);
-    ac_runtime_buffer_invalidate(ctx->ac_buf, byte_offset, size);
+    AcResult ires = ac_runtime_buffer_invalidate(ctx->ac_buf, byte_offset, size);
+    if (ires != AC_SUCCESS) {
+        fprintf(stderr, "ggml-ameva-buffer: invalidate failed in get_tensor (code %d)\n", ires);
+    }
     memcpy(data, src, size);
 }
 
 static bool ggml_backend_ameva_buffer_cpy_tensor(ggml_backend_buffer_t buffer, const struct ggml_tensor* src, struct ggml_tensor* dst) {
     (void)buffer;
-    if (src->data && dst->data) {
+    if (src && dst && src->data && dst->data) {
         ggml_backend_tensor_set(dst, src->data, 0, ggml_nbytes(src));
         return true;
     }
@@ -73,6 +121,7 @@ static bool ggml_backend_ameva_buffer_cpy_tensor(ggml_backend_buffer_t buffer, c
 }
 
 static void ggml_backend_ameva_buffer_clear(ggml_backend_buffer_t buffer, uint8_t value) {
+    if (!buffer || !buffer->context) return;
     auto* ctx = (ggml_backend_ameva_buffer_context*)buffer->context;
     memset(ctx->mapped_ptr, value, buffer->size);
     ac_runtime_buffer_flush(ctx->ac_buf, 0, buffer->size);
@@ -141,7 +190,8 @@ static size_t ggml_backend_ameva_buffer_type_get_alignment(ggml_backend_buffer_t
 
 static size_t ggml_backend_ameva_buffer_type_get_max_size(ggml_backend_buffer_type_t buft) {
     (void)buft;
-    return SIZE_MAX;
+    // Realistic maximum contiguous buffer size on mobile Vulkan (512 MiB)
+    return 512ULL * 1024 * 1024;
 }
 
 static size_t ggml_backend_ameva_buffer_type_get_alloc_size(ggml_backend_buffer_type_t buft, const struct ggml_tensor* tensor) {

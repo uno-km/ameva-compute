@@ -9,8 +9,20 @@
 #include <atomic>
 
 // Diagnostics Counters
+static std::atomic<int64_t> g_ameva_supports_query_count{0};
 static std::atomic<int64_t> g_ameva_supported_op_count{0};
 static std::atomic<int64_t> g_ameva_gpu_op_count{0};
+static std::atomic<int64_t> g_ameva_q5_0_cpu_dequant_count{0};
+static std::atomic<int64_t> g_ameva_f32_gpu_sgemm_dispatch_count{0};
+static std::atomic<int64_t> g_ameva_context_create_count{0};
+static std::atomic<int64_t> g_ameva_context_destroy_count{0};
+static std::atomic<int64_t> g_ameva_kernel_create_count{0};
+static std::atomic<int64_t> g_ameva_kernel_destroy_count{0};
+static std::atomic<int>     g_ameva_failure_injection{0};
+
+int64_t ggml_backend_ameva_get_supports_query_count(void) {
+    return g_ameva_supports_query_count.load();
+}
 
 int64_t ggml_backend_ameva_get_supported_op_count(void) {
     return g_ameva_supported_op_count.load();
@@ -20,13 +32,72 @@ int64_t ggml_backend_ameva_get_gpu_op_count(void) {
     return g_ameva_gpu_op_count.load();
 }
 
+int64_t ggml_backend_ameva_get_q5_0_cpu_dequant_count(void) {
+    return g_ameva_q5_0_cpu_dequant_count.load();
+}
+
+int64_t ggml_backend_ameva_get_f32_gpu_sgemm_dispatch_count(void) {
+    return g_ameva_f32_gpu_sgemm_dispatch_count.load();
+}
+
+int64_t ggml_backend_ameva_get_context_create_count(void) {
+    return g_ameva_context_create_count.load();
+}
+
+int64_t ggml_backend_ameva_get_context_destroy_count(void) {
+    return g_ameva_context_destroy_count.load();
+}
+
+int64_t ggml_backend_ameva_get_kernel_create_count(void) {
+    return g_ameva_kernel_create_count.load();
+}
+
+int64_t ggml_backend_ameva_get_kernel_destroy_count(void) {
+    return g_ameva_kernel_destroy_count.load();
+}
+
 void ggml_backend_ameva_reset_counters(void) {
+    g_ameva_supports_query_count.store(0);
     g_ameva_supported_op_count.store(0);
     g_ameva_gpu_op_count.store(0);
+    g_ameva_q5_0_cpu_dequant_count.store(0);
+    g_ameva_f32_gpu_sgemm_dispatch_count.store(0);
 }
 
 void ameva_increment_gpu_op_count(void) {
     g_ameva_gpu_op_count.fetch_add(1);
+}
+
+void ameva_increment_q5_0_cpu_dequant_count(void) {
+    g_ameva_q5_0_cpu_dequant_count.fetch_add(1);
+}
+
+void ameva_increment_f32_gpu_sgemm_dispatch_count(void) {
+    g_ameva_f32_gpu_sgemm_dispatch_count.fetch_add(1);
+}
+
+void ameva_increment_context_create_count(void) {
+    g_ameva_context_create_count.fetch_add(1);
+}
+
+void ameva_increment_context_destroy_count(void) {
+    g_ameva_context_destroy_count.fetch_add(1);
+}
+
+void ameva_increment_kernel_create_count(void) {
+    g_ameva_kernel_create_count.fetch_add(1);
+}
+
+void ameva_increment_kernel_destroy_count(void) {
+    g_ameva_kernel_destroy_count.fetch_add(1);
+}
+
+void ggml_backend_ameva_set_failure_injection(AmevaFailureInjectionPoint point) {
+    g_ameva_failure_injection.store((int)point);
+}
+
+AmevaFailureInjectionPoint ggml_backend_ameva_get_failure_injection(void) {
+    return (AmevaFailureInjectionPoint)g_ameva_failure_injection.load();
 }
 
 static const char* ggml_backend_ameva_device_get_name(ggml_backend_dev_t dev) {
@@ -41,8 +112,9 @@ static const char* ggml_backend_ameva_device_get_description(ggml_backend_dev_t 
 
 static void ggml_backend_ameva_device_get_memory(ggml_backend_dev_t dev, size_t* free, size_t* total) {
     (void)dev;
-    if (free)  *free  = (size_t)3 * 1024 * 1024 * 1024ULL;
-    if (total) *total = (size_t)4 * 1024 * 1024 * 1024ULL;
+    // Direct physical VRAM memory querying is unsupported without platform-specific extensions
+    if (free)  *free  = 0;
+    if (total) *total = 0;
 }
 
 static enum ggml_backend_dev_type ggml_backend_ameva_device_get_type(ggml_backend_dev_t dev) {
@@ -73,9 +145,10 @@ static ggml_backend_buffer_type_t ggml_backend_ameva_device_get_buffer_type(ggml
     return ggml_backend_ameva_buffer_type(0);
 }
 
-// STRICT CONTRACT: Only approved single combination returns true
+// STRICT CONTRACT: Supports F32xF32->F32 and Q5_0xF32->F32 2D contiguous non-batched MatMul
 static bool ggml_backend_ameva_device_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor* op) {
     (void)dev;
+    g_ameva_supports_query_count.fetch_add(1);
     if (!op) return false;
 
     // 1. Must be GGML_OP_MUL_MAT
@@ -89,8 +162,14 @@ static bool ggml_backend_ameva_device_supports_op(ggml_backend_dev_t dev, const 
         return false;
     }
 
-    // 2. Strict DTYPE check: SRC0 = F32, SRC1 = F32, DST = F32
-    if (src0->type != GGML_TYPE_F32 || src1->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32) {
+    // 2. Strict DTYPE check:
+    // Supported:
+    // (SRC0 = F32, SRC1 = F32, DST = F32)
+    // (SRC0 = Q5_0, SRC1 = F32, DST = F32)
+    if (op->type != GGML_TYPE_F32 || src1->type != GGML_TYPE_F32) {
+        return false;
+    }
+    if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_Q5_0) {
         return false;
     }
 
@@ -106,8 +185,30 @@ static bool ggml_backend_ameva_device_supports_op(ggml_backend_dev_t dev, const 
         return false;
     }
 
-    // 5. TRANSPOSE_SUPPORTED = false (standard 2D layout where inner dim matches)
+    // 5. Inner dimension match: K dimension must match
     if (src0->ne[0] != src1->ne[0]) {
+        return false;
+    }
+
+    int64_t K = src0->ne[0];
+    int64_t N = src0->ne[1];
+
+    // 6. Q5_0 alignment and shape contract checks
+    if (src0->type == GGML_TYPE_Q5_0) {
+        if (K % 32 != 0) {
+            return false;
+        }
+        size_t expected_q5_row_bytes = (size_t)(K / 32) * 22;
+        if (ggml_row_size(src0->type, K) != expected_q5_row_bytes) {
+            return false;
+        }
+    }
+
+    // 7. F32 row bytes check
+    if (ggml_row_size(src1->type, K) != (size_t)K * sizeof(float)) {
+        return false;
+    }
+    if (ggml_row_size(op->type, N) != (size_t)N * sizeof(float)) {
         return false;
     }
 
