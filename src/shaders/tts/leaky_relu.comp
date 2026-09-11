@@ -1,0 +1,18 @@
+﻿#version 450
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer BufIn { float in_x[]; };
+layout(set = 0, binding = 1) writeonly buffer BufOut { float out_y[]; };
+
+layout(push_constant) uniform PushConsts {
+    uint n_elements;
+    float negative_slope;
+} pc;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid < pc.n_elements) {
+        float x = in_x[gid];
+        out_y[gid] = (x >= 0.0f) ? x : (x * pc.negative_slope);
+    }
+}

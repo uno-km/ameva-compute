@@ -164,3 +164,14 @@ target_link_libraries(test_phase4b_specialization ac_vulkan_core)
 if(UNIX AND NOT APPLE)
     target_link_libraries(test_phase4b_specialization vulkan dl m)
 endif()
+
+# =============================================================================
+# TTS Specialized Kernel Verifications
+# =============================================================================
+add_executable(test_ameva_leaky_relu tests/tts/test_ameva_leaky_relu.cpp)
+target_link_libraries(test_ameva_leaky_relu ac_vulkan_core)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_ameva_leaky_relu vulkan dl m)
+endif()
+add_test(NAME ameva_leaky_relu COMMAND test_ameva_leaky_relu)
+
