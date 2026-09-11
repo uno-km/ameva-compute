@@ -25,20 +25,19 @@
 static AmevaBackendCounters g_counters = {};
 static bool s_bounds_violation = false;
 
-// Geometry constants for target Whisper Tiny encoder projection
-static const uint32_t TARGET_M = 1500;
-static const uint32_t TARGET_N = 384;
-static const uint32_t TARGET_K = 384;
-
-static const size_t WEIGHT_BYTES = (size_t)TARGET_K * TARGET_N * sizeof(uint16_t); // 294,912
-static const size_t ACT_BYTES    = (size_t)TARGET_K * TARGET_M * sizeof(float);    // 2,304,000
-static const size_t OUT_BYTES    = (size_t)TARGET_N * TARGET_M * sizeof(float);    // 2,304,000
+// Dynamic hardware buffer capacity (sufficient for both Tiny and Turbo projections)
+static const size_t INITIAL_BUF_CAP = 32 * 1024 * 1024; // 32 MB
+static size_t s_buf_w_cap = 0;
+static size_t s_buf_a_cap = 0;
+static size_t s_buf_o_cap = 0;
 
 struct MatMulPushConstants {
     uint32_t M;
     uint32_t N;
     uint32_t K;
 };
+
+static bool ensure_buffer_capacity(AcVkBuffer ** buf, size_t * current_cap, size_t needed_size, VkBufferUsageFlags usage);
 
 // Hardware Vulkan resources
 static AcVkContext * s_vk_ctx = nullptr;
@@ -120,11 +119,12 @@ static bool init_hardware_pipeline() {
         fprintf(stderr, "[AMEVA_INIT_FAIL_INJECTION] Simulated failure at stage: buf_w\n");
         goto fail_buf_w;
     }
-    res = ac_vk_buffer_create(s_vk_ctx, WEIGHT_BYTES, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &s_buf_w);
+    res = ac_vk_buffer_create(s_vk_ctx, INITIAL_BUF_CAP, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &s_buf_w);
     if (res != AC_SUCCESS || !s_buf_w) {
         fprintf(stderr, "[AMEVA_BACKEND] FATAL: ac_vk_buffer_create(s_buf_w) failed with code %d\n", res);
         goto fail_buf_w;
     }
+    s_buf_w_cap = INITIAL_BUF_CAP;
     g_counters.buffer_create_count++;
 
     // Stage 4: Activation Buffer Allocation
@@ -132,11 +132,12 @@ static bool init_hardware_pipeline() {
         fprintf(stderr, "[AMEVA_INIT_FAIL_INJECTION] Simulated failure at stage: buf_a\n");
         goto fail_buf_a;
     }
-    res = ac_vk_buffer_create(s_vk_ctx, ACT_BYTES, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &s_buf_a);
+    res = ac_vk_buffer_create(s_vk_ctx, INITIAL_BUF_CAP, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &s_buf_a);
     if (res != AC_SUCCESS || !s_buf_a) {
         fprintf(stderr, "[AMEVA_BACKEND] FATAL: ac_vk_buffer_create(s_buf_a) failed with code %d\n", res);
         goto fail_buf_a;
     }
+    s_buf_a_cap = INITIAL_BUF_CAP;
     g_counters.buffer_create_count++;
 
     // Stage 5: Output Buffer Allocation
@@ -144,11 +145,12 @@ static bool init_hardware_pipeline() {
         fprintf(stderr, "[AMEVA_INIT_FAIL_INJECTION] Simulated failure at stage: buf_o\n");
         goto fail_buf_o;
     }
-    res = ac_vk_buffer_create(s_vk_ctx, OUT_BYTES, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &s_buf_o);
+    res = ac_vk_buffer_create(s_vk_ctx, INITIAL_BUF_CAP, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &s_buf_o);
     if (res != AC_SUCCESS || !s_buf_o) {
         fprintf(stderr, "[AMEVA_BACKEND] FATAL: ac_vk_buffer_create(s_buf_o) failed with code %d\n", res);
         goto fail_buf_o;
     }
+    s_buf_o_cap = INITIAL_BUF_CAP;
     g_counters.buffer_create_count++;
 
     return true;
@@ -157,12 +159,14 @@ fail_buf_o:
     if (s_buf_a) {
         ac_vk_buffer_destroy(s_buf_a);
         s_buf_a = nullptr;
+        s_buf_a_cap = 0;
         g_counters.buffer_destroy_count++;
     }
 fail_buf_a:
     if (s_buf_w) {
         ac_vk_buffer_destroy(s_buf_w);
         s_buf_w = nullptr;
+        s_buf_w_cap = 0;
         g_counters.buffer_destroy_count++;
     }
 fail_buf_w:
@@ -181,11 +185,32 @@ fail_context:
     return false;
 }
 
+static bool ensure_buffer_capacity(AcVkBuffer ** buf, size_t * current_cap, size_t needed_size, VkBufferUsageFlags usage) {
+    if (*buf && *current_cap >= needed_size) {
+        return true;
+    }
+    if (*buf) {
+        ac_vk_buffer_destroy(*buf);
+        *buf = nullptr;
+        *current_cap = 0;
+        g_counters.buffer_destroy_count++;
+    }
+    size_t new_cap = (needed_size < INITIAL_BUF_CAP) ? INITIAL_BUF_CAP : (needed_size * 2);
+    AcResult res = ac_vk_buffer_create(s_vk_ctx, new_cap, usage, buf);
+    if (res != AC_SUCCESS || !*buf) {
+        fprintf(stderr, "[AMEVA_BACKEND] FATAL: ac_vk_buffer_create failed for cap %zu with code %d\n", new_cap, res);
+        return false;
+    }
+    *current_cap = new_cap;
+    g_counters.buffer_create_count++;
+    return true;
+}
+
 void ameva_backend_teardown_hardware(void) {
     std::lock_guard<std::mutex> lock(s_hw_mutex);
-    if (s_buf_w) { ac_vk_buffer_destroy(s_buf_w); s_buf_w = nullptr; g_counters.buffer_destroy_count++; }
-    if (s_buf_a) { ac_vk_buffer_destroy(s_buf_a); s_buf_a = nullptr; g_counters.buffer_destroy_count++; }
-    if (s_buf_o) { ac_vk_buffer_destroy(s_buf_o); s_buf_o = nullptr; g_counters.buffer_destroy_count++; }
+    if (s_buf_w) { ac_vk_buffer_destroy(s_buf_w); s_buf_w = nullptr; s_buf_w_cap = 0; g_counters.buffer_destroy_count++; }
+    if (s_buf_a) { ac_vk_buffer_destroy(s_buf_a); s_buf_a = nullptr; s_buf_a_cap = 0; g_counters.buffer_destroy_count++; }
+    if (s_buf_o) { ac_vk_buffer_destroy(s_buf_o); s_buf_o = nullptr; s_buf_o_cap = 0; g_counters.buffer_destroy_count++; }
     if (s_vk_kernel) { ac_vk_kernel_destroy(s_vk_kernel); s_vk_kernel = nullptr; g_counters.kernel_destroy_count++; }
     if (s_vk_ctx) { ac_vk_context_destroy(s_vk_ctx); s_vk_ctx = nullptr; g_counters.context_destroy_count++; }
 }
@@ -227,6 +252,21 @@ static bool execute_vulkan_matmul(struct ggml_tensor * t, uint32_t graph_run_id,
         g_counters.unknown_graph_kind_count++;
     }
 
+    uint32_t K = (uint32_t)t->src[0]->ne[0];
+    uint32_t N = (uint32_t)t->src[0]->ne[1];
+    uint32_t M = (uint32_t)t->src[1]->ne[1];
+
+    size_t weight_bytes = ggml_nbytes(t->src[0]);
+    size_t act_bytes    = ggml_nbytes(t->src[1]);
+    size_t out_bytes    = ggml_nbytes(t);
+
+    if (!ensure_buffer_capacity(&s_buf_w, &s_buf_w_cap, weight_bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) ||
+        !ensure_buffer_capacity(&s_buf_a, &s_buf_a_cap, act_bytes,    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) ||
+        !ensure_buffer_capacity(&s_buf_o, &s_buf_o_cap, out_bytes,    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)) {
+        fprintf(stderr, "[AMEVA_BACKEND] FATAL: Buffer capacity expansion failed\n");
+        return false;
+    }
+
     // 1. Upload input weights using ac_vk_buffer_map and flush
     void * w_ptr = nullptr;
     AcResult res = ac_vk_buffer_map(s_buf_w, &w_ptr);
@@ -235,9 +275,9 @@ static bool execute_vulkan_matmul(struct ggml_tensor * t, uint32_t graph_run_id,
         return false;
     }
     if (t->src[0]->buffer) {
-        ggml_backend_tensor_get(t->src[0], w_ptr, 0, WEIGHT_BYTES);
+        ggml_backend_tensor_get(t->src[0], w_ptr, 0, weight_bytes);
     } else if (t->src[0]->data) {
-        memcpy(w_ptr, t->src[0]->data, WEIGHT_BYTES);
+        memcpy(w_ptr, t->src[0]->data, weight_bytes);
     } else {
         return false;
     }
@@ -250,29 +290,29 @@ static bool execute_vulkan_matmul(struct ggml_tensor * t, uint32_t graph_run_id,
         return false;
     }
     if (t->src[1]->buffer) {
-        ggml_backend_tensor_get(t->src[1], a_ptr, 0, ACT_BYTES);
+        ggml_backend_tensor_get(t->src[1], a_ptr, 0, act_bytes);
     } else if (t->src[1]->data) {
-        memcpy(a_ptr, t->src[1]->data, ACT_BYTES);
+        memcpy(a_ptr, t->src[1]->data, act_bytes);
     } else {
         return false;
     }
 
-    res = ac_vk_buffer_flush(s_buf_w, 0, WEIGHT_BYTES);
+    res = ac_vk_buffer_flush(s_buf_w, 0, weight_bytes);
     if (res != AC_SUCCESS) {
         fprintf(stderr, "[AMEVA_BACKEND] FATAL: ac_vk_buffer_flush(s_buf_w) failed with code %d\n", res);
         return false;
     }
-    res = ac_vk_buffer_flush(s_buf_a, 0, ACT_BYTES);
+    res = ac_vk_buffer_flush(s_buf_a, 0, act_bytes);
     if (res != AC_SUCCESS) {
         fprintf(stderr, "[AMEVA_BACKEND] FATAL: ac_vk_buffer_flush(s_buf_a) failed with code %d\n", res);
         return false;
     }
 
     // 2. Dispatch Vulkan compute pipeline
-    MatMulPushConstants pc = { TARGET_M, TARGET_N, TARGET_K };
+    MatMulPushConstants pc = { M, N, K };
     AcVkBuffer * bufs[3] = { s_buf_w, s_buf_a, s_buf_o };
-    uint32_t group_x = (TARGET_N + 15) / 16; // 24
-    uint32_t group_y = (TARGET_M + 15) / 16; // 94
+    uint32_t group_x = (N + 15) / 16;
+    uint32_t group_y = (M + 15) / 16;
     uint32_t group_z = 1;
 
     AcVkEvent * event = nullptr;
@@ -293,7 +333,7 @@ static bool execute_vulkan_matmul(struct ggml_tensor * t, uint32_t graph_run_id,
     }
 
     // Invalidate device memory for host readback
-    res = ac_vk_buffer_invalidate(s_buf_o, 0, OUT_BYTES);
+    res = ac_vk_buffer_invalidate(s_buf_o, 0, out_bytes);
     if (res != AC_SUCCESS) {
         fprintf(stderr, "[AMEVA_BACKEND] FATAL: ac_vk_buffer_invalidate(s_buf_o) failed with code %d\n", res);
         return false;
@@ -301,20 +341,20 @@ static bool execute_vulkan_matmul(struct ggml_tensor * t, uint32_t graph_run_id,
 
     // 4. Read back output into destination tensor
     if (t->data && t->data != s_buf_o->mapped_ptr) {
-        res = ac_vk_buffer_readback(s_buf_o, t->data, 0, OUT_BYTES);
+        res = ac_vk_buffer_readback(s_buf_o, t->data, 0, out_bytes);
         if (res != AC_SUCCESS) {
             fprintf(stderr, "[AMEVA_BACKEND] FATAL: ac_vk_buffer_readback failed with code %d\n", res);
             return false;
         }
     } else {
-        static std::vector<uint8_t> s_readback_temp(OUT_BYTES);
-        res = ac_vk_buffer_readback(s_buf_o, s_readback_temp.data(), 0, OUT_BYTES);
+        std::vector<uint8_t> s_readback_temp(out_bytes);
+        res = ac_vk_buffer_readback(s_buf_o, s_readback_temp.data(), 0, out_bytes);
         if (res != AC_SUCCESS) {
             fprintf(stderr, "[AMEVA_BACKEND] FATAL: ac_vk_buffer_readback failed with code %d\n", res);
             return false;
         }
         if (t->buffer) {
-            ggml_backend_tensor_set(t, s_readback_temp.data(), 0, OUT_BYTES);
+            ggml_backend_tensor_set(t, s_readback_temp.data(), 0, out_bytes);
         }
     }
 
@@ -664,27 +704,69 @@ static bool ameva_device_supports_op(ggml_backend_dev_t dev, const struct ggml_t
     // 1. Operation must be GGML_OP_MUL_MAT
     if (op->op != GGML_OP_MUL_MAT) return false;
 
+    const char * trace_env = getenv("AMEVA_TRACE_GRAPH");
+    bool do_trace = (trace_env != nullptr && strcmp(trace_env, "1") == 0);
+
+    const char * fail_reason = nullptr;
+
     // 2. Strict Dtype Validation: SRC0=F16, SRC1=F32, DST=F32
-    if (!op->src[0] || !op->src[1]) return false;
-    if (op->src[0]->type != GGML_TYPE_F16) return false;
-    if (op->src[1]->type != GGML_TYPE_F32) return false;
-    if (op->type != GGML_TYPE_F32) return false;
+    if (!op->src[0] || !op->src[1]) fail_reason = "NULL_OPERANDS";
+    else if (op->src[0]->type != GGML_TYPE_F16) fail_reason = "SRC0_NOT_F16";
+    else if (op->src[1]->type != GGML_TYPE_F32) fail_reason = "SRC1_NOT_F32";
+    else if (op->type != GGML_TYPE_F32) fail_reason = "DST_NOT_F32";
 
-    // 3. Strict Shape Validation:
-    // SRC0 (Weights):     [384, 384, 1, 1]
-    // SRC1 (Activations): [384, 1500, 1, 1]
-    // DST  (Output):      [384, 1500, 1, 1]
-    if (op->src[0]->ne[0] != 384 || op->src[0]->ne[1] != 384 || op->src[0]->ne[2] != 1 || op->src[0]->ne[3] != 1) return false;
-    if (op->src[1]->ne[0] != 384 || op->src[1]->ne[1] != 1500 || op->src[1]->ne[2] != 1 || op->src[1]->ne[3] != 1) return false;
-    if (op->ne[0] != 384 || op->ne[1] != 1500 || op->ne[2] != 1 || op->ne[3] != 1) return false;
+    // 3. Batch dimensions: Must be 1 (2D matrix multiplication only)
+    else if (op->src[0]->ne[2] != 1 || op->src[0]->ne[3] != 1) fail_reason = "SRC0_BATCH_DIM_GT_1";
+    else if (op->src[1]->ne[2] != 1 || op->src[1]->ne[3] != 1) fail_reason = "SRC1_BATCH_DIM_GT_1";
+    else if (op->ne[2] != 1 || op->ne[3] != 1) fail_reason = "DST_BATCH_DIM_GT_1";
 
-    // 4. Strict Stride & Contiguous Layout Validation
-    if (op->src[0]->nb[0] != sizeof(ggml_fp16_t)) return false;
-    if (op->src[0]->nb[1] != 384 * sizeof(ggml_fp16_t)) return false;
-    if (op->src[1]->nb[0] != sizeof(float)) return false;
-    if (op->src[1]->nb[1] != 384 * sizeof(float)) return false;
-    if (op->nb[0] != sizeof(float)) return false;
-    if (op->nb[1] != 384 * sizeof(float)) return false;
+    // 4. Dimension compatibility
+    int64_t K0 = op->src[0] ? op->src[0]->ne[0] : 0;
+    int64_t N  = op->src[0] ? op->src[0]->ne[1] : 0;
+    int64_t K1 = op->src[1] ? op->src[1]->ne[0] : 0;
+    int64_t M  = op->src[1] ? op->src[1]->ne[1] : 0;
+
+    if (!fail_reason) {
+        if (K0 <= 0 || N <= 0 || K1 <= 0 || M <= 0) fail_reason = "INVALID_DIM_LE_ZERO";
+        else if (K0 != K1) fail_reason = "K_DIM_MISMATCH";
+        else if (op->ne[0] != N || op->ne[1] != M) fail_reason = "DST_DIM_MISMATCH";
+        else if ((uint64_t)K0 > 65536 || (uint64_t)N > 65536 || (uint64_t)M > 65536) fail_reason = "DIM_OVERFLOW";
+        else {
+            uint32_t group_x = ((uint32_t)N + 15) / 16;
+            uint32_t group_y = ((uint32_t)M + 15) / 16;
+            if (group_x == 0 || group_x > 65535 || group_y == 0 || group_y > 65535) fail_reason = "DISPATCH_GROUP_LIMIT";
+            else {
+                uint64_t weight_elems = (uint64_t)K0 * (uint64_t)N;
+                uint64_t act_elems    = (uint64_t)K0 * (uint64_t)M;
+                uint64_t out_elems    = (uint64_t)N  * (uint64_t)M;
+                size_t weight_bytes = weight_elems * sizeof(ggml_fp16_t);
+                size_t act_bytes    = act_elems * sizeof(float);
+                size_t out_bytes    = out_elems * sizeof(float);
+                const size_t MAX_BUFFER_BUDGET = 64 * 1024 * 1024;
+                if (weight_bytes > MAX_BUFFER_BUDGET || act_bytes > MAX_BUFFER_BUDGET || out_bytes > MAX_BUFFER_BUDGET) fail_reason = "BUFFER_BUDGET_EXCEEDED";
+                else if (op->src[0]->nb[0] != sizeof(ggml_fp16_t) || op->src[0]->nb[1] != (size_t)K0 * sizeof(ggml_fp16_t)) fail_reason = "SRC0_NOT_CONTIGUOUS";
+                else if (op->src[1]->nb[0] != sizeof(float) || op->src[1]->nb[1] != (size_t)K0 * sizeof(float)) fail_reason = "SRC1_NOT_CONTIGUOUS";
+                else if (op->nb[0] != sizeof(float) || op->nb[1] != (size_t)N * sizeof(float)) fail_reason = "DST_NOT_CONTIGUOUS";
+            }
+        }
+    }
+
+    if (do_trace) {
+        const char * n = (op->name[0] ? op->name : (op->src[0] && op->src[0]->name[0] ? op->src[0]->name : "unnamed"));
+        int s0_type = op->src[0] ? (int)op->src[0]->type : -1;
+        int s1_type = op->src[1] ? (int)op->src[1]->type : -1;
+        printf("[AMEVA_TRACE_OP] GRAPH_KIND=%s NODE_NAME=%s SRC0_TYPE=%d SRC1_TYPE=%d DST_TYPE=%d SRC0_NE=[%lld,%lld,%lld,%lld] SRC1_NE=[%lld,%lld,%lld,%lld] DST_NE=[%lld,%lld,%lld,%lld] SUPPORTED=%s REASON=%s\n",
+               s_graph_kind, n, s0_type, s1_type, (int)op->type,
+               op->src[0] ? (long long)op->src[0]->ne[0] : 0LL, op->src[0] ? (long long)op->src[0]->ne[1] : 0LL, op->src[0] ? (long long)op->src[0]->ne[2] : 0LL, op->src[0] ? (long long)op->src[0]->ne[3] : 0LL,
+               op->src[1] ? (long long)op->src[1]->ne[0] : 0LL, op->src[1] ? (long long)op->src[1]->ne[1] : 0LL, op->src[1] ? (long long)op->src[1]->ne[2] : 0LL, op->src[1] ? (long long)op->src[1]->ne[3] : 0LL,
+               (long long)op->ne[0], (long long)op->ne[1], (long long)op->ne[2], (long long)op->ne[3],
+               fail_reason ? "false" : "true", fail_reason ? fail_reason : "AMEVA_SUPPORTED");
+        fflush(stdout);
+    }
+
+    if (fail_reason != nullptr) {
+        return false;
+    }
 
     g_counters.supported_pattern_match_count++;
     return true;
