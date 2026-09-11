@@ -95,6 +95,7 @@ int main() {
         backend->iface.free(backend);
         buf->iface.free_buffer(buf);
         return 8;
+    }
 
     // 6. Cleanup
     ggml_free(ctx);
