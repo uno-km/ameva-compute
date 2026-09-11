@@ -6,46 +6,548 @@
 
 | Verification Metric | Value | Verification Status |
 | :--- | :---: | :--- |
-| **LLM_CLEANUP_COMMIT** | 7852b408aee7393c58f1e7f7c9d70e278c19ada1 | Verified (Clean worktree) |
-| **FOUNDATION_ARCHIVE_COMMIT** | 64cc951a0371f305cc267ff67785959bec7c668a | Verified (Clean worktree) |
-| **SOURCE_COMMIT (7852b40^)** | 8e8ad73977ef94c6fe5eb9cfdb77ee3a4f61f74a | Parent commit of deletion |
+| **LLM_CLEANUP_COMMIT** | `7852b408aee7393c58f1e7f7c9d70e278c19ada1` | Verified cleanup commit |
+| **FOUNDATION_ARCHIVE_COMMIT** | `64cc951a0371f305cc267ff67785959bec7c668a` | Verified archive commit |
+| **SOURCE_COMMIT (7852b40^)** | `8e8ad73977ef94c6fe5eb9cfdb77ee3a4f61f74a` | Parent commit of deletion |
+| **MANIFEST_PATH_FORMAT** | `POSIX_REPOSITORY_RELATIVE` | Normalized forward-slash paths |
 | **DELETED_FILE_COUNT** | 55 | Extracted via git diff --name-status 7852b40^ 7852b40 |
 | **ARCHIVED_FILE_COUNT** | 55 | Verified in dev/ameva-foundation/docs/archive/ |
 | **HASH_MATCH_COUNT** | 55 | 55 / 55 Byte-Identical with Git Blobs |
 | **HASH_MISMATCH_COUNT** | 0 | Zero Mismatch |
 | **MISSING_ARCHIVE_COUNT** | 0 | Zero Missing |
 | **UNEXPECTED_ARCHIVE_COUNT** | 0 | Zero Unexpected |
-| **LLM_WORKTREE_CLEAN** | true | Working tree clean |
-| **FOUNDATION_WORKTREE_CLEAN** | true | Working tree clean |
+| **ABSOLUTE_PATH_COUNT** | 0 | Zero Absolute Paths |
+| **BACKSLASH_PATH_COUNT** | 0 | Zero Backslashes |
+| **PATH_TRAVERSAL_ENTRY_COUNT** | 0 | Zero Path Traversals |
 | **EVIDENCE_MIGRATION_RESULT** | **PASS** | Complete byte-identical preservation verified |
+| **LLM_STATUS_PORCELAIN_SHA256** | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` | Clean at scan timestamp |
+| **FOUNDATION_STATUS_PORCELAIN_SHA256** | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` | Clean at scan timestamp |
+| **WORKTREE_CHECK_UTC** | `2026-09-11T10:11:36.524076+00:00` | ISO8601 UTC timestamp |
 
 ---
 
-## 2. Raw Log Sensitive Data Scan & Privacy Audit
+## 2. Raw Log Regex Privacy Scan Scope & Audit Disposition
 
 Audited Target Files:
-1. s25_ggml_backend_smoke_raw.log
-2. s25_qwen_e2e_normal_raw.log
-3. s25_qwen_e2e_forced_fail_raw.log
+1. `s25_ggml_backend_smoke_raw.log`
+2. `s25_qwen_e2e_normal_raw.log`
+3. `s25_qwen_e2e_forced_fail_raw.log`
 
-| Security & Compliance Audit Metric | Value | Audit Disposition |
+| Security & Compliance Audit Metric | Value | Audit Scope & Verification Notes |
 | :--- | :---: | :--- |
-| **RAW_LOG_SENSITIVE_DATA_SCAN** | **PASS** | 7-point automated privacy scan passed |
-| **RAW_LOGS_SANITIZED** | **false** | No redaction needed (Zero PII captured) |
-| **SENSITIVE_MATCH_COUNT** | **0** | Zero sensitive patterns detected |
-| **SANITIZATION_RULESET_SHA256** | dc7f59b68fcb41aca7233b21d5be0a7a65b14ca8531c02668025f4c59799bd18 | Formal 7-rule specification hash |
-| **SSH_USERNAME_DETECTED** | 0 | Username u0_a466 absent from raw logs |
-| **HOST_IP_ADDRESS_DETECTED** | 0 | IP 100.106.0.38 absent from raw logs |
-| **WINDOWS_USER_PATH_DETECTED** | 0 | Path C:\\Users\\GAME absent from raw logs |
-| **CREDENTIALS_OR_TOKENS_DETECTED** | 0 | Zero tokens, secrets, or passwords |
-| **HARDWARE_SERIAL_OR_MAC_DETECTED** | 0 | Zero device serials or MAC addresses |
+| **RAW_LOG_REGEX_SCAN** | **PASS** | 7-point regular expression scan passed with zero matches |
+| **SCAN_RULE_COUNT** | **7** | Rule set: user, IP, windows path, termux PII, creds, hwid, secrets |
+| **SENSITIVE_REGEX_MATCH_COUNT** | **0** | Zero sensitive regex matches found |
+| **SSH_USERNAME_DETECTED** | **0** | Target SSH username absent from raw logs |
+| **NON_LOOPBACK_IP_DETECTED** | **0** | Non-loopback IP addresses absent (log timestamps disambiguated) |
+| **WINDOWS_USER_PATH_DETECTED** | **0** | Host Windows user paths absent from raw logs |
+| **CREDENTIALS_OR_TOKENS_DETECTED** | **0** | API keys, bearer tokens, or secrets absent from raw logs |
+| **HARDWARE_SERIAL_OR_MAC_DETECTED** | **0** | Device MAC addresses or hardware serials absent |
+| **SANITIZATION_RULESET_SHA256** | `dc7f59b68fcb41aca7233b21d5be0a7a65b14ca8531c02668025f4c59799bd18` | Formal ruleset specification hash |
+| **MANUAL_CONTENT_REVIEW** | **NOT_PERFORMED** | Automated regex scan scope only |
+| **ENTROPY_BASED_SECRET_SCAN** | **NOT_PERFORMED** | Automated regex scan scope only |
+| **DEDICATED_SECRET_SCANNER** | **NOT_PERFORMED** | Automated regex scan scope only |
+| **RAW_LOGS_SANITIZED** | **false** | Raw logs kept unredacted due to zero regex matches |
+| **SENSITIVE_DATA_ABSENCE** | **NOT_PROVEN** | Absence limited to audited regex scan patterns |
 
 ---
 
-## 3. 55-File Git Blob vs Foundation Archive Manifest
+## 3. 55-File Migration Records (Git Blob vs Foundation Archive)
 
-All blobs verified via git show 7852b40^:<SOURCE_PATH> vs dev/ameva-foundation/<ARCHIVE_PATH>:
+All entries verified via `git show 7852b40^:<SOURCE_PATH>` vs `dev/ameva-foundation/<ARCHIVE_PATH>`:
 
-| # | Source Path (meva-compute-llm) | Git Blob SHA-256 (8e8ad73) | Archive Path (meva-foundation) | Match |
-| :---: | :--- | :--- | :--- | :---: |
-| 1 | docs/evidence/p0-stabilization/P0_3_GGUF_BOUNDED_READER_EVIDENCE.md | d9b0385241e79999... | docs\archive\evidence\p0-stabilization\P0_3_GGUF_BOUNDED_READER_EVIDENCE.md | **PASS** |\n| 2 | docs/evidence/p0-stabilization/a35_p0_3_30gates_raw.log | 17bb8a7e0f2590c3... | docs\archive\evidence\p0-stabilization\a35_p0_3_30gates_raw.log | **PASS** |\n| 3 | docs/evidence/p0-stabilization/a35_p0_3_weighted_bitnet2b_raw.log | 85c6c1d7c0dd78df... | docs\archive\evidence\p0-stabilization\a35_p0_3_weighted_bitnet2b_raw.log | **PASS** |\n| 4 | docs/evidence/p0-stabilization/a35_p0_3_weighted_qwen25_raw.log | 3c18694bd5e45003... | docs\archive\evidence\p0-stabilization\a35_p0_3_weighted_qwen25_raw.log | **PASS** |\n| 5 | docs/evidence/p0-stabilization/a35_qwen_parity_track1_part2_raw.log | f9428644e8ba1f93... | docs\archive\evidence\p0-stabilization\a35_qwen_parity_track1_part2_raw.log | **PASS** |\n| 6 | docs/evidence/p0-stabilization/a35_qwen_vulkan_full_offload_raw.log | d67399e049cdb47e... | docs\archive\evidence\p0-stabilization\a35_qwen_vulkan_full_offload_raw.log | **PASS** |\n| 7 | docs/evidence/p0-stabilization/a35_qwen_vulkan_track1_part3_raw.log | 93c2f28f0b1d02e5... | docs\archive\evidence\p0-stabilization\a35_qwen_vulkan_track1_part3_raw.log | **PASS** |\n| 8 | docs/evidence/p0-stabilization/a35_vulkan_phase4b_raw.log | 143343f375355728... | docs\archive\evidence\p0-stabilization\a35_vulkan_phase4b_raw.log | **PASS** |\n| 9 | docs/evidence/p0-stabilization/a35_vulkan_sgemm_track1_raw.log | 04aade7622462419... | docs\archive\evidence\p0-stabilization\a35_vulkan_sgemm_track1_raw.log | **PASS** |\n| 10 | docs/evidence/p0-stabilization/p0_3_complete_stabilization_report.txt | a4152018d8e6bc45... | docs\archive\evidence\p0-stabilization\p0_3_complete_stabilization_report.txt | **PASS** |\n| 11 | docs/evidence/p0-stabilization/s22_ctest_raw.log | 0f3a120c6d347e9d... | docs\archive\evidence\p0-stabilization\s22_ctest_raw.log | **PASS** |\n| 12 | docs/evidence/p0-stabilization/s22_p0_2_sync_raw.log | d4f4b47dc98bf982... | docs\archive\evidence\p0-stabilization\s22_p0_2_sync_raw.log | **PASS** |\n| 13 | docs/evidence/p0-stabilization/s22_p0_2_validation_raw.log | 4ad3a58ed9eaaa7e... | docs\archive\evidence\p0-stabilization\s22_p0_2_validation_raw.log | **PASS** |\n| 14 | docs/evidence/p0-stabilization/s22_p0_3_ctest_raw.log | a1f04cd96826a5a1... | docs\archive\evidence\p0-stabilization\s22_p0_3_ctest_raw.log | **PASS** |\n| 15 | docs/evidence/p0-stabilization/s22_p0_3_gguf_validation_raw.log | 03372586f34a12c8... | docs\archive\evidence\p0-stabilization\s22_p0_3_gguf_validation_raw.log | **PASS** |\n| 16 | docs/evidence/p0-stabilization/s22_p0_3_prepatch_raw.log | 6134be1a7d7aab25... | docs\archive\evidence\p0-stabilization\s22_p0_3_prepatch_raw.log | **PASS** |\n| 17 | docs/evidence/p0-stabilization/s22_phase4b_vulkan_regression.log | 1462758a691a2ab6... | docs\archive\evidence\p0-stabilization\s22_phase4b_vulkan_regression.log | **PASS** |\n| 18 | docs/evidence/p0-stabilization/s25_llama_cli_devices_raw.log | ce5669448471f5d7... | docs\archive\evidence\p0-stabilization\s25_llama_cli_devices_raw.log | **PASS** |\n| 19 | docs/evidence/p0-stabilization/s25_p0_3_30gates_raw.log | 0911b393cc1c4f6a... | docs\archive\evidence\p0-stabilization\s25_p0_3_30gates_raw.log | **PASS** |\n| 20 | docs/evidence/p0-stabilization/s25_p0_3_weighted_bitnet2b_raw.log | 85c6c1d7c0dd78df... | docs\archive\evidence\p0-stabilization\s25_p0_3_weighted_bitnet2b_raw.log | **PASS** |\n| 21 | docs/evidence/p0-stabilization/s25_p0_3_weighted_qwen25_raw.log | 3c18694bd5e45003... | docs\archive\evidence\p0-stabilization\s25_p0_3_weighted_qwen25_raw.log | **PASS** |\n| 22 | docs/evidence/p0-stabilization/s25_qwen_parity_track1_part2_raw.log | c7443fee961d9957... | docs\archive\evidence\p0-stabilization\s25_qwen_parity_track1_part2_raw.log | **PASS** |\n| 23 | docs/evidence/p0-stabilization/s25_qwen_vulkan_full_offload_raw.log | 8c72e564d68efabc... | docs\archive\evidence\p0-stabilization\s25_qwen_vulkan_full_offload_raw.log | **PASS** |\n| 24 | docs/evidence/p0-stabilization/s25_qwen_vulkan_track1_part3_raw.log | ca5ad0f2ea5ed741... | docs\archive\evidence\p0-stabilization\s25_qwen_vulkan_track1_part3_raw.log | **PASS** |\n| 25 | docs/evidence/p0-stabilization/s25_vulkan_phase4b_raw.log | 41a6353c33e507f5... | docs\archive\evidence\p0-stabilization\s25_vulkan_phase4b_raw.log | **PASS** |\n| 26 | docs/evidence/p0-stabilization/s25_vulkan_sgemm_track1_raw.log | e6a79a6fafc8e584... | docs\archive\evidence\p0-stabilization\s25_vulkan_sgemm_track1_raw.log | **PASS** |\n| 27 | docs/evidence/p0-stabilization/track1_sgemm_consolidated_report.txt | 358809ee225e10d5... | docs\archive\evidence\p0-stabilization\track1_sgemm_consolidated_report.txt | **PASS** |\n| 28 | docs/evidence/phase4b/SHA256SUMS | 153d4f9b642af794... | docs\archive\evidence\phase4b\SHA256SUMS | **PASS** |\n| 29 | docs/evidence/phase4b/a35_limits_official.txt | 110b1569d9e224cc... | docs\archive\evidence\phase4b\a35_limits_official.txt | **PASS** |\n| 30 | docs/evidence/phase4b/a35_phase3_raw.log | 6b0866678e7b82b5... | docs\archive\evidence\phase4b\a35_phase3_raw.log | **PASS** |\n| 31 | docs/evidence/phase4b/a35_phase4a_raw.log | 17d5a08f441ef00e... | docs\archive\evidence\phase4b\a35_phase4a_raw.log | **PASS** |\n| 32 | docs/evidence/phase4b/a35_phase4b_raw.log | 7d9c04cbd736e01d... | docs\archive\evidence\phase4b\a35_phase4b_raw.log | **PASS** |\n| 33 | docs/evidence/phase4b/binary-manifest.sha256 | 65f8b8123e78aa6f... | docs\archive\evidence\phase4b\binary-manifest.sha256 | **PASS** |\n| 34 | docs/evidence/phase4b/build_environment.txt | afc30f36509824b7... | docs\archive\evidence\phase4b\build_environment.txt | **PASS** |\n| 35 | docs/evidence/phase4b/phase4b_hardware_verification_report.md | ca265a87423be705... | docs\archive\evidence\phase4b\phase4b_hardware_verification_report.md | **PASS** |\n| 36 | docs/evidence/phase4b/s25_limits_official.txt | 90f32968e485cea5... | docs\archive\evidence\phase4b\s25_limits_official.txt | **PASS** |\n| 37 | docs/evidence/phase4b/s25_phase3_raw.log | 48b372cc4df2c92c... | docs\archive\evidence\phase4b\s25_phase3_raw.log | **PASS** |\n| 38 | docs/evidence/phase4b/s25_phase4a_raw.log | b502e884b6335b0a... | docs\archive\evidence\phase4b\s25_phase4a_raw.log | **PASS** |\n| 39 | docs/evidence/phase4b/s25_phase4b_raw.log | 63a4c2aa74154199... | docs\archive\evidence\phase4b\s25_phase4b_raw.log | **PASS** |\n| 40 | docs/evidence/phase4b/source-manifest.sha256 | b2d7d70fa4ff44f3... | docs\archive\evidence\phase4b\source-manifest.sha256 | **PASS** |\n| 41 | docs/evidence/phase4b/vector_add_spec.spvasm | 30eff2522e985eb6... | docs\archive\evidence\phase4b\vector_add_spec.spvasm | **PASS** |\n| 42 | docs/evidence/s22-adreno730/README.md | a286f0b2c38e40ff... | docs\archive\evidence\s22-adreno730\README.md | **PASS** |\n| 43 | docs/evidence/s22-adreno730/SHA256SUMS | ea008e074374a3e6... | docs\archive\evidence\s22-adreno730\SHA256SUMS | **PASS** |\n| 44 | docs/evidence/s22-adreno730/a35_phase4b_regression.log | ec47fd51c00f4cbf... | docs\archive\evidence\s22-adreno730\a35_phase4b_regression.log | **PASS** |\n| 45 | docs/evidence/s22-adreno730/binary-manifest.sha256 | c19a401733592ea9... | docs\archive\evidence\s22-adreno730\binary-manifest.sha256 | **PASS** |\n| 46 | docs/evidence/s22-adreno730/device-environment.txt | 301495586863fdc7... | docs\archive\evidence\s22-adreno730\device-environment.txt | **PASS** |\n| 47 | docs/evidence/s22-adreno730/official_vulkan_probe_full.cpp | bbd31c64a6c839cf... | docs\archive\evidence\s22-adreno730\official_vulkan_probe_full.cpp | **PASS** |\n| 48 | docs/evidence/s22-adreno730/s22-probe-build.txt | 295b8dee8fd0e89c... | docs\archive\evidence\s22-adreno730\s22-probe-build.txt | **PASS** |\n| 49 | docs/evidence/s22-adreno730/s22-provenance.txt | a20e74075b2e74b9... | docs\archive\evidence\s22-adreno730\s22-provenance.txt | **PASS** |\n| 50 | docs/evidence/s22-adreno730/s22_phase3_raw.log | 608143683f19b41d... | docs\archive\evidence\s22-adreno730\s22_phase3_raw.log | **PASS** |\n| 51 | docs/evidence/s22-adreno730/s22_phase4a_raw.log | cf371cb78599d2e3... | docs\archive\evidence\s22-adreno730\s22_phase4a_raw.log | **PASS** |\n| 52 | docs/evidence/s22-adreno730/s22_phase4b_raw.log | 0a9b4a415c40d2e4... | docs\archive\evidence\s22-adreno730\s22_phase4b_raw.log | **PASS** |\n| 53 | docs/evidence/s22-adreno730/s25_phase4b_regression.log | 5b82f0caa07b74ff... | docs\archive\evidence\s22-adreno730\s25_phase4b_regression.log | **PASS** |\n| 54 | docs/evidence/s22-adreno730/source-manifest.sha256 | 1401b93618a9a78f... | docs\archive\evidence\s22-adreno730\source-manifest.sha256 | **PASS** |\n| 55 | docs/evidence/s22-adreno730/vulkan-limits.txt | 7b346226e7ee268c... | docs\archive\evidence\s22-adreno730\vulkan-limits.txt | **PASS** |\n
+### [001] `docs/evidence/p0-stabilization/P0_3_GGUF_BOUNDED_READER_EVIDENCE.md`
+```text
+SOURCE_PATH=docs/evidence/p0-stabilization/P0_3_GGUF_BOUNDED_READER_EVIDENCE.md
+SOURCE_BLOB_SHA256=d9b0385241e79999d574a4d2899248106bef3d7b0648b5b8c6e494e744cb24e4
+ARCHIVE_PATH=docs/archive/evidence/p0-stabilization/P0_3_GGUF_BOUNDED_READER_EVIDENCE.md
+ARCHIVE_FILE_SHA256=d9b0385241e79999d574a4d2899248106bef3d7b0648b5b8c6e494e744cb24e4
+BYTE_IDENTICAL=true
+```
+
+### [002] `docs/evidence/p0-stabilization/a35_p0_3_30gates_raw.log`
+```text
+SOURCE_PATH=docs/evidence/p0-stabilization/a35_p0_3_30gates_raw.log
+SOURCE_BLOB_SHA256=17bb8a7e0f2590c38ac87637e5dab7e56e49cca3a0b1c00e384774e2977c179f
+ARCHIVE_PATH=docs/archive/evidence/p0-stabilization/a35_p0_3_30gates_raw.log
+ARCHIVE_FILE_SHA256=17bb8a7e0f2590c38ac87637e5dab7e56e49cca3a0b1c00e384774e2977c179f
+BYTE_IDENTICAL=true
+```
+
+### [003] `docs/evidence/p0-stabilization/a35_p0_3_weighted_bitnet2b_raw.log`
+```text
+SOURCE_PATH=docs/evidence/p0-stabilization/a35_p0_3_weighted_bitnet2b_raw.log
+SOURCE_BLOB_SHA256=85c6c1d7c0dd78df7e4442d6be70ad1f63b7140ee536aa7f22cb322feee98e7f
+ARCHIVE_PATH=docs/archive/evidence/p0-stabilization/a35_p0_3_weighted_bitnet2b_raw.log
+ARCHIVE_FILE_SHA256=85c6c1d7c0dd78df7e4442d6be70ad1f63b7140ee536aa7f22cb322feee98e7f
+BYTE_IDENTICAL=true
+```
+
+### [004] `docs/evidence/p0-stabilization/a35_p0_3_weighted_qwen25_raw.log`
+```text
+SOURCE_PATH=docs/evidence/p0-stabilization/a35_p0_3_weighted_qwen25_raw.log
+SOURCE_BLOB_SHA256=3c18694bd5e45003322b5ab7fdbe01a48b23414ab25df8a0346aae67cc065e92
+ARCHIVE_PATH=docs/archive/evidence/p0-stabilization/a35_p0_3_weighted_qwen25_raw.log
+ARCHIVE_FILE_SHA256=3c18694bd5e45003322b5ab7fdbe01a48b23414ab25df8a0346aae67cc065e92
+BYTE_IDENTICAL=true
+```
+
+### [005] `docs/evidence/p0-stabilization/a35_qwen_parity_track1_part2_raw.log`
+```text
+SOURCE_PATH=docs/evidence/p0-stabilization/a35_qwen_parity_track1_part2_raw.log
+SOURCE_BLOB_SHA256=f9428644e8ba1f93b1959d9d64685d38dbf1c5eff3355f25ef9c9c8e0a6dd786
+ARCHIVE_PATH=docs/archive/evidence/p0-stabilization/a35_qwen_parity_track1_part2_raw.log
+ARCHIVE_FILE_SHA256=f9428644e8ba1f93b1959d9d64685d38dbf1c5eff3355f25ef9c9c8e0a6dd786
+BYTE_IDENTICAL=true
+```
+
+### [006] `docs/evidence/p0-stabilization/a35_qwen_vulkan_full_offload_raw.log`
+```text
+SOURCE_PATH=docs/evidence/p0-stabilization/a35_qwen_vulkan_full_offload_raw.log
+SOURCE_BLOB_SHA256=d67399e049cdb47e6e9fdb2f364203f8b1744c07246da414b4ef2d5fcc9cbf4a
+ARCHIVE_PATH=docs/archive/evidence/p0-stabilization/a35_qwen_vulkan_full_offload_raw.log
+ARCHIVE_FILE_SHA256=d67399e049cdb47e6e9fdb2f364203f8b1744c07246da414b4ef2d5fcc9cbf4a
+BYTE_IDENTICAL=true
+```
+
+### [007] `docs/evidence/p0-stabilization/a35_qwen_vulkan_track1_part3_raw.log`
+```text
+SOURCE_PATH=docs/evidence/p0-stabilization/a35_qwen_vulkan_track1_part3_raw.log
+SOURCE_BLOB_SHA256=93c2f28f0b1d02e5130939cb864434990ef59f320de42534ebbb26b78d002fc5
+ARCHIVE_PATH=docs/archive/evidence/p0-stabilization/a35_qwen_vulkan_track1_part3_raw.log
+ARCHIVE_FILE_SHA256=93c2f28f0b1d02e5130939cb864434990ef59f320de42534ebbb26b78d002fc5
+BYTE_IDENTICAL=true
+```
+
+### [008] `docs/evidence/p0-stabilization/a35_vulkan_phase4b_raw.log`
+```text
+SOURCE_PATH=docs/evidence/p0-stabilization/a35_vulkan_phase4b_raw.log
+SOURCE_BLOB_SHA256=143343f375355728ec49721dd1f98e082f4cb331d41c332f2f47284912fe5465
+ARCHIVE_PATH=docs/archive/evidence/p0-stabilization/a35_vulkan_phase4b_raw.log
+ARCHIVE_FILE_SHA256=143343f375355728ec49721dd1f98e082f4cb331d41c332f2f47284912fe5465
+BYTE_IDENTICAL=true
+```
+
+### [009] `docs/evidence/p0-stabilization/a35_vulkan_sgemm_track1_raw.log`
+```text
+SOURCE_PATH=docs/evidence/p0-stabilization/a35_vulkan_sgemm_track1_raw.log
+SOURCE_BLOB_SHA256=04aade7622462419073d1ec9dfd787522f3c1ad16114e47aa1fd9821822b9f79
+ARCHIVE_PATH=docs/archive/evidence/p0-stabilization/a35_vulkan_sgemm_track1_raw.log
+ARCHIVE_FILE_SHA256=04aade7622462419073d1ec9dfd787522f3c1ad16114e47aa1fd9821822b9f79
+BYTE_IDENTICAL=true
+```
+
+### [010] `docs/evidence/p0-stabilization/p0_3_complete_stabilization_report.txt`
+```text
+SOURCE_PATH=docs/evidence/p0-stabilization/p0_3_complete_stabilization_report.txt
+SOURCE_BLOB_SHA256=a4152018d8e6bc455b6cf66ceaefec66339643da5c7e22b24398d199876d97c4
+ARCHIVE_PATH=docs/archive/evidence/p0-stabilization/p0_3_complete_stabilization_report.txt
+ARCHIVE_FILE_SHA256=a4152018d8e6bc455b6cf66ceaefec66339643da5c7e22b24398d199876d97c4
+BYTE_IDENTICAL=true
+```
+
+### [011] `docs/evidence/p0-stabilization/s22_ctest_raw.log`
+```text
+SOURCE_PATH=docs/evidence/p0-stabilization/s22_ctest_raw.log
+SOURCE_BLOB_SHA256=0f3a120c6d347e9d1cfbac7f041e2f309523cdb42055a52db65f358eadc26660
+ARCHIVE_PATH=docs/archive/evidence/p0-stabilization/s22_ctest_raw.log
+ARCHIVE_FILE_SHA256=0f3a120c6d347e9d1cfbac7f041e2f309523cdb42055a52db65f358eadc26660
+BYTE_IDENTICAL=true
+```
+
+### [012] `docs/evidence/p0-stabilization/s22_p0_2_sync_raw.log`
+```text
+SOURCE_PATH=docs/evidence/p0-stabilization/s22_p0_2_sync_raw.log
+SOURCE_BLOB_SHA256=d4f4b47dc98bf9823b49b845b708dd5ac0f6c224250984759481477ae32efc72
+ARCHIVE_PATH=docs/archive/evidence/p0-stabilization/s22_p0_2_sync_raw.log
+ARCHIVE_FILE_SHA256=d4f4b47dc98bf9823b49b845b708dd5ac0f6c224250984759481477ae32efc72
+BYTE_IDENTICAL=true
+```
+
+### [013] `docs/evidence/p0-stabilization/s22_p0_2_validation_raw.log`
+```text
+SOURCE_PATH=docs/evidence/p0-stabilization/s22_p0_2_validation_raw.log
+SOURCE_BLOB_SHA256=4ad3a58ed9eaaa7ec9a68aede0ad07b34a11a6e8885c081db909eb0a8260e633
+ARCHIVE_PATH=docs/archive/evidence/p0-stabilization/s22_p0_2_validation_raw.log
+ARCHIVE_FILE_SHA256=4ad3a58ed9eaaa7ec9a68aede0ad07b34a11a6e8885c081db909eb0a8260e633
+BYTE_IDENTICAL=true
+```
+
+### [014] `docs/evidence/p0-stabilization/s22_p0_3_ctest_raw.log`
+```text
+SOURCE_PATH=docs/evidence/p0-stabilization/s22_p0_3_ctest_raw.log
+SOURCE_BLOB_SHA256=a1f04cd96826a5a132ac4e7f3fa39f2aa7432bfdcc66f606e9efc46775a47734
+ARCHIVE_PATH=docs/archive/evidence/p0-stabilization/s22_p0_3_ctest_raw.log
+ARCHIVE_FILE_SHA256=a1f04cd96826a5a132ac4e7f3fa39f2aa7432bfdcc66f606e9efc46775a47734
+BYTE_IDENTICAL=true
+```
+
+### [015] `docs/evidence/p0-stabilization/s22_p0_3_gguf_validation_raw.log`
+```text
+SOURCE_PATH=docs/evidence/p0-stabilization/s22_p0_3_gguf_validation_raw.log
+SOURCE_BLOB_SHA256=03372586f34a12c8cdf6b440e8cf5c4cb61aabae26ae167617f7b4094340eef2
+ARCHIVE_PATH=docs/archive/evidence/p0-stabilization/s22_p0_3_gguf_validation_raw.log
+ARCHIVE_FILE_SHA256=03372586f34a12c8cdf6b440e8cf5c4cb61aabae26ae167617f7b4094340eef2
+BYTE_IDENTICAL=true
+```
+
+### [016] `docs/evidence/p0-stabilization/s22_p0_3_prepatch_raw.log`
+```text
+SOURCE_PATH=docs/evidence/p0-stabilization/s22_p0_3_prepatch_raw.log
+SOURCE_BLOB_SHA256=6134be1a7d7aab25d68f2a80b4ad99707c5e0998b93865638eaa187926ce4679
+ARCHIVE_PATH=docs/archive/evidence/p0-stabilization/s22_p0_3_prepatch_raw.log
+ARCHIVE_FILE_SHA256=6134be1a7d7aab25d68f2a80b4ad99707c5e0998b93865638eaa187926ce4679
+BYTE_IDENTICAL=true
+```
+
+### [017] `docs/evidence/p0-stabilization/s22_phase4b_vulkan_regression.log`
+```text
+SOURCE_PATH=docs/evidence/p0-stabilization/s22_phase4b_vulkan_regression.log
+SOURCE_BLOB_SHA256=1462758a691a2ab64463be2590ecc7e96563da879dd79ac5b8b274d1565e11a2
+ARCHIVE_PATH=docs/archive/evidence/p0-stabilization/s22_phase4b_vulkan_regression.log
+ARCHIVE_FILE_SHA256=1462758a691a2ab64463be2590ecc7e96563da879dd79ac5b8b274d1565e11a2
+BYTE_IDENTICAL=true
+```
+
+### [018] `docs/evidence/p0-stabilization/s25_llama_cli_devices_raw.log`
+```text
+SOURCE_PATH=docs/evidence/p0-stabilization/s25_llama_cli_devices_raw.log
+SOURCE_BLOB_SHA256=ce5669448471f5d7b2e249f84c5591b62edccaef6b83e422fd58becae508ad96
+ARCHIVE_PATH=docs/archive/evidence/p0-stabilization/s25_llama_cli_devices_raw.log
+ARCHIVE_FILE_SHA256=ce5669448471f5d7b2e249f84c5591b62edccaef6b83e422fd58becae508ad96
+BYTE_IDENTICAL=true
+```
+
+### [019] `docs/evidence/p0-stabilization/s25_p0_3_30gates_raw.log`
+```text
+SOURCE_PATH=docs/evidence/p0-stabilization/s25_p0_3_30gates_raw.log
+SOURCE_BLOB_SHA256=0911b393cc1c4f6a52ef5ce64a7c1e2aeca8b2f75b23e96fd3c20cb9e5798473
+ARCHIVE_PATH=docs/archive/evidence/p0-stabilization/s25_p0_3_30gates_raw.log
+ARCHIVE_FILE_SHA256=0911b393cc1c4f6a52ef5ce64a7c1e2aeca8b2f75b23e96fd3c20cb9e5798473
+BYTE_IDENTICAL=true
+```
+
+### [020] `docs/evidence/p0-stabilization/s25_p0_3_weighted_bitnet2b_raw.log`
+```text
+SOURCE_PATH=docs/evidence/p0-stabilization/s25_p0_3_weighted_bitnet2b_raw.log
+SOURCE_BLOB_SHA256=85c6c1d7c0dd78df7e4442d6be70ad1f63b7140ee536aa7f22cb322feee98e7f
+ARCHIVE_PATH=docs/archive/evidence/p0-stabilization/s25_p0_3_weighted_bitnet2b_raw.log
+ARCHIVE_FILE_SHA256=85c6c1d7c0dd78df7e4442d6be70ad1f63b7140ee536aa7f22cb322feee98e7f
+BYTE_IDENTICAL=true
+```
+
+### [021] `docs/evidence/p0-stabilization/s25_p0_3_weighted_qwen25_raw.log`
+```text
+SOURCE_PATH=docs/evidence/p0-stabilization/s25_p0_3_weighted_qwen25_raw.log
+SOURCE_BLOB_SHA256=3c18694bd5e45003322b5ab7fdbe01a48b23414ab25df8a0346aae67cc065e92
+ARCHIVE_PATH=docs/archive/evidence/p0-stabilization/s25_p0_3_weighted_qwen25_raw.log
+ARCHIVE_FILE_SHA256=3c18694bd5e45003322b5ab7fdbe01a48b23414ab25df8a0346aae67cc065e92
+BYTE_IDENTICAL=true
+```
+
+### [022] `docs/evidence/p0-stabilization/s25_qwen_parity_track1_part2_raw.log`
+```text
+SOURCE_PATH=docs/evidence/p0-stabilization/s25_qwen_parity_track1_part2_raw.log
+SOURCE_BLOB_SHA256=c7443fee961d9957d5a81e1a4146e70c1f02cb9b86b4693ca54167b2fb35f8f2
+ARCHIVE_PATH=docs/archive/evidence/p0-stabilization/s25_qwen_parity_track1_part2_raw.log
+ARCHIVE_FILE_SHA256=c7443fee961d9957d5a81e1a4146e70c1f02cb9b86b4693ca54167b2fb35f8f2
+BYTE_IDENTICAL=true
+```
+
+### [023] `docs/evidence/p0-stabilization/s25_qwen_vulkan_full_offload_raw.log`
+```text
+SOURCE_PATH=docs/evidence/p0-stabilization/s25_qwen_vulkan_full_offload_raw.log
+SOURCE_BLOB_SHA256=8c72e564d68efabc0b005a6168506a7df44c234ee6050e02fbd7325543c3d1e3
+ARCHIVE_PATH=docs/archive/evidence/p0-stabilization/s25_qwen_vulkan_full_offload_raw.log
+ARCHIVE_FILE_SHA256=8c72e564d68efabc0b005a6168506a7df44c234ee6050e02fbd7325543c3d1e3
+BYTE_IDENTICAL=true
+```
+
+### [024] `docs/evidence/p0-stabilization/s25_qwen_vulkan_track1_part3_raw.log`
+```text
+SOURCE_PATH=docs/evidence/p0-stabilization/s25_qwen_vulkan_track1_part3_raw.log
+SOURCE_BLOB_SHA256=ca5ad0f2ea5ed741a79295a3036d389bf68ba1a437fae3ed9277779b1f90f143
+ARCHIVE_PATH=docs/archive/evidence/p0-stabilization/s25_qwen_vulkan_track1_part3_raw.log
+ARCHIVE_FILE_SHA256=ca5ad0f2ea5ed741a79295a3036d389bf68ba1a437fae3ed9277779b1f90f143
+BYTE_IDENTICAL=true
+```
+
+### [025] `docs/evidence/p0-stabilization/s25_vulkan_phase4b_raw.log`
+```text
+SOURCE_PATH=docs/evidence/p0-stabilization/s25_vulkan_phase4b_raw.log
+SOURCE_BLOB_SHA256=41a6353c33e507f5cff631b490d8f97396569de29d0912e647b377dbfcd5df2a
+ARCHIVE_PATH=docs/archive/evidence/p0-stabilization/s25_vulkan_phase4b_raw.log
+ARCHIVE_FILE_SHA256=41a6353c33e507f5cff631b490d8f97396569de29d0912e647b377dbfcd5df2a
+BYTE_IDENTICAL=true
+```
+
+### [026] `docs/evidence/p0-stabilization/s25_vulkan_sgemm_track1_raw.log`
+```text
+SOURCE_PATH=docs/evidence/p0-stabilization/s25_vulkan_sgemm_track1_raw.log
+SOURCE_BLOB_SHA256=e6a79a6fafc8e584e78838bd7acb57e48dd32e15b257f730cbe5c3cbf7630a00
+ARCHIVE_PATH=docs/archive/evidence/p0-stabilization/s25_vulkan_sgemm_track1_raw.log
+ARCHIVE_FILE_SHA256=e6a79a6fafc8e584e78838bd7acb57e48dd32e15b257f730cbe5c3cbf7630a00
+BYTE_IDENTICAL=true
+```
+
+### [027] `docs/evidence/p0-stabilization/track1_sgemm_consolidated_report.txt`
+```text
+SOURCE_PATH=docs/evidence/p0-stabilization/track1_sgemm_consolidated_report.txt
+SOURCE_BLOB_SHA256=358809ee225e10d5486c265e601bf000498d6ee6e55cd6270e8239dc215dcff5
+ARCHIVE_PATH=docs/archive/evidence/p0-stabilization/track1_sgemm_consolidated_report.txt
+ARCHIVE_FILE_SHA256=358809ee225e10d5486c265e601bf000498d6ee6e55cd6270e8239dc215dcff5
+BYTE_IDENTICAL=true
+```
+
+### [028] `docs/evidence/phase4b/SHA256SUMS`
+```text
+SOURCE_PATH=docs/evidence/phase4b/SHA256SUMS
+SOURCE_BLOB_SHA256=153d4f9b642af794b6738d462718ff27889c1888ac57a637ad62cc9b5a4f6ed0
+ARCHIVE_PATH=docs/archive/evidence/phase4b/SHA256SUMS
+ARCHIVE_FILE_SHA256=153d4f9b642af794b6738d462718ff27889c1888ac57a637ad62cc9b5a4f6ed0
+BYTE_IDENTICAL=true
+```
+
+### [029] `docs/evidence/phase4b/a35_limits_official.txt`
+```text
+SOURCE_PATH=docs/evidence/phase4b/a35_limits_official.txt
+SOURCE_BLOB_SHA256=110b1569d9e224cc2ae23509e46c987ab35a5798b0eefa2a6ff4e41df0a02b21
+ARCHIVE_PATH=docs/archive/evidence/phase4b/a35_limits_official.txt
+ARCHIVE_FILE_SHA256=110b1569d9e224cc2ae23509e46c987ab35a5798b0eefa2a6ff4e41df0a02b21
+BYTE_IDENTICAL=true
+```
+
+### [030] `docs/evidence/phase4b/a35_phase3_raw.log`
+```text
+SOURCE_PATH=docs/evidence/phase4b/a35_phase3_raw.log
+SOURCE_BLOB_SHA256=6b0866678e7b82b5c5005f94d6aaac3f92c9e58c598de951149cd51045f20394
+ARCHIVE_PATH=docs/archive/evidence/phase4b/a35_phase3_raw.log
+ARCHIVE_FILE_SHA256=6b0866678e7b82b5c5005f94d6aaac3f92c9e58c598de951149cd51045f20394
+BYTE_IDENTICAL=true
+```
+
+### [031] `docs/evidence/phase4b/a35_phase4a_raw.log`
+```text
+SOURCE_PATH=docs/evidence/phase4b/a35_phase4a_raw.log
+SOURCE_BLOB_SHA256=17d5a08f441ef00e0dc031505a6add7d0ab0ef4020c9b1bf7226d7217347ffed
+ARCHIVE_PATH=docs/archive/evidence/phase4b/a35_phase4a_raw.log
+ARCHIVE_FILE_SHA256=17d5a08f441ef00e0dc031505a6add7d0ab0ef4020c9b1bf7226d7217347ffed
+BYTE_IDENTICAL=true
+```
+
+### [032] `docs/evidence/phase4b/a35_phase4b_raw.log`
+```text
+SOURCE_PATH=docs/evidence/phase4b/a35_phase4b_raw.log
+SOURCE_BLOB_SHA256=7d9c04cbd736e01d7a0c120fb581112188be313bfd80f5f22174adf01a1cefa2
+ARCHIVE_PATH=docs/archive/evidence/phase4b/a35_phase4b_raw.log
+ARCHIVE_FILE_SHA256=7d9c04cbd736e01d7a0c120fb581112188be313bfd80f5f22174adf01a1cefa2
+BYTE_IDENTICAL=true
+```
+
+### [033] `docs/evidence/phase4b/binary-manifest.sha256`
+```text
+SOURCE_PATH=docs/evidence/phase4b/binary-manifest.sha256
+SOURCE_BLOB_SHA256=65f8b8123e78aa6ff13ba9e0e0dbbea92397d96ee563787b2c7755ff8ef1207b
+ARCHIVE_PATH=docs/archive/evidence/phase4b/binary-manifest.sha256
+ARCHIVE_FILE_SHA256=65f8b8123e78aa6ff13ba9e0e0dbbea92397d96ee563787b2c7755ff8ef1207b
+BYTE_IDENTICAL=true
+```
+
+### [034] `docs/evidence/phase4b/build_environment.txt`
+```text
+SOURCE_PATH=docs/evidence/phase4b/build_environment.txt
+SOURCE_BLOB_SHA256=afc30f36509824b740897ee43383620cbe051c3f337ec7c4902bfe84b1847519
+ARCHIVE_PATH=docs/archive/evidence/phase4b/build_environment.txt
+ARCHIVE_FILE_SHA256=afc30f36509824b740897ee43383620cbe051c3f337ec7c4902bfe84b1847519
+BYTE_IDENTICAL=true
+```
+
+### [035] `docs/evidence/phase4b/phase4b_hardware_verification_report.md`
+```text
+SOURCE_PATH=docs/evidence/phase4b/phase4b_hardware_verification_report.md
+SOURCE_BLOB_SHA256=ca265a87423be705d0184fdca8988ad240f37868faa8fbc8215a4e004ede438f
+ARCHIVE_PATH=docs/archive/evidence/phase4b/phase4b_hardware_verification_report.md
+ARCHIVE_FILE_SHA256=ca265a87423be705d0184fdca8988ad240f37868faa8fbc8215a4e004ede438f
+BYTE_IDENTICAL=true
+```
+
+### [036] `docs/evidence/phase4b/s25_limits_official.txt`
+```text
+SOURCE_PATH=docs/evidence/phase4b/s25_limits_official.txt
+SOURCE_BLOB_SHA256=90f32968e485cea59dbece3bee658a5389fd153b3af43cf3bd9d194312a7923c
+ARCHIVE_PATH=docs/archive/evidence/phase4b/s25_limits_official.txt
+ARCHIVE_FILE_SHA256=90f32968e485cea59dbece3bee658a5389fd153b3af43cf3bd9d194312a7923c
+BYTE_IDENTICAL=true
+```
+
+### [037] `docs/evidence/phase4b/s25_phase3_raw.log`
+```text
+SOURCE_PATH=docs/evidence/phase4b/s25_phase3_raw.log
+SOURCE_BLOB_SHA256=48b372cc4df2c92ce63b1accc641da2a5a91b9988ad32513df819cd9fceb07ed
+ARCHIVE_PATH=docs/archive/evidence/phase4b/s25_phase3_raw.log
+ARCHIVE_FILE_SHA256=48b372cc4df2c92ce63b1accc641da2a5a91b9988ad32513df819cd9fceb07ed
+BYTE_IDENTICAL=true
+```
+
+### [038] `docs/evidence/phase4b/s25_phase4a_raw.log`
+```text
+SOURCE_PATH=docs/evidence/phase4b/s25_phase4a_raw.log
+SOURCE_BLOB_SHA256=b502e884b6335b0a17ec4bd21c7116ff635ff72f454fc445521b4753cc0c5e05
+ARCHIVE_PATH=docs/archive/evidence/phase4b/s25_phase4a_raw.log
+ARCHIVE_FILE_SHA256=b502e884b6335b0a17ec4bd21c7116ff635ff72f454fc445521b4753cc0c5e05
+BYTE_IDENTICAL=true
+```
+
+### [039] `docs/evidence/phase4b/s25_phase4b_raw.log`
+```text
+SOURCE_PATH=docs/evidence/phase4b/s25_phase4b_raw.log
+SOURCE_BLOB_SHA256=63a4c2aa7415419924465285117b0ebe3562869a58b85fd2f3e080c44bca50bb
+ARCHIVE_PATH=docs/archive/evidence/phase4b/s25_phase4b_raw.log
+ARCHIVE_FILE_SHA256=63a4c2aa7415419924465285117b0ebe3562869a58b85fd2f3e080c44bca50bb
+BYTE_IDENTICAL=true
+```
+
+### [040] `docs/evidence/phase4b/source-manifest.sha256`
+```text
+SOURCE_PATH=docs/evidence/phase4b/source-manifest.sha256
+SOURCE_BLOB_SHA256=b2d7d70fa4ff44f307a04aaff6b36f0c7958d676a452f6555a835deb74943481
+ARCHIVE_PATH=docs/archive/evidence/phase4b/source-manifest.sha256
+ARCHIVE_FILE_SHA256=b2d7d70fa4ff44f307a04aaff6b36f0c7958d676a452f6555a835deb74943481
+BYTE_IDENTICAL=true
+```
+
+### [041] `docs/evidence/phase4b/vector_add_spec.spvasm`
+```text
+SOURCE_PATH=docs/evidence/phase4b/vector_add_spec.spvasm
+SOURCE_BLOB_SHA256=30eff2522e985eb6704fd3ab104e778bb35d39347fbc5becbdb1cba116529aeb
+ARCHIVE_PATH=docs/archive/evidence/phase4b/vector_add_spec.spvasm
+ARCHIVE_FILE_SHA256=30eff2522e985eb6704fd3ab104e778bb35d39347fbc5becbdb1cba116529aeb
+BYTE_IDENTICAL=true
+```
+
+### [042] `docs/evidence/s22-adreno730/README.md`
+```text
+SOURCE_PATH=docs/evidence/s22-adreno730/README.md
+SOURCE_BLOB_SHA256=a286f0b2c38e40ffc23307ed4be3d9a24ad480d2798b958c642ba0076c713777
+ARCHIVE_PATH=docs/archive/evidence/s22-adreno730/README.md
+ARCHIVE_FILE_SHA256=a286f0b2c38e40ffc23307ed4be3d9a24ad480d2798b958c642ba0076c713777
+BYTE_IDENTICAL=true
+```
+
+### [043] `docs/evidence/s22-adreno730/SHA256SUMS`
+```text
+SOURCE_PATH=docs/evidence/s22-adreno730/SHA256SUMS
+SOURCE_BLOB_SHA256=ea008e074374a3e63de72ddff805fc8ee278767f51d3e9faad2080fa587d70c9
+ARCHIVE_PATH=docs/archive/evidence/s22-adreno730/SHA256SUMS
+ARCHIVE_FILE_SHA256=ea008e074374a3e63de72ddff805fc8ee278767f51d3e9faad2080fa587d70c9
+BYTE_IDENTICAL=true
+```
+
+### [044] `docs/evidence/s22-adreno730/a35_phase4b_regression.log`
+```text
+SOURCE_PATH=docs/evidence/s22-adreno730/a35_phase4b_regression.log
+SOURCE_BLOB_SHA256=ec47fd51c00f4cbf32ffb6b3884f1c76278a3c2f47a403d138d84cff94c5b692
+ARCHIVE_PATH=docs/archive/evidence/s22-adreno730/a35_phase4b_regression.log
+ARCHIVE_FILE_SHA256=ec47fd51c00f4cbf32ffb6b3884f1c76278a3c2f47a403d138d84cff94c5b692
+BYTE_IDENTICAL=true
+```
+
+### [045] `docs/evidence/s22-adreno730/binary-manifest.sha256`
+```text
+SOURCE_PATH=docs/evidence/s22-adreno730/binary-manifest.sha256
+SOURCE_BLOB_SHA256=c19a401733592ea92862b3010974cb6fad06469641ec40aeb22211ba8de6bbf0
+ARCHIVE_PATH=docs/archive/evidence/s22-adreno730/binary-manifest.sha256
+ARCHIVE_FILE_SHA256=c19a401733592ea92862b3010974cb6fad06469641ec40aeb22211ba8de6bbf0
+BYTE_IDENTICAL=true
+```
+
+### [046] `docs/evidence/s22-adreno730/device-environment.txt`
+```text
+SOURCE_PATH=docs/evidence/s22-adreno730/device-environment.txt
+SOURCE_BLOB_SHA256=301495586863fdc78fe1e26620f30ab9744441c9ad6e4361e437a665a433f69a
+ARCHIVE_PATH=docs/archive/evidence/s22-adreno730/device-environment.txt
+ARCHIVE_FILE_SHA256=301495586863fdc78fe1e26620f30ab9744441c9ad6e4361e437a665a433f69a
+BYTE_IDENTICAL=true
+```
+
+### [047] `docs/evidence/s22-adreno730/official_vulkan_probe_full.cpp`
+```text
+SOURCE_PATH=docs/evidence/s22-adreno730/official_vulkan_probe_full.cpp
+SOURCE_BLOB_SHA256=bbd31c64a6c839cff86187a4cec9e8f453c93aec2b9975169083f2a056bdb93c
+ARCHIVE_PATH=docs/archive/evidence/s22-adreno730/official_vulkan_probe_full.cpp
+ARCHIVE_FILE_SHA256=bbd31c64a6c839cff86187a4cec9e8f453c93aec2b9975169083f2a056bdb93c
+BYTE_IDENTICAL=true
+```
+
+### [048] `docs/evidence/s22-adreno730/s22-probe-build.txt`
+```text
+SOURCE_PATH=docs/evidence/s22-adreno730/s22-probe-build.txt
+SOURCE_BLOB_SHA256=295b8dee8fd0e89c66481b84e3f1832a03c793dc59bac686cad5ebc4fc36c095
+ARCHIVE_PATH=docs/archive/evidence/s22-adreno730/s22-probe-build.txt
+ARCHIVE_FILE_SHA256=295b8dee8fd0e89c66481b84e3f1832a03c793dc59bac686cad5ebc4fc36c095
+BYTE_IDENTICAL=true
+```
+
+### [049] `docs/evidence/s22-adreno730/s22-provenance.txt`
+```text
+SOURCE_PATH=docs/evidence/s22-adreno730/s22-provenance.txt
+SOURCE_BLOB_SHA256=a20e74075b2e74b99dc5c67bb9be919f0aea62d167bf4f277592171cd1ce932f
+ARCHIVE_PATH=docs/archive/evidence/s22-adreno730/s22-provenance.txt
+ARCHIVE_FILE_SHA256=a20e74075b2e74b99dc5c67bb9be919f0aea62d167bf4f277592171cd1ce932f
+BYTE_IDENTICAL=true
+```
+
+### [050] `docs/evidence/s22-adreno730/s22_phase3_raw.log`
+```text
+SOURCE_PATH=docs/evidence/s22-adreno730/s22_phase3_raw.log
+SOURCE_BLOB_SHA256=608143683f19b41d5ea2f2a8178ab089679c2926eaee5eabe834b48eedc2b668
+ARCHIVE_PATH=docs/archive/evidence/s22-adreno730/s22_phase3_raw.log
+ARCHIVE_FILE_SHA256=608143683f19b41d5ea2f2a8178ab089679c2926eaee5eabe834b48eedc2b668
+BYTE_IDENTICAL=true
+```
+
+### [051] `docs/evidence/s22-adreno730/s22_phase4a_raw.log`
+```text
+SOURCE_PATH=docs/evidence/s22-adreno730/s22_phase4a_raw.log
+SOURCE_BLOB_SHA256=cf371cb78599d2e386e69e693e37bbafbab4d29536223b24104025e3b2fd91b7
+ARCHIVE_PATH=docs/archive/evidence/s22-adreno730/s22_phase4a_raw.log
+ARCHIVE_FILE_SHA256=cf371cb78599d2e386e69e693e37bbafbab4d29536223b24104025e3b2fd91b7
+BYTE_IDENTICAL=true
+```
+
+### [052] `docs/evidence/s22-adreno730/s22_phase4b_raw.log`
+```text
+SOURCE_PATH=docs/evidence/s22-adreno730/s22_phase4b_raw.log
+SOURCE_BLOB_SHA256=0a9b4a415c40d2e4e9fb0b54b1f63336d9caafc05a1689fbb128b41d24ab18a2
+ARCHIVE_PATH=docs/archive/evidence/s22-adreno730/s22_phase4b_raw.log
+ARCHIVE_FILE_SHA256=0a9b4a415c40d2e4e9fb0b54b1f63336d9caafc05a1689fbb128b41d24ab18a2
+BYTE_IDENTICAL=true
+```
+
+### [053] `docs/evidence/s22-adreno730/s25_phase4b_regression.log`
+```text
+SOURCE_PATH=docs/evidence/s22-adreno730/s25_phase4b_regression.log
+SOURCE_BLOB_SHA256=5b82f0caa07b74ff7403e85d0489ab3d37e82a70d057722f7cced64335566035
+ARCHIVE_PATH=docs/archive/evidence/s22-adreno730/s25_phase4b_regression.log
+ARCHIVE_FILE_SHA256=5b82f0caa07b74ff7403e85d0489ab3d37e82a70d057722f7cced64335566035
+BYTE_IDENTICAL=true
+```
+
+### [054] `docs/evidence/s22-adreno730/source-manifest.sha256`
+```text
+SOURCE_PATH=docs/evidence/s22-adreno730/source-manifest.sha256
+SOURCE_BLOB_SHA256=1401b93618a9a78f4545c7b59ab066f035f0663a4d362f5dec659ec9ebb91d16
+ARCHIVE_PATH=docs/archive/evidence/s22-adreno730/source-manifest.sha256
+ARCHIVE_FILE_SHA256=1401b93618a9a78f4545c7b59ab066f035f0663a4d362f5dec659ec9ebb91d16
+BYTE_IDENTICAL=true
+```
+
+### [055] `docs/evidence/s22-adreno730/vulkan-limits.txt`
+```text
+SOURCE_PATH=docs/evidence/s22-adreno730/vulkan-limits.txt
+SOURCE_BLOB_SHA256=7b346226e7ee268c94be115e4a67acee52f1fac70d11be845a04e5ee3f321884
+ARCHIVE_PATH=docs/archive/evidence/s22-adreno730/vulkan-limits.txt
+ARCHIVE_FILE_SHA256=7b346226e7ee268c94be115e4a67acee52f1fac70d11be845a04e5ee3f321884
+BYTE_IDENTICAL=true
+```
+
