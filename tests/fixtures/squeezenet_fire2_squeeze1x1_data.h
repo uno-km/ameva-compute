@@ -17,11 +17,7 @@
 #define SQUEEZENET_FIRE2_WEIGHT_ELEMS 1024u
 #define SQUEEZENET_FIRE2_BIAS_ELEMS 16u
 
-static const union {
-    uint32_t u32[1024];
-    float f32[1024];
-} kSqueezeNetFire2WeightUnion = {
-    {
+static const uint32_t kSqueezeNetFire2WeightU32[1024] = {
         0x3cf56253u, 0xbdac21e2u, 0x3db8058fu, 0xbd17325au, 0x3edb5366u, 0x3d51aec7u, 0x3cf20b63u, 0x3e262955u,
         0xbe5afe44u, 0x3cd21887u, 0xbe9e9858u, 0x3ebf9e38u, 0x3cd71961u, 0x3d1a0fb3u, 0x3db19566u, 0xbe89bf9bu,
         0x3e83768bu, 0xbdde24f1u, 0x3e840703u, 0xbe701f6du, 0x3edc9dacu, 0x3d13f50fu, 0x3d832f03u, 0xbd933ea3u,
@@ -150,21 +146,11 @@ static const union {
         0xbe18a2ddu, 0x3c9f7764u, 0xbddf9529u, 0x3d112723u, 0xbd0bc69eu, 0xbe7fb601u, 0xbe536f2eu, 0x3d3c21f6u,
         0xbd812a8du, 0x3a426deeu, 0x3dba5667u, 0x3dbea9f7u, 0x3d0bb574u, 0x3dbac5b5u, 0x3ddf525fu, 0xbe5c310bu,
         0x3cd1211du, 0x3e395264u, 0xbd7b364du, 0xbe1dab08u, 0x3e8741cbu, 0xbde42a66u, 0x3d149e8bu, 0xbdbcdbf3u,
-    }
 };
 
-#define kSqueezeNetFire2Weight (kSqueezeNetFire2WeightUnion.f32)
-
-static const union {
-    uint32_t u32[16];
-    float f32[16];
-} kSqueezeNetFire2BiasUnion = {
-    {
-        0xbd90f940u, 0x3d4392e3u, 0x3cd5efd9u, 0x3b7c4c6du, 0xbcc6ac04u, 0x3dfc17d6u, 0x3de29448u, 0xbdee6828u,
-        0xbd58bedeu, 0x3e530ad6u, 0x3dc3a9b5u, 0x38ce2749u, 0x3e3c26e3u, 0x3d77bfa0u, 0xbd826657u, 0x3e788ec7u,
-    }
+static const uint32_t kSqueezeNetFire2BiasU32[16] = {
+    0xbd90f940u, 0x3d4392e3u, 0x3cd5efd9u, 0x3b7c4c6du, 0xbcc6ac04u, 0x3dfc17d6u, 0x3de29448u, 0xbdee6828u,
+    0xbd58bedeu, 0x3e530ad6u, 0x3dc3a9b5u, 0x38ce2749u, 0x3e3c26e3u, 0x3d77bfa0u, 0xbd826657u, 0x3e788ec7u,
 };
-
-#define kSqueezeNetFire2Bias (kSqueezeNetFire2BiasUnion.f32)
 
 #endif /* SQUEEZENET_FIRE2_SQUEEZE1X1_DATA_H */
