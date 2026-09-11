@@ -102,6 +102,37 @@ AcResult ac_vk_buffer_flush(AcVkBuffer* buf, size_t offset, size_t size_bytes);
  */
 AcResult ac_vk_buffer_invalidate(AcVkBuffer* buf, size_t offset, size_t size_bytes);
 
+/**
+ * @brief Retrieve direct pointer to persistently mapped memory.
+ *
+ * @param buf Target buffer.
+ * @param out_ptr Pointer to mapped virtual address.
+ * @return AC_SUCCESS on success, error code on failure.
+ */
+AcResult ac_vk_buffer_map(AcVkBuffer* buf, void** out_ptr);
+
+/**
+ * @brief Upload data from host into buffer with cache flush.
+ *
+ * @param buf Target buffer.
+ * @param src Host source buffer.
+ * @param offset Byte offset into buffer.
+ * @param size_bytes Number of bytes to upload.
+ * @return AC_SUCCESS on success, error code on failure.
+ */
+AcResult ac_vk_buffer_upload(AcVkBuffer* buf, const void* src, size_t offset, size_t size_bytes);
+
+/**
+ * @brief Read data from buffer into host memory with cache invalidation.
+ *
+ * @param buf Target buffer.
+ * @param dst Host destination buffer.
+ * @param offset Byte offset into buffer.
+ * @param size_bytes Number of bytes to read back.
+ * @return AC_SUCCESS on success, error code on failure.
+ */
+AcResult ac_vk_buffer_readback(AcVkBuffer* buf, void* dst, size_t offset, size_t size_bytes);
+
 #ifdef __cplusplus
 }
 #endif

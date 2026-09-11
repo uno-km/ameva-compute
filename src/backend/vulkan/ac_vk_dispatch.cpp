@@ -99,6 +99,13 @@ AcResult ac_vk_dispatch(
         *out_event = NULL;
     }
 
+    const char* fail_stage = getenv("AMEVA_RUNTIME_FAIL_STAGE");
+    if (!fail_stage) fail_stage = getenv("AMEVA_BACKEND_FAIL_STAGE");
+    if (fail_stage && strcmp(fail_stage, "dispatch") == 0) {
+        fprintf(stderr, "[AMEVA_RUNTIME_FAIL_INJECTION] Simulated failure at stage: dispatch\n");
+        return AC_ERR_DRIVER_CRASH_OR_LOST;
+    }
+
     if (!ctx || ctx->device == VK_NULL_HANDLE) {
         return AC_ERR_INVALID_CONTEXT;
     }

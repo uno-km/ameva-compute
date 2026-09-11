@@ -32,6 +32,7 @@ typedef struct {
     // Granular graph kind dispatch counters
     uint64_t encoder_dispatch_count;
     uint64_t cross_dispatch_count;
+    uint64_t unknown_graph_kind_count;
 
     // Symmetric Lifecycle counters
     uint64_t context_create_count;

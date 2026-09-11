@@ -56,70 +56,129 @@ static bool init_hardware_pipeline() {
     std::lock_guard<std::mutex> lock(s_hw_mutex);
     if (s_vk_ctx != nullptr) return true;
 
-    AcResult res = ac_vk_context_create(&s_vk_ctx);
+    AcResult res = AC_SUCCESS;
+    const char * init_fail_stage = getenv("AMEVA_INIT_FAIL_STAGE");
+
+    // Stage 1: Context Creation
+    if (init_fail_stage && strcmp(init_fail_stage, "context") == 0) {
+        fprintf(stderr, "[AMEVA_INIT_FAIL_INJECTION] Simulated failure at stage: context\n");
+        goto fail_context;
+    }
+
+    res = ac_vk_context_create(&s_vk_ctx);
     if (res != AC_SUCCESS || !s_vk_ctx) {
         fprintf(stderr, "[AMEVA_BACKEND] FATAL: ac_vk_context_create failed with code %d\n", res);
-        return false;
+        goto fail_context;
     }
     g_counters.context_create_count++;
 
     if (s_vk_ctx->device_properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) {
         fprintf(stderr, "[AMEVA_BACKEND] FATAL: Vulkan context bound to CPU fallback! Rejected.\n");
-        ac_vk_context_destroy(s_vk_ctx);
-        s_vk_ctx = nullptr;
-        g_counters.context_destroy_count++;
-        return false;
+        goto fail_kernel;
     }
 
-    const char * env_path = getenv("AMEVA_SPIRV_PATH");
-    const char * spv_path = env_path ? env_path : "/data/data/com.termux/files/home/matmul_f16_f32.spv";
-    std::ifstream spv_file(spv_path, std::ios::binary | std::ios::ate);
-    if (!spv_file) {
-        fprintf(stderr, "[AMEVA_BACKEND] FATAL: Cannot open SPIR-V binary %s\n", spv_path);
-        ac_vk_context_destroy(s_vk_ctx);
-        s_vk_ctx = nullptr;
-        g_counters.context_destroy_count++;
-        return false;
+    // Stage 2: Kernel Creation
+    if (init_fail_stage && strcmp(init_fail_stage, "kernel") == 0) {
+        fprintf(stderr, "[AMEVA_INIT_FAIL_INJECTION] Simulated failure at stage: kernel\n");
+        goto fail_kernel;
     }
-    size_t spv_size = spv_file.tellg();
-    spv_file.seekg(0, std::ios::beg);
-    std::vector<uint32_t> spv_code(spv_size / sizeof(uint32_t));
-    spv_file.read(reinterpret_cast<char*>(spv_code.data()), spv_size);
-    spv_file.close();
 
-    AcKernelMetadata meta = {};
-    meta.kernel_name = "matmul_f16_f32";
-    meta.entry_point = "main";
-    meta.binding_count = 3;
-    meta.bindings = nullptr;
-    meta.push_constant_size = sizeof(MatMulPushConstants);
-    meta.local_size = {16, 16, 1};
-    meta.required_features = AC_FEATURE_NONE;
-    meta.expected_spirv_sha256 = nullptr;
+    {
+        const char * env_path = getenv("AMEVA_SPIRV_PATH");
+        const char * spv_path = env_path ? env_path : "/data/data/com.termux/files/home/matmul_f16_f32.spv";
+        std::ifstream spv_file(spv_path, std::ios::binary | std::ios::ate);
+        if (!spv_file) {
+            fprintf(stderr, "[AMEVA_BACKEND] FATAL: Cannot open SPIR-V binary %s\n", spv_path);
+            goto fail_kernel;
+        }
+        size_t spv_size = spv_file.tellg();
+        spv_file.seekg(0, std::ios::beg);
+        std::vector<uint32_t> spv_code(spv_size / sizeof(uint32_t));
+        spv_file.read(reinterpret_cast<char*>(spv_code.data()), spv_size);
+        spv_file.close();
 
-    res = ac_vk_kernel_create_with_metadata(s_vk_ctx, spv_code.data(), spv_size, &meta, &s_vk_kernel);
-    if (res != AC_SUCCESS || !s_vk_kernel) {
-        fprintf(stderr, "[AMEVA_BACKEND] FATAL: ac_vk_kernel_create_with_metadata failed with code %d\n", res);
-        ac_vk_context_destroy(s_vk_ctx);
-        s_vk_ctx = nullptr;
-        g_counters.context_destroy_count++;
-        return false;
+        AcKernelMetadata meta = {};
+        meta.kernel_name = "matmul_f16_f32";
+        meta.entry_point = "main";
+        meta.binding_count = 3;
+        meta.bindings = nullptr;
+        meta.push_constant_size = sizeof(MatMulPushConstants);
+        meta.local_size = {16, 16, 1};
+        meta.required_features = AC_FEATURE_NONE;
+        meta.expected_spirv_sha256 = nullptr;
+
+        res = ac_vk_kernel_create_with_metadata(s_vk_ctx, spv_code.data(), spv_size, &meta, &s_vk_kernel);
+        if (res != AC_SUCCESS || !s_vk_kernel) {
+            fprintf(stderr, "[AMEVA_BACKEND] FATAL: ac_vk_kernel_create_with_metadata failed with code %d\n", res);
+            goto fail_kernel;
+        }
+        g_counters.kernel_create_count++;
     }
-    g_counters.kernel_create_count++;
 
+    // Stage 3: Weight Buffer Allocation
+    if (init_fail_stage && strcmp(init_fail_stage, "buf_w") == 0) {
+        fprintf(stderr, "[AMEVA_INIT_FAIL_INJECTION] Simulated failure at stage: buf_w\n");
+        goto fail_buf_w;
+    }
     res = ac_vk_buffer_create(s_vk_ctx, WEIGHT_BYTES, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &s_buf_w);
-    if (res != AC_SUCCESS) return false;
+    if (res != AC_SUCCESS || !s_buf_w) {
+        fprintf(stderr, "[AMEVA_BACKEND] FATAL: ac_vk_buffer_create(s_buf_w) failed with code %d\n", res);
+        goto fail_buf_w;
+    }
     g_counters.buffer_create_count++;
 
+    // Stage 4: Activation Buffer Allocation
+    if (init_fail_stage && strcmp(init_fail_stage, "buf_a") == 0) {
+        fprintf(stderr, "[AMEVA_INIT_FAIL_INJECTION] Simulated failure at stage: buf_a\n");
+        goto fail_buf_a;
+    }
     res = ac_vk_buffer_create(s_vk_ctx, ACT_BYTES, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &s_buf_a);
-    if (res != AC_SUCCESS) return false;
+    if (res != AC_SUCCESS || !s_buf_a) {
+        fprintf(stderr, "[AMEVA_BACKEND] FATAL: ac_vk_buffer_create(s_buf_a) failed with code %d\n", res);
+        goto fail_buf_a;
+    }
     g_counters.buffer_create_count++;
 
+    // Stage 5: Output Buffer Allocation
+    if (init_fail_stage && strcmp(init_fail_stage, "buf_o") == 0) {
+        fprintf(stderr, "[AMEVA_INIT_FAIL_INJECTION] Simulated failure at stage: buf_o\n");
+        goto fail_buf_o;
+    }
     res = ac_vk_buffer_create(s_vk_ctx, OUT_BYTES, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &s_buf_o);
-    if (res != AC_SUCCESS) return false;
+    if (res != AC_SUCCESS || !s_buf_o) {
+        fprintf(stderr, "[AMEVA_BACKEND] FATAL: ac_vk_buffer_create(s_buf_o) failed with code %d\n", res);
+        goto fail_buf_o;
+    }
     g_counters.buffer_create_count++;
 
     return true;
+
+fail_buf_o:
+    if (s_buf_a) {
+        ac_vk_buffer_destroy(s_buf_a);
+        s_buf_a = nullptr;
+        g_counters.buffer_destroy_count++;
+    }
+fail_buf_a:
+    if (s_buf_w) {
+        ac_vk_buffer_destroy(s_buf_w);
+        s_buf_w = nullptr;
+        g_counters.buffer_destroy_count++;
+    }
+fail_buf_w:
+    if (s_vk_kernel) {
+        ac_vk_kernel_destroy(s_vk_kernel);
+        s_vk_kernel = nullptr;
+        g_counters.kernel_destroy_count++;
+    }
+fail_kernel:
+    if (s_vk_ctx) {
+        ac_vk_context_destroy(s_vk_ctx);
+        s_vk_ctx = nullptr;
+        g_counters.context_destroy_count++;
+    }
+fail_context:
+    return false;
 }
 
 void ameva_backend_teardown_hardware(void) {
@@ -159,45 +218,53 @@ static bool execute_vulkan_matmul(struct ggml_tensor * t, uint32_t graph_run_id,
             } else if (strstr(n, "encoder") || strstr(n, "enc")) {
                 current_kind = "ENCODER";
             } else {
-                current_kind = "ENCODER";
+                current_kind = "UNKNOWN";
             }
         }
     }
 
-    const char * fail_stage = getenv("AMEVA_BACKEND_FAIL_STAGE");
-
-    // Failure Injection: Map Stage
-    if (fail_stage && strcmp(fail_stage, "map") == 0) {
-        fprintf(stderr, "[AMEVA_BACKEND_FAIL_INJECTION] Simulated failure at stage: map\n");
-        return false;
+    if (strcmp(current_kind, "UNKNOWN") == 0) {
+        g_counters.unknown_graph_kind_count++;
     }
 
-    // 1. Upload input weights and activations to UMA buffers
+    // 1. Upload input weights using ac_vk_buffer_map and flush
+    void * w_ptr = nullptr;
+    AcResult res = ac_vk_buffer_map(s_buf_w, &w_ptr);
+    if (res != AC_SUCCESS || !w_ptr) {
+        fprintf(stderr, "[AMEVA_BACKEND] FATAL: ac_vk_buffer_map(s_buf_w) failed with code %d\n", res);
+        return false;
+    }
     if (t->src[0]->buffer) {
-        ggml_backend_tensor_get(t->src[0], s_buf_w->mapped_ptr, 0, WEIGHT_BYTES);
+        ggml_backend_tensor_get(t->src[0], w_ptr, 0, WEIGHT_BYTES);
     } else if (t->src[0]->data) {
-        memcpy(s_buf_w->mapped_ptr, t->src[0]->data, WEIGHT_BYTES);
+        memcpy(w_ptr, t->src[0]->data, WEIGHT_BYTES);
     } else {
         return false;
     }
 
+    // Upload activations
+    void * a_ptr = nullptr;
+    res = ac_vk_buffer_map(s_buf_a, &a_ptr);
+    if (res != AC_SUCCESS || !a_ptr) {
+        fprintf(stderr, "[AMEVA_BACKEND] FATAL: ac_vk_buffer_map(s_buf_a) failed with code %d\n", res);
+        return false;
+    }
     if (t->src[1]->buffer) {
-        ggml_backend_tensor_get(t->src[1], s_buf_a->mapped_ptr, 0, ACT_BYTES);
+        ggml_backend_tensor_get(t->src[1], a_ptr, 0, ACT_BYTES);
     } else if (t->src[1]->data) {
-        memcpy(s_buf_a->mapped_ptr, t->src[1]->data, ACT_BYTES);
+        memcpy(a_ptr, t->src[1]->data, ACT_BYTES);
     } else {
         return false;
     }
 
-    // Failure Injection: Flush Stage
-    if (fail_stage && strcmp(fail_stage, "flush") == 0) {
-        fprintf(stderr, "[AMEVA_BACKEND_FAIL_INJECTION] Simulated failure at stage: flush\n");
+    res = ac_vk_buffer_flush(s_buf_w, 0, WEIGHT_BYTES);
+    if (res != AC_SUCCESS) {
+        fprintf(stderr, "[AMEVA_BACKEND] FATAL: ac_vk_buffer_flush(s_buf_w) failed with code %d\n", res);
         return false;
     }
-
-    // Failure Injection: Dispatch Stage
-    if (fail_stage && strcmp(fail_stage, "dispatch") == 0) {
-        fprintf(stderr, "[AMEVA_BACKEND_FAIL_INJECTION] Simulated failure at stage: dispatch\n");
+    res = ac_vk_buffer_flush(s_buf_a, 0, ACT_BYTES);
+    if (res != AC_SUCCESS) {
+        fprintf(stderr, "[AMEVA_BACKEND] FATAL: ac_vk_buffer_flush(s_buf_a) failed with code %d\n", res);
         return false;
     }
 
@@ -209,50 +276,50 @@ static bool execute_vulkan_matmul(struct ggml_tensor * t, uint32_t graph_run_id,
     uint32_t group_z = 1;
 
     AcVkEvent * event = nullptr;
-    AcResult res = ac_vk_dispatch(s_vk_ctx, s_vk_kernel, bufs, 3, &pc, sizeof(pc), group_x, group_y, group_z, &event);
+    res = ac_vk_dispatch(s_vk_ctx, s_vk_kernel, bufs, 3, &pc, sizeof(pc), group_x, group_y, group_z, &event);
     if (res != AC_SUCCESS || !event) {
+        fprintf(stderr, "[AMEVA_BACKEND] FATAL: ac_vk_dispatch failed with code %d\n", res);
         return false;
     }
     g_counters.event_create_count++;
-
-    // Failure Injection: Wait Stage
-    if (fail_stage && strcmp(fail_stage, "wait") == 0) {
-        ac_vk_event_destroy(event);
-        g_counters.event_destroy_count++;
-        fprintf(stderr, "[AMEVA_BACKEND_FAIL_INJECTION] Simulated failure at stage: wait\n");
-        return false;
-    }
 
     // 3. Wait on GPU event
     res = ac_vk_event_wait(event, 5000000000ULL);
     ac_vk_event_destroy(event);
     g_counters.event_destroy_count++;
     if (res != AC_SUCCESS) {
+        fprintf(stderr, "[AMEVA_BACKEND] FATAL: ac_vk_event_wait failed with code %d\n", res);
         return false;
     }
 
-    // Failure Injection: Invalidate Stage
-    if (fail_stage && strcmp(fail_stage, "invalidate") == 0) {
-        fprintf(stderr, "[AMEVA_BACKEND_FAIL_INJECTION] Simulated failure at stage: invalidate\n");
+    // Invalidate device memory for host readback
+    res = ac_vk_buffer_invalidate(s_buf_o, 0, OUT_BYTES);
+    if (res != AC_SUCCESS) {
+        fprintf(stderr, "[AMEVA_BACKEND] FATAL: ac_vk_buffer_invalidate(s_buf_o) failed with code %d\n", res);
         return false;
     }
 
-    // Failure Injection: Readback Stage
-    if (fail_stage && strcmp(fail_stage, "readback") == 0) {
-        fprintf(stderr, "[AMEVA_BACKEND_FAIL_INJECTION] Simulated failure at stage: readback\n");
-        return false;
-    }
-
-    // 4. Store result back into destination tensor
-    if (t->buffer) {
-        ggml_backend_tensor_set(t, s_buf_o->mapped_ptr, 0, OUT_BYTES);
-    }
+    // 4. Read back output into destination tensor
     if (t->data && t->data != s_buf_o->mapped_ptr) {
-        memcpy(t->data, s_buf_o->mapped_ptr, OUT_BYTES);
+        res = ac_vk_buffer_readback(s_buf_o, t->data, 0, OUT_BYTES);
+        if (res != AC_SUCCESS) {
+            fprintf(stderr, "[AMEVA_BACKEND] FATAL: ac_vk_buffer_readback failed with code %d\n", res);
+            return false;
+        }
+    } else {
+        static std::vector<uint8_t> s_readback_temp(OUT_BYTES);
+        res = ac_vk_buffer_readback(s_buf_o, s_readback_temp.data(), 0, OUT_BYTES);
+        if (res != AC_SUCCESS) {
+            fprintf(stderr, "[AMEVA_BACKEND] FATAL: ac_vk_buffer_readback failed with code %d\n", res);
+            return false;
+        }
+        if (t->buffer) {
+            ggml_backend_tensor_set(t, s_readback_temp.data(), 0, OUT_BYTES);
+        }
     }
 
     const char * tensor_name = t->name[0] ? t->name : (t->src[0]->name[0] ? t->src[0]->name : "unnamed");
-    printf("[AMEVA_DISPATCH] GRAPH_KIND=%s GRAPH_RUN_ID=%u DISPATCH_INDEX=%llu NODE_INDEX=%d NODE_NAME=%s OP=%d SRC0_TYPE=%d SRC1_TYPE=%d DST_TYPE=%d SRC0_NE=[%lld,%lld,%lld,%lld] SRC1_NE=[%lld,%lld,%lld,%lld] DST_NE=[%lld,%lld,%lld,%lld] DISPATCH_RESULT=0 WAIT_RESULT=0 INVALIDATE_RESULT=0\n",
+    printf("[AMEVA_DISPATCH] GRAPH_KIND=%s GRAPH_RUN_ID=%u DISPATCH_INDEX=%llu BACKEND_SUBGRAPH_NODE_INDEX=%d NODE_NAME=%s OP=%d SRC0_TYPE=%d SRC1_TYPE=%d DST_TYPE=%d SRC0_NE=[%lld,%lld,%lld,%lld] SRC1_NE=[%lld,%lld,%lld,%lld] DST_NE=[%lld,%lld,%lld,%lld] DISPATCH_RESULT=0 WAIT_RESULT=0 INVALIDATE_RESULT=0\n",
            current_kind, graph_run_id, (unsigned long long)dispatch_index, node_index,
            tensor_name,
            (int)t->op, (int)t->src[0]->type, (int)t->src[1]->type, (int)t->type,
@@ -713,6 +780,7 @@ void ameva_backend_reset_counters(void) {
     g_counters.ameva_dispatch_failure_count = 0;
     g_counters.encoder_dispatch_count = 0;
     g_counters.cross_dispatch_count = 0;
+    g_counters.unknown_graph_kind_count = 0;
     s_graph_run_id = 0;
     s_dispatch_index = 0;
     strcpy(s_graph_kind, "UNKNOWN");

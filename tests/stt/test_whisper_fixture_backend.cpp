@@ -237,6 +237,7 @@ int main() {
 
     // 5. Normal execution
     ameva_backend_reset_counters();
+    ameva_backend_set_graph_kind("ENCODER");
     ggml_backend_t backend = ggml_backend_ameva_init(nullptr);
     if (!backend) {
         fprintf(stderr, "FATAL: Failed to init AMEVA backend\n");
@@ -316,13 +317,68 @@ int main() {
         printf("WHISPER_TENSOR_PARITY=%s\n", parity_pass ? "PASS" : "FAIL");
     }
 
-    // 7. Failure Injection Gates (6/6) with DST Canary Protection Check
+    // Report Unknown Graph Kind Counter Defense
+    printf("UNKNOWN_GRAPH_KIND_COUNT=%llu\n", (unsigned long long)c_norm.unknown_graph_kind_count);
+
+    // 7. Partial Initialization Failure Rollback Gates (5/5)
+    printf("--- PARTIAL INIT FAIL-CLOSED ROLLBACK GATES ---\n");
+    const char * init_fail_stages[5] = { "context", "kernel", "buf_w", "buf_a", "buf_o" };
+    int partial_init_passed = 0;
+    bool post_fail_ctx_bal = true;
+    bool post_fail_ker_bal = true;
+    bool post_fail_buf_bal = true;
+    bool post_fail_evt_bal = true;
+
+    for (int i = 0; i < 5; ++i) {
+        // Force complete teardown of hardware before partial init test
+        ameva_backend_teardown_hardware();
+
+        setenv("AMEVA_INIT_FAIL_STAGE", init_fail_stages[i], 1);
+        AmevaBackendCounters c_before = {};
+        ameva_backend_get_counters(&c_before);
+
+        enum ggml_status init_stat = ggml_backend_graph_compute(backend, gf);
+        AmevaBackendCounters c_after = {};
+        ameva_backend_get_counters(&c_after);
+
+        bool ctx_bal = (c_after.context_create_count == c_after.context_destroy_count);
+        bool ker_bal = (c_after.kernel_create_count == c_after.kernel_destroy_count);
+        bool buf_bal = (c_after.buffer_create_count == c_after.buffer_destroy_count);
+        bool evt_bal = (c_after.event_create_count == c_after.event_destroy_count);
+
+        if (!ctx_bal) post_fail_ctx_bal = false;
+        if (!ker_bal) post_fail_ker_bal = false;
+        if (!buf_bal) post_fail_buf_bal = false;
+        if (!evt_bal) post_fail_evt_bal = false;
+
+        bool stage_ok = (init_stat == GGML_STATUS_FAILED && ctx_bal && ker_bal && buf_bal && evt_bal);
+        if (stage_ok) partial_init_passed++;
+
+        printf("PARTIAL_INIT_FAIL_%s: %s (status=%d, balanced=%s)\n",
+               init_fail_stages[i], stage_ok ? "PASS" : "FAIL", (int)init_stat,
+               (ctx_bal && ker_bal && buf_bal && evt_bal) ? "true" : "false");
+    }
+    unsetenv("AMEVA_INIT_FAIL_STAGE");
+
+    // Re-initialize hardware pipeline normally for subsequent runtime failure tests
+    ameva_backend_teardown_hardware();
+    ggml_backend_graph_compute(backend, gf); // Bring-up hardware
+
+    printf("PARTIAL_INIT_FAILURE_GATES=%d/5\n", partial_init_passed);
+    printf("POST_FAILURE_CONTEXT_BALANCED=%s\n", post_fail_ctx_bal ? "true" : "false");
+    printf("POST_FAILURE_KERNEL_BALANCED=%s\n", post_fail_ker_bal ? "true" : "false");
+    printf("POST_FAILURE_BUFFER_BALANCED=%s\n", post_fail_buf_bal ? "true" : "false");
+    printf("POST_FAILURE_EVENT_BALANCED=%s\n", post_fail_evt_bal ? "true" : "false");
+
+    // 8. Real Runtime Failure Injection Gates (6/6) with DST Canary Protection Check
+    printf("--- REAL RUNTIME API FAILURE INJECTION GATES ---\n");
     const char * fail_stages[6] = { "map", "flush", "dispatch", "wait", "invalidate", "readback" };
     int fail_stage_passed = 0;
     int dst_canary_passed = 0;
     const uint8_t CANARY_VAL = 0xAA;
 
     for (int i = 0; i < 6; ++i) {
+        setenv("AMEVA_RUNTIME_FAIL_STAGE", fail_stages[i], 1);
         setenv("AMEVA_BACKEND_FAIL_STAGE", fail_stages[i], 1);
         AmevaBackendCounters c_before = {};
         ameva_backend_get_counters(&c_before);
@@ -336,10 +392,12 @@ int main() {
 
         uint64_t fail_delta = c_after.ameva_dispatch_failure_count - c_before.ameva_dispatch_failure_count;
         uint64_t op_delta   = c_after.ameva_gpu_op_count - c_before.ameva_gpu_op_count;
+        bool evt_bal = (c_after.event_create_count == c_after.event_destroy_count);
 
         bool stage_ok = (fail_stat == GGML_STATUS_FAILED &&
                          op_delta == 0 &&
-                         fail_delta == 1);
+                         fail_delta == 1 &&
+                         evt_bal);
         if (stage_ok) fail_stage_passed++;
 
         // Canary check: destination tensor MUST retain canary pattern completely untouched
@@ -353,18 +411,21 @@ int main() {
         }
         if (canary_intact) dst_canary_passed++;
 
-        printf("FAIL_STAGE_%s: %s (status=%d, gpu_op_delta=%llu, fail_delta=%llu, canary=%s)\n",
+        printf("REAL_%s_API_FAILURE: %s (status=%d, gpu_op_delta=%llu, fail_delta=%llu, canary=%s, event_balanced=%s)\n",
                fail_stages[i], stage_ok ? "PASS" : "FAIL", (int)fail_stat,
                (unsigned long long)op_delta,
                (unsigned long long)fail_delta,
-               canary_intact ? "INTACT" : "CORRUPTED");
+               canary_intact ? "INTACT" : "CORRUPTED",
+               evt_bal ? "true" : "false");
     }
+    unsetenv("AMEVA_RUNTIME_FAIL_STAGE");
     unsetenv("AMEVA_BACKEND_FAIL_STAGE");
 
     printf("FAIL_STAGE_HIT_GATES=%d/6\n", fail_stage_passed);
     printf("DST_CANARY_GATES=%d/6\n", dst_canary_passed);
+    printf("REAL_RUNTIME_API_FAILURE_COVERAGE=%s\n", (fail_stage_passed == 6) ? "PASS" : "PARTIAL");
 
-    // 8. Teardown and Lifecycle Symmetry Gates (6/6)
+    // 9. Teardown and Lifecycle Symmetry Gates (6/6)
     ggml_backend_free(backend);
     ggml_free(ctx);
     ameva_backend_teardown_hardware();
@@ -387,7 +448,7 @@ int main() {
     if (c_final.buffer_create_count > 0 && c_final.buffer_create_count == c_final.buffer_destroy_count)   lifecycle_gates++;
     if (c_final.event_create_count > 0 && c_final.event_create_count == c_final.event_destroy_count)     lifecycle_gates++;
     if (c_final.buffer_alloc_count == c_final.buffer_free_count)                                           lifecycle_gates++;
-    if (c_final.ameva_dispatch_failure_count == 6)                                                         lifecycle_gates++;
+    if (c_final.ameva_dispatch_failure_count == (uint64_t)(partial_init_passed + fail_stage_passed))       lifecycle_gates++;
 
     printf("LIFECYCLE_GATES=%d/6\n", lifecycle_gates);
 
@@ -396,7 +457,8 @@ int main() {
         all_ok = (hash_gates_passed == 3 && size_gates_passed == 3 && fail_stage_passed == 6 && dst_canary_passed == 6);
     } else {
         all_ok = (parity_pass && hash_gates_passed == 3 && size_gates_passed == 3 &&
-                  fail_stage_passed == 6 && dst_canary_passed == 6 && lifecycle_gates == 6);
+                  partial_init_passed == 5 && fail_stage_passed == 6 && dst_canary_passed == 6 &&
+                  lifecycle_gates == 6 && c_norm.unknown_graph_kind_count == 0);
     }
 
     printf("=== [ALL WHISPER FIXTURE & HARDENING GATES %s] ===\n", all_ok ? "PASSED" : "FAILED");

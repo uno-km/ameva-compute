@@ -220,6 +220,13 @@ AcResult ac_vk_buffer_flush(AcVkBuffer* buf, size_t offset, size_t size_bytes) {
         return AC_ERR_INVALID_ARGUMENT;
     }
 
+    const char* fail_stage = getenv("AMEVA_RUNTIME_FAIL_STAGE");
+    if (!fail_stage) fail_stage = getenv("AMEVA_BACKEND_FAIL_STAGE");
+    if (fail_stage && strcmp(fail_stage, "flush") == 0) {
+        fprintf(stderr, "[AMEVA_RUNTIME_FAIL_INJECTION] Simulated failure at stage: flush\n");
+        return AC_ERR_DRIVER_CRASH_OR_LOST;
+    }
+
     if (buf->is_coherent) {
         return AC_SUCCESS;
     }
@@ -265,6 +272,13 @@ AcResult ac_vk_buffer_invalidate(AcVkBuffer* buf, size_t offset, size_t size_byt
         return AC_ERR_INVALID_ARGUMENT;
     }
 
+    const char* fail_stage = getenv("AMEVA_RUNTIME_FAIL_STAGE");
+    if (!fail_stage) fail_stage = getenv("AMEVA_BACKEND_FAIL_STAGE");
+    if (fail_stage && strcmp(fail_stage, "invalidate") == 0) {
+        fprintf(stderr, "[AMEVA_RUNTIME_FAIL_INJECTION] Simulated failure at stage: invalidate\n");
+        return AC_ERR_DRIVER_CRASH_OR_LOST;
+    }
+
     if (buf->is_coherent) {
         return AC_SUCCESS;
     }
@@ -291,6 +305,77 @@ AcResult ac_vk_buffer_invalidate(AcVkBuffer* buf, size_t offset, size_t size_byt
     if (vk_res != VK_SUCCESS) {
         return AC_ERR_DRIVER_CRASH_OR_LOST;
     }
+    return AC_SUCCESS;
+}
+
+AcResult ac_vk_buffer_map(AcVkBuffer* buf, void** out_ptr) {
+    if (!out_ptr) {
+        return AC_ERR_NULL_POINTER;
+    }
+    *out_ptr = NULL;
+
+    if (!buf) {
+        return AC_ERR_NULL_POINTER;
+    }
+
+    const char* fail_stage = getenv("AMEVA_RUNTIME_FAIL_STAGE");
+    if (!fail_stage) fail_stage = getenv("AMEVA_BACKEND_FAIL_STAGE");
+    if (fail_stage && strcmp(fail_stage, "map") == 0) {
+        fprintf(stderr, "[AMEVA_RUNTIME_FAIL_INJECTION] Simulated failure at stage: map\n");
+        return AC_ERR_BUFFER_NOT_MAPPED;
+    }
+
+    if (!buf->mapped_ptr) {
+        return AC_ERR_BUFFER_NOT_MAPPED;
+    }
+
+    *out_ptr = buf->mapped_ptr;
+    return AC_SUCCESS;
+}
+
+AcResult ac_vk_buffer_upload(AcVkBuffer* buf, const void* src, size_t offset, size_t size_bytes) {
+    if (!buf || !src) {
+        return AC_ERR_NULL_POINTER;
+    }
+    if (offset + size_bytes < offset || offset + size_bytes > buf->size_bytes) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    void* dst_ptr = NULL;
+    AcResult res = ac_vk_buffer_map(buf, &dst_ptr);
+    if (res != AC_SUCCESS) {
+        return res;
+    }
+    memcpy((char*)dst_ptr + offset, src, size_bytes);
+    return ac_vk_buffer_flush(buf, offset, size_bytes);
+}
+
+AcResult ac_vk_buffer_readback(AcVkBuffer* buf, void* dst, size_t offset, size_t size_bytes) {
+    if (!buf || !dst) {
+        return AC_ERR_NULL_POINTER;
+    }
+    if (offset + size_bytes < offset || offset + size_bytes > buf->size_bytes) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+
+    const char* fail_stage = getenv("AMEVA_RUNTIME_FAIL_STAGE");
+    if (!fail_stage) fail_stage = getenv("AMEVA_BACKEND_FAIL_STAGE");
+    if (fail_stage && strcmp(fail_stage, "readback") == 0) {
+        fprintf(stderr, "[AMEVA_RUNTIME_FAIL_INJECTION] Simulated failure at stage: readback\n");
+        return AC_ERR_BUFFER_NOT_MAPPED;
+    }
+
+    AcResult res = ac_vk_buffer_invalidate(buf, offset, size_bytes);
+    if (res != AC_SUCCESS) {
+        return res;
+    }
+
+    void* src_ptr = NULL;
+    res = ac_vk_buffer_map(buf, &src_ptr);
+    if (res != AC_SUCCESS) {
+        return res;
+    }
+
+    memcpy(dst, (const char*)src_ptr + offset, size_bytes);
     return AC_SUCCESS;
 }
 
