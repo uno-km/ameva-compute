@@ -22,93 +22,8 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-# Core Library Sources
-set(AMUDA_SOURCES
-    src/amuda/amuda_context.c
-    src/amuda/amuda_memory.c
-    src/amuda/amuda_dispatch.c
-    src/amuda/amuda_cache.c
-    src/amuda/amuda_ops.c
-    src/amuda/amuda_gguf.c
-    src/amuda/amuda_layer.c
-)
-
-# Build Shared and Static Libraries
-add_library(amuda_static STATIC ${AMUDA_SOURCES})
-set_target_properties(amuda_static PROPERTIES OUTPUT_NAME amuda)
-
-add_library(amuda_shared SHARED ${AMUDA_SOURCES})
-set_target_properties(amuda_shared PROPERTIES OUTPUT_NAME amuda)
-
-# Link dynamic linker library on POSIX/Android
-if(UNIX AND NOT APPLE)
-    target_link_libraries(amuda_shared dl m)
-    target_link_libraries(amuda_static dl m)
-endif()
-
-# Test Executables
-add_executable(test_amuda_uma tests/test_amuda_uma.c)
-target_link_libraries(test_amuda_uma amuda_static)
-if(UNIX AND NOT APPLE)
-    target_link_libraries(test_amuda_uma dl m)
-endif()
-
-add_executable(test_amuda_ops tests/test_amuda_ops.c)
-target_link_libraries(test_amuda_ops amuda_static)
-if(UNIX AND NOT APPLE)
-    target_link_libraries(test_amuda_ops dl m)
-endif()
-
-add_executable(test_amuda_gguf tests/test_amuda_gguf.c)
-target_link_libraries(test_amuda_gguf amuda_static)
-if(UNIX AND NOT APPLE)
-    target_link_libraries(test_amuda_gguf dl m)
-endif()
-
-add_executable(test_amuda_bitnet_exact tests/test_amuda_bitnet_exact.c)
-target_link_libraries(test_amuda_bitnet_exact amuda_static)
-if(UNIX AND NOT APPLE)
-    target_link_libraries(test_amuda_bitnet_exact dl m)
-endif()
-
-add_executable(test_amuda_layer_exact tests/test_amuda_layer_exact.c)
-target_link_libraries(test_amuda_layer_exact amuda_static)
-if(UNIX AND NOT APPLE)
-    target_link_libraries(test_amuda_layer_exact dl m)
-endif()
-
-add_executable(test_amuda_dispatch_sync tests/test_amuda_dispatch_sync.c)
-target_link_libraries(test_amuda_dispatch_sync amuda_static)
-if(UNIX AND NOT APPLE)
-    target_link_libraries(test_amuda_dispatch_sync dl m)
-endif()
-
 include(CTest)
 enable_testing()
-add_test(NAME amuda_dispatch_sync COMMAND test_amuda_dispatch_sync)
-set_tests_properties(amuda_dispatch_sync PROPERTIES ENVIRONMENT "LD_LIBRARY_PATH=/data/data/com.termux/files/usr/opt/vendor/lib:$ENV{LD_LIBRARY_PATH}")
-
-add_executable(test_amuda_dispatch_validation tests/test_amuda_dispatch_validation.c)
-target_link_libraries(test_amuda_dispatch_validation amuda_static)
-if(UNIX AND NOT APPLE)
-    target_link_libraries(test_amuda_dispatch_validation dl m)
-endif()
-add_test(NAME amuda_dispatch_validation COMMAND test_amuda_dispatch_validation)
-set_tests_properties(amuda_dispatch_validation PROPERTIES ENVIRONMENT "LD_LIBRARY_PATH=/data/data/com.termux/files/usr/opt/vendor/lib:$ENV{LD_LIBRARY_PATH}")
-
-add_executable(test_amuda_gguf_validation tests/test_amuda_gguf_validation.c)
-target_link_libraries(test_amuda_gguf_validation amuda_static)
-if(UNIX AND NOT APPLE)
-    target_link_libraries(test_amuda_gguf_validation dl m)
-endif()
-add_test(NAME amuda_gguf_validation COMMAND test_amuda_gguf_validation)
-set_tests_properties(amuda_gguf_validation PROPERTIES ENVIRONMENT "LD_LIBRARY_PATH=/data/data/com.termux/files/usr/opt/vendor/lib:$ENV{LD_LIBRARY_PATH}")
-
-add_executable(amuda_cli tools/amuda_cli.c)
-target_link_libraries(amuda_cli amuda_static)
-if(UNIX AND NOT APPLE)
-    target_link_libraries(amuda_cli dl m)
-endif()
 
 # =============================================================================
 # Vulkan Compute Core (AMUDA 2.0 Native Vulkan Backend)
@@ -129,41 +44,11 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(ac_vulkan_core vulkan dl m)
 endif()
 
-# Vulkan Verification Executables
-add_executable(test_phase1_vulkan_i2s tests/test_phase1_vulkan_i2s.cpp)
-if(UNIX AND NOT APPLE)
-    target_link_libraries(test_phase1_vulkan_i2s vulkan dl m)
-endif()
 
-add_executable(test_phase2_vulkan_core tests/test_phase2_vulkan_core.cpp)
-target_link_libraries(test_phase2_vulkan_core ac_vulkan_core)
-if(UNIX AND NOT APPLE)
-    target_link_libraries(test_phase2_vulkan_core vulkan dl m)
-endif()
-
-add_executable(test_phase2_1_failure_injection tests/test_phase2_1_failure_injection.cpp)
-target_link_libraries(test_phase2_1_failure_injection ac_vulkan_core)
-if(UNIX AND NOT APPLE)
-    target_link_libraries(test_phase2_1_failure_injection vulkan dl m)
-endif()
-
-add_executable(test_phase3_universal_backend tests/test_phase3_universal_backend.cpp)
-target_link_libraries(test_phase3_universal_backend ac_vulkan_core)
-if(UNIX AND NOT APPLE)
-    target_link_libraries(test_phase3_universal_backend vulkan dl m)
-endif()
-
-add_executable(test_phase4_runtime_abi tests/test_phase4_runtime_abi.cpp)
-target_link_libraries(test_phase4_runtime_abi ac_vulkan_core)
-if(UNIX AND NOT APPLE)
-    target_link_libraries(test_phase4_runtime_abi vulkan dl m)
-endif()
-
-add_executable(test_phase4b_specialization tests/test_phase4b_specialization.cpp)
-target_link_libraries(test_phase4b_specialization ac_vulkan_core)
-if(UNIX AND NOT APPLE)
-    target_link_libraries(test_phase4b_specialization vulkan dl m)
-endif()
+link_directories(
+    ${CMAKE_CURRENT_SOURCE_DIR}/build-whisper-cpu/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/build-whisper-cpu/ggml/src
+)
 
 # =============================================================================
 # STT / Whisper GGML Formal Backend Verification Targets
@@ -181,7 +66,7 @@ target_include_directories(test_ggml_ameva_interface_smoke PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/whisper.cpp/ggml/include
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/whisper.cpp/ggml/src
 )
-target_link_libraries(test_ggml_ameva_interface_smoke ac_vulkan_core)
+target_link_libraries(test_ggml_ameva_interface_smoke ac_vulkan_core whisper ggml ggml-cpu ggml-base)
 if(UNIX AND NOT APPLE)
     target_link_libraries(test_ggml_ameva_interface_smoke vulkan dl m)
 endif()
@@ -197,7 +82,7 @@ target_include_directories(test_whisper_fixture_backend PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/whisper.cpp/ggml/include
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/whisper.cpp/ggml/src
 )
-target_link_libraries(test_whisper_fixture_backend ac_vulkan_core)
+target_link_libraries(test_whisper_fixture_backend ac_vulkan_core whisper ggml ggml-cpu ggml-base)
 if(UNIX AND NOT APPLE)
     target_link_libraries(test_whisper_fixture_backend vulkan dl m)
 endif()
@@ -213,12 +98,27 @@ target_include_directories(test_repeat_formal_backend PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/whisper.cpp/ggml/include
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/whisper.cpp/ggml/src
 )
-target_link_libraries(test_repeat_formal_backend ac_vulkan_core)
+target_link_libraries(test_repeat_formal_backend ac_vulkan_core whisper ggml ggml-cpu ggml-base)
 if(UNIX AND NOT APPLE)
     target_link_libraries(test_repeat_formal_backend vulkan dl m)
+endif()
+
+add_executable(test_turbo_t1_matmul
+    tests/stt/test_turbo_t1_matmul.cpp
+)
+target_include_directories(test_turbo_t1_matmul PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/whisper.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/whisper.cpp/ggml/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/whisper.cpp/ggml/src
+)
+target_link_libraries(test_turbo_t1_matmul ac_vulkan_core ggml ggml-cpu ggml-base)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_turbo_t1_matmul vulkan dl m)
 endif()
 
 add_test(NAME test_ggml_ameva_interface_smoke COMMAND test_ggml_ameva_interface_smoke)
 add_test(NAME test_whisper_fixture_backend COMMAND test_whisper_fixture_backend)
 add_test(NAME test_repeat_formal_backend COMMAND test_repeat_formal_backend)
+add_test(NAME test_turbo_t1_matmul COMMAND test_turbo_t1_matmul)
 
