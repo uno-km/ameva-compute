@@ -44,65 +44,28 @@ const char* ggml_backend_ameva_get_build_commit(void) {
     return GGML_AMEVA_BUILD_COMMIT;
 }
 
-int64_t ggml_backend_ameva_get_supports_query_count(void) {
-    return g_ameva_supports_query_count.load();
-}
-
-int64_t ggml_backend_ameva_get_supported_op_count(void) {
-    return g_ameva_supported_op_count.load();
-}
-
-int64_t ggml_backend_ameva_get_gpu_op_count(void) {
-    return g_ameva_gpu_op_count.load();
-}
-
-int64_t ggml_backend_ameva_get_q5_0_cpu_dequant_count(void) {
-    return g_ameva_q5_0_cpu_dequant_count.load();
-}
-
-int64_t ggml_backend_ameva_get_f32_gpu_sgemm_dispatch_count(void) {
-    return g_ameva_f32_gpu_sgemm_dispatch_count.load();
-}
-
-int64_t ggml_backend_ameva_get_context_create_count(void) {
-    return g_ameva_context_create_count.load();
-}
-
-int64_t ggml_backend_ameva_get_context_destroy_count(void) {
-    return g_ameva_context_destroy_count.load();
-}
-
-int64_t ggml_backend_ameva_get_kernel_create_count(void) {
-    return g_ameva_kernel_create_count.load();
-}
-
-int64_t ggml_backend_ameva_get_kernel_destroy_count(void) {
-    return g_ameva_kernel_destroy_count.load();
-}
-
-int64_t ggml_backend_ameva_get_buffer_create_count(void) {
-    return g_ameva_buffer_create_count.load();
-}
-
-int64_t ggml_backend_ameva_get_buffer_destroy_count(void) {
-    return g_ameva_buffer_destroy_count.load();
-}
-
-int64_t ggml_backend_ameva_get_event_create_count(void) {
-    return g_ameva_event_create_count.load();
-}
-
-int64_t ggml_backend_ameva_get_event_destroy_count(void) {
-    return g_ameva_event_destroy_count.load();
-}
-
-int64_t ggml_backend_ameva_get_q5_0_staging_alloc_count(void) {
-    return g_ameva_q5_0_staging_alloc_count.load();
-}
-
-int64_t ggml_backend_ameva_get_q5_0_staging_free_count(void) {
-    return g_ameva_q5_0_staging_free_count.load();
-}
+int64_t ggml_backend_ameva_get_supports_query_count(void) { return g_ameva_supports_query_count.load(); }
+int64_t ggml_backend_ameva_get_supported_op_count(void) { return g_ameva_supported_op_count.load(); }
+int64_t ggml_backend_ameva_get_gpu_op_count(void) { return g_ameva_gpu_op_count.load(); }
+int64_t ggml_backend_ameva_get_q5_0_cpu_dequant_count(void) { return g_ameva_q5_0_cpu_dequant_count.load(); }
+int64_t ggml_backend_ameva_get_f32_gpu_sgemm_dispatch_count(void) { return g_ameva_f32_gpu_sgemm_dispatch_count.load(); }
+int64_t ggml_backend_ameva_get_context_create_count(void) { return g_ameva_context_create_count.load(); }
+int64_t ggml_backend_ameva_get_context_destroy_count(void) { return g_ameva_context_destroy_count.load(); }
+int64_t ggml_backend_ameva_get_kernel_create_count(void) { return g_ameva_kernel_create_count.load(); }
+int64_t ggml_backend_ameva_get_kernel_destroy_count(void) { return g_ameva_kernel_destroy_count.load(); }
+int64_t ggml_backend_ameva_get_buffer_create_count(void) { return g_ameva_buffer_create_count.load(); }
+int64_t ggml_backend_ameva_get_buffer_destroy_count(void) { return g_ameva_buffer_destroy_count.load(); }
+int64_t ggml_backend_ameva_get_event_create_count(void) { return g_ameva_event_create_count.load(); }
+int64_t ggml_backend_ameva_get_event_destroy_count(void) { return g_ameva_event_destroy_count.load(); }
+int64_t ggml_backend_ameva_get_q5_0_staging_alloc_count(void) { return g_ameva_q5_0_staging_alloc_count.load(); }
+int64_t ggml_backend_ameva_get_q5_0_staging_free_count(void) { return g_ameva_q5_0_staging_free_count.load(); }
+int64_t ggml_backend_ameva_get_scheduler_node_count(void) { return g_ameva_scheduler_node_count.load(); }
+int64_t ggml_backend_ameva_get_qwen_dispatch_count(void) { return g_qwen_ameva_dispatch_count.load(); }
+int64_t ggml_backend_ameva_get_dispatch_attempt_count(void) { return g_ameva_dispatch_attempt_count.load(); }
+int64_t ggml_backend_ameva_get_dispatch_success_count(void) { return g_ameva_dispatch_success_count.load(); }
+bool ggml_backend_ameva_is_plugin_loaded(void) { return g_ameva_plugin_loaded.load(); }
+bool ggml_backend_ameva_is_backend_selected(void) { return g_ameva_backend_selected.load(); }
+bool ggml_backend_ameva_is_real_activation_captured(void) { return g_ameva_real_activation_captured.load(); }
 
 void ggml_backend_ameva_reset_counters(void) {
     g_ameva_supports_query_count.store(0);
@@ -123,113 +86,26 @@ void ggml_backend_ameva_reset_counters(void) {
     g_ameva_dispatch_success_count.store(0);
 }
 
-void ameva_increment_gpu_op_count(void) {
-    g_ameva_gpu_op_count.fetch_add(1);
-}
-
-void ameva_increment_q5_0_cpu_dequant_count(void) {
-    g_ameva_q5_0_cpu_dequant_count.fetch_add(1);
-}
-
-void ameva_increment_f32_gpu_sgemm_dispatch_count(void) {
-    g_ameva_f32_gpu_sgemm_dispatch_count.fetch_add(1);
-}
-
-void ameva_increment_context_create_count(void) {
-    g_ameva_context_create_count.fetch_add(1);
-}
-
-void ameva_increment_context_destroy_count(void) {
-    g_ameva_context_destroy_count.fetch_add(1);
-}
-
-void ameva_increment_kernel_create_count(void) {
-    g_ameva_kernel_create_count.fetch_add(1);
-}
-
-void ameva_increment_kernel_destroy_count(void) {
-    g_ameva_kernel_destroy_count.fetch_add(1);
-}
-
-void ameva_increment_buffer_create_count(void) {
-    g_ameva_buffer_create_count.fetch_add(1);
-}
-
-void ameva_increment_buffer_destroy_count(void) {
-    g_ameva_buffer_destroy_count.fetch_add(1);
-}
-
-void ameva_increment_event_create_count(void) {
-    g_ameva_event_create_count.fetch_add(1);
-}
-
-void ameva_increment_event_destroy_count(void) {
-    g_ameva_event_destroy_count.fetch_add(1);
-}
-
-void ameva_increment_q5_0_staging_alloc_count(void) {
-    g_ameva_q5_0_staging_alloc_count.fetch_add(1);
-}
-
-void ameva_increment_q5_0_staging_free_count(void) {
-    g_ameva_q5_0_staging_free_count.fetch_add(1);
-}
-
-void ameva_mark_plugin_loaded(void) {
-    g_ameva_plugin_loaded.store(true);
-}
-
-void ameva_mark_backend_selected(void) {
-    g_ameva_backend_selected.store(true);
-}
-
-void ameva_increment_scheduler_node_count(int64_t count) {
-    g_ameva_scheduler_node_count.fetch_add(count);
-}
-
-void ameva_mark_real_activation_captured(void) {
-    g_ameva_real_activation_captured.store(true);
-}
-
-void ameva_increment_qwen_dispatch_count(void) {
-    g_qwen_ameva_dispatch_count.fetch_add(1);
-}
-
-void ameva_increment_dispatch_attempt_count(void) {
-    g_ameva_dispatch_attempt_count.fetch_add(1);
-}
-
-void ameva_increment_dispatch_success_count(void) {
-    g_ameva_dispatch_success_count.fetch_add(1);
-}
-
-int64_t ggml_backend_ameva_get_scheduler_node_count(void) {
-    return g_ameva_scheduler_node_count.load();
-}
-
-int64_t ggml_backend_ameva_get_qwen_dispatch_count(void) {
-    return g_qwen_ameva_dispatch_count.load();
-}
-
-int64_t ggml_backend_ameva_get_dispatch_attempt_count(void) {
-    return g_ameva_dispatch_attempt_count.load();
-}
-
-int64_t ggml_backend_ameva_get_dispatch_success_count(void) {
-    return g_ameva_dispatch_success_count.load();
-}
-
-bool ggml_backend_ameva_is_plugin_loaded(void) {
-    return g_ameva_plugin_loaded.load();
-}
-
-bool ggml_backend_ameva_is_backend_selected(void) {
-    return g_ameva_backend_selected.load();
-}
-
-bool ggml_backend_ameva_is_real_activation_captured(void) {
-    return g_ameva_real_activation_captured.load();
-}
+void ameva_increment_gpu_op_count(void) { g_ameva_gpu_op_count.fetch_add(1); }
+void ameva_increment_q5_0_cpu_dequant_count(void) { g_ameva_q5_0_cpu_dequant_count.fetch_add(1); }
+void ameva_increment_f32_gpu_sgemm_dispatch_count(void) { g_ameva_f32_gpu_sgemm_dispatch_count.fetch_add(1); }
+void ameva_increment_context_create_count(void) { g_ameva_context_create_count.fetch_add(1); }
+void ameva_increment_context_destroy_count(void) { g_ameva_context_destroy_count.fetch_add(1); }
+void ameva_increment_kernel_create_count(void) { g_ameva_kernel_create_count.fetch_add(1); }
+void ameva_increment_kernel_destroy_count(void) { g_ameva_kernel_destroy_count.fetch_add(1); }
+void ameva_increment_buffer_create_count(void) { g_ameva_buffer_create_count.fetch_add(1); }
+void ameva_increment_buffer_destroy_count(void) { g_ameva_buffer_destroy_count.fetch_add(1); }
+void ameva_increment_event_create_count(void) { g_ameva_event_create_count.fetch_add(1); }
+void ameva_increment_event_destroy_count(void) { g_ameva_event_destroy_count.fetch_add(1); }
+void ameva_increment_q5_0_staging_alloc_count(void) { g_ameva_q5_0_staging_alloc_count.fetch_add(1); }
+void ameva_increment_q5_0_staging_free_count(void) { g_ameva_q5_0_staging_free_count.fetch_add(1); }
+void ameva_mark_plugin_loaded(void) { g_ameva_plugin_loaded.store(true); }
+void ameva_mark_backend_selected(void) { g_ameva_backend_selected.store(true); }
+void ameva_increment_scheduler_node_count(int64_t count) { g_ameva_scheduler_node_count.fetch_add(count); }
+void ameva_mark_real_activation_captured(void) { g_ameva_real_activation_captured.store(true); }
+void ameva_increment_qwen_dispatch_count(void) { g_qwen_ameva_dispatch_count.fetch_add(1); }
+void ameva_increment_dispatch_attempt_count(void) { g_ameva_dispatch_attempt_count.fetch_add(1); }
+void ameva_increment_dispatch_success_count(void) { g_ameva_dispatch_success_count.fetch_add(1); }
 
 void ggml_backend_ameva_set_failure_injection(AmevaFailureInjectionPoint point) {
     g_ameva_failure_injection.store((int)point);
@@ -275,7 +151,9 @@ static void ggml_backend_ameva_device_get_props(ggml_backend_dev_t dev, struct g
     props->caps.events = false;
 }
 
-void ameva_register_atexit(void) {
+extern "C" __attribute__((destructor)) void ameva_plugin_diagnostics_dump(void);
+
+extern "C" void ameva_register_atexit(void) {
     static std::once_flag s_once;
     std::call_once(s_once, []() {
         std::atexit(ameva_plugin_diagnostics_dump);
@@ -317,9 +195,9 @@ static bool ggml_backend_ameva_device_supports_op(ggml_backend_dev_t dev, const 
         s_query_log_count++;
         fprintf(stderr, "ggml-ameva [SUPPORTS_QUERY #%d]: op='%s' src0='%s' (type=%d ne=[%ld,%ld,%ld,%ld]) src1='%s' (type=%d ne=[%ld,%ld,%ld,%ld]) dst (type=%d ne=[%ld,%ld,%ld,%ld])\n",
             s_query_log_count,
-            op->name ? op->name : "unnamed",
-            src0->name ? src0->name : "unnamed", (int)src0->type, (long)src0->ne[0], (long)src0->ne[1], (long)src0->ne[2], (long)src0->ne[3],
-            src1->name ? src1->name : "unnamed", (int)src1->type, (long)src1->ne[0], (long)src1->ne[1], (long)src1->ne[2], (long)src1->ne[3],
+            op->name[0] ? op->name : "unnamed",
+            src0->name[0] ? src0->name : "unnamed", (int)src0->type, (long)src0->ne[0], (long)src0->ne[1], (long)src0->ne[2], (long)src0->ne[3],
+            src1->name[0] ? src1->name : "unnamed", (int)src1->type, (long)src1->ne[0], (long)src1->ne[1], (long)src1->ne[2], (long)src1->ne[3],
             (int)op->type, (long)op->ne[0], (long)op->ne[1], (long)op->ne[2], (long)op->ne[3]);
     }
 
@@ -364,7 +242,7 @@ static bool ggml_backend_ameva_device_supports_op(ggml_backend_dev_t dev, const 
     // 6. Q5_0 alignment and shape contract checks
     if (src0->type == GGML_TYPE_Q5_0) {
         if (K % 32 != 0) {
-            if (s_query_log_count <= 30) fprintf(stderr, "ggml-ameva [REJECT]: Q5_0 K % 32 != 0\n");
+            if (s_query_log_count <= 30) fprintf(stderr, "ggml-ameva [REJECT]: Q5_0 K %% 32 != 0\n");
             return false;
         }
         size_t expected_q5_row_bytes = (size_t)(K / 32) * 22;
@@ -386,7 +264,7 @@ static bool ggml_backend_ameva_device_supports_op(ggml_backend_dev_t dev, const 
 
     if (s_query_log_count <= 30) {
         fprintf(stderr, "ggml-ameva [ACCEPT]: node='%s' (src0='%s', src1='%s') accepted for AMEVA!\n",
-            op->name ? op->name : "unnamed", src0->name ? src0->name : "unnamed", src1->name ? src1->name : "unnamed");
+            op->name[0] ? op->name : "unnamed", src0->name[0] ? src0->name : "unnamed", src1->name[0] ? src1->name : "unnamed");
     }
 
     // Approved: increment supported op count
@@ -471,7 +349,7 @@ void ggml_backend_ameva_register(void) {
     ggml_backend_register(ggml_backend_ameva_reg());
 }
 
-__attribute__((destructor)) void ameva_plugin_diagnostics_dump(void) {
+extern "C" __attribute__((destructor)) void ameva_plugin_diagnostics_dump(void) {
     static std::atomic<bool> s_dumped{false};
     if (s_dumped.exchange(true)) return;
 
