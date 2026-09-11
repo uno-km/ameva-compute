@@ -495,7 +495,7 @@ int main(void) {
         if (canary_dst[i] != canary) { canary_intact = false; break; }
     }
 
-    bool forced_fail_closed = (forced_res == AC_ERR_LAUNCH_FAILURE && bad_ev == nullptr && canary_intact);
+    bool forced_fail_closed = (forced_res == AC_ERR_LAUNCH_TIMEOUT && bad_ev == nullptr && canary_intact);
     printf("DISPATCH_ATTEMPT_COUNT=1\n");
     printf("DISPATCH_SUCCESS_COUNT=0\n");
     printf("FORCED_DISPATCH_FAIL_CLOSED=%s\n\n", forced_fail_closed ? "PASS" : "FAIL");

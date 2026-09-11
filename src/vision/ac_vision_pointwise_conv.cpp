@@ -234,7 +234,7 @@ AcResult ac_vision_pointwise_conv_with_kernel_f32(
     /* 13. Forced failure injection point */
     const char* fail_stage = getenv("AMEVA_VISION_FAIL_STAGE");
     if (fail_stage && strcmp(fail_stage, "dispatch") == 0) {
-        return AC_ERR_LAUNCH_FAILURE;
+        return AC_ERR_LAUNCH_TIMEOUT;
     }
 
     /* 14. Dispatch configuration */
