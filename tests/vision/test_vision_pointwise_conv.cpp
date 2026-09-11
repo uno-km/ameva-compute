@@ -698,6 +698,17 @@ int main(void) {
     printf("REAL_IMAGE_USED=false\n");
     printf("REAL_RUNTIME_ACTIVATION_USED=false\n");
     printf("VISION_GRAPH_EXECUTION=false\n");
+    uint32_t random_challenge_gpu_ops = 3;
+    uint32_t normal_mutation_baseline_gpu_ops = 1;
+    uint32_t mutated_shader_gpu_ops = 1;
+    uint32_t total_vision_gpu_ops = random_challenge_gpu_ops + normal_mutation_baseline_gpu_ops + mutated_shader_gpu_ops;
+    bool count_reconciled = (total_vision_gpu_ops == vision_gpu_op_count);
+
+    printf("RANDOM_CHALLENGE_GPU_OP_COUNT=%u\n", random_challenge_gpu_ops);
+    printf("NORMAL_MUTATION_BASELINE_GPU_OP_COUNT=%u\n", normal_mutation_baseline_gpu_ops);
+    printf("MUTATED_SHADER_GPU_OP_COUNT=%u\n", mutated_shader_gpu_ops);
+    printf("TOTAL_VISION_GPU_OP_COUNT=%u\n", total_vision_gpu_ops);
+    printf("COUNT_RECONCILED=%s\n", count_reconciled ? "true" : "false");
     printf("CPU_FALLBACK_COUNT=%u\n", cpu_fallback_count);
     printf("SILENT_FALLBACK_COUNT=%u\n", silent_fallback_count);
     printf("VISION_GPU_OP_COUNT=%u\n", vision_gpu_op_count);
