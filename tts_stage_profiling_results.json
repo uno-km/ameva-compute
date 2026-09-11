@@ -1,0 +1,80 @@
+{
+  "raw_runs": [
+    {
+      "run": 1,
+      "model_load_ms": 19093.582,
+      "text_processing_ms": 0.188,
+      "encoder_ms": 1557.044,
+      "duration_predictor_ms": 54.568,
+      "path_attention_ms": 406.236,
+      "flow_ms": 110.177,
+      "decoder_ms": 14597.473,
+      "total_synthesis_ms": 16729.311,
+      "audio_dur_ms": 2635.0,
+      "rtf": 6.348
+    },
+    {
+      "run": 2,
+      "model_load_ms": 20735.661,
+      "text_processing_ms": 0.204,
+      "encoder_ms": 489.636,
+      "duration_predictor_ms": 77.373,
+      "path_attention_ms": 766.168,
+      "flow_ms": 139.366,
+      "decoder_ms": 15535.543,
+      "total_synthesis_ms": 17012.034,
+      "audio_dur_ms": 2705.0,
+      "rtf": 6.289
+    },
+    {
+      "run": 3,
+      "model_load_ms": 20806.224,
+      "text_processing_ms": 0.185,
+      "encoder_ms": 2222.689,
+      "duration_predictor_ms": 88.994,
+      "path_attention_ms": 410.914,
+      "flow_ms": 107.414,
+      "decoder_ms": 19886.323,
+      "total_synthesis_ms": 22720.976,
+      "audio_dur_ms": 2740.0,
+      "rtf": 8.292
+    },
+    {
+      "run": 4,
+      "model_load_ms": 22652.914,
+      "text_processing_ms": 0.206,
+      "encoder_ms": 989.587,
+      "duration_predictor_ms": 476.202,
+      "path_attention_ms": 435.731,
+      "flow_ms": 111.575,
+      "decoder_ms": 14011.118,
+      "total_synthesis_ms": 16029.279,
+      "audio_dur_ms": 2798.0,
+      "rtf": 5.729
+    },
+    {
+      "run": 5,
+      "model_load_ms": 18000.233,
+      "text_processing_ms": 0.147,
+      "encoder_ms": 1279.346,
+      "duration_predictor_ms": 84.785,
+      "path_attention_ms": 412.583,
+      "flow_ms": 108.153,
+      "decoder_ms": 17810.921,
+      "total_synthesis_ms": 19701.598,
+      "audio_dur_ms": 2659.0,
+      "rtf": 7.41
+    }
+  ],
+  "medians": {
+    "model_load_ms": 20735.661,
+    "text_processing_ms": 0.188,
+    "encoder_ms": 1279.346,
+    "duration_predictor_ms": 84.785,
+    "path_attention_ms": 412.583,
+    "flow_ms": 110.177,
+    "decoder_ms": 15535.543,
+    "total_synthesis_ms": 17012.034,
+    "rtf": 6.348
+  }
+}

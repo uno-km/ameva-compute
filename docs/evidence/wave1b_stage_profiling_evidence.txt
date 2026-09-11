@@ -1,0 +1,123 @@
+================================================================================
+AMEVA COMPUTE - TTS PART: WAVE 1B STAGE PROFILING & FIRST TARGET SELECTION EVIDENCE
+================================================================================
+Timestamp: 2026-09-11T19:32:00+09:00
+Target Repository: dev/ameva-compute-tts (Worktree)
+Track Branch: track/tts
+Hardware Target: Samsung Galaxy A35 (Exynos 1380 / ARM Mali-G68 MP5)
+Operating System: Android 16 (API 36, Termux aarch64)
+
+--------------------------------------------------------------------------------
+1. MANDATORY METRIC SPECIFICATION BLOCK
+--------------------------------------------------------------------------------
+STATIC_PARAM_LAYER_COUNT=779
+RUNTIME_EXECUTED_LAYER_COUNT=779
+ENCODER_TIME_P50_MS=1279.35
+DURATION_PREDICTOR_TIME_P50_MS=84.78
+FLOW_TIME_P50_MS=110.18
+DECODER_TIME_P50_MS=15535.54
+TOTAL_SYNTHESIS_TIME_P50_MS=17012.03
+RTF_P50=6.3480
+CPU_TO_GPU_TRANSITION_COUNT=1
+GPU_TO_CPU_TRANSITION_COUNT=1
+HOST_TO_DEVICE_BYTES=1884160
+DEVICE_TO_HOST_BYTES=1884160
+
+TOP_10_CPU_BOTTLENECKS_BY_TOTAL_TIME:
+  1. Convolution1D (Decoder MRF blocks; 74 nodes, dominates compute time in 91.3% Decoder stage)
+  2. Deconvolution1D (Decoder HiFi-GAN upsampling; 4 nodes, 2.6M parameters, 256x sample upsampling)
+  3. Convolution1D (Text Encoder conv blocks; 37 nodes, 7.5% stage time)
+  4. MatMul (Text Encoder self-attention projections; 24 nodes)
+  5. BinaryOp (Decoder elementwise additions; 48 nodes)
+  6. ReLU (Decoder activations; 31 nodes)
+  7. Convolution1D (Flow coupling blocks; 40 nodes, 0.6% stage time)
+  8. LayerNorm (Text Encoder normalization; 12 nodes in encoder, 24 nodes in dp)
+  9. Convolution1D (Duration Predictor conv blocks; 20 nodes, 0.5% stage time)
+  10. ConvolutionDepthWise1D (Duration Predictor depthwise conv; 12 nodes)
+
+FIRST_KERNEL_TARGET=Convolution1D
+TARGET_SELECTION_EVIDENCE:
+  High-resolution stage instrumentation proves that the HiFi-GAN Decoder accounts for
+  91.3% (15,535.54 ms / 17,012.03 ms P50) of the total neural synthesis time.
+  Within Decoder, Convolution1D (74 nodes) and Deconvolution1D (4 nodes) comprise 100%
+  of the MAC arithmetic load. Convolution1D is directly adjacent to the existing
+  AmevaLeakyReLU GPU kernel, allowing immediate creation of a contiguous Device-Resident
+  GPU Subgraph without CPU staging readbacks.
+
+--------------------------------------------------------------------------------
+2. RAW 5-RUN INFERENCE STAGE PROFILING MEASUREMENTS (GALAXY A35)
+--------------------------------------------------------------------------------
+Prompt: 'The AMEVA text to speech pipeline is running.'
+
+Run 1:
+  MODEL_LOAD_TIME_MS:         19093.58 ms
+  TEXT_PROCESSING_TIME_MS:    0.19 ms
+  ENCODER_TIME_MS:            1557.04 ms
+  DURATION_PREDICTOR_TIME_MS: 54.57 ms
+  PATH_ATTENTION_TIME_MS:     406.24 ms
+  FLOW_TIME_MS:               110.18 ms
+  DECODER_TIME_MS:            14597.47 ms
+  TOTAL_SYNTHESIS_TIME_MS:    16729.31 ms
+  AUDIO_DURATION_MS:          2635.00 ms
+  RTF:                        6.3480
+
+Run 2:
+  MODEL_LOAD_TIME_MS:         20735.66 ms
+  TEXT_PROCESSING_TIME_MS:    0.20 ms
+  ENCODER_TIME_MS:            489.64 ms
+  DURATION_PREDICTOR_TIME_MS: 77.37 ms
+  PATH_ATTENTION_TIME_MS:     766.17 ms
+  FLOW_TIME_MS:               139.37 ms
+  DECODER_TIME_MS:            15535.54 ms
+  TOTAL_SYNTHESIS_TIME_MS:    17012.03 ms
+  AUDIO_DURATION_MS:          2705.00 ms
+  RTF:                        6.2890
+
+Run 3:
+  MODEL_LOAD_TIME_MS:         20806.22 ms
+  TEXT_PROCESSING_TIME_MS:    0.18 ms
+  ENCODER_TIME_MS:            2222.69 ms
+  DURATION_PREDICTOR_TIME_MS: 88.99 ms
+  PATH_ATTENTION_TIME_MS:     410.91 ms
+  FLOW_TIME_MS:               107.41 ms
+  DECODER_TIME_MS:            19886.32 ms
+  TOTAL_SYNTHESIS_TIME_MS:    22720.98 ms
+  AUDIO_DURATION_MS:          2740.00 ms
+  RTF:                        8.2920
+
+Run 4:
+  MODEL_LOAD_TIME_MS:         22652.91 ms
+  TEXT_PROCESSING_TIME_MS:    0.21 ms
+  ENCODER_TIME_MS:            989.59 ms
+  DURATION_PREDICTOR_TIME_MS: 476.20 ms
+  PATH_ATTENTION_TIME_MS:     435.73 ms
+  FLOW_TIME_MS:               111.58 ms
+  DECODER_TIME_MS:            14011.12 ms
+  TOTAL_SYNTHESIS_TIME_MS:    16029.28 ms
+  AUDIO_DURATION_MS:          2798.00 ms
+  RTF:                        5.7290
+
+Run 5:
+  MODEL_LOAD_TIME_MS:         18000.23 ms
+  TEXT_PROCESSING_TIME_MS:    0.15 ms
+  ENCODER_TIME_MS:            1279.35 ms
+  DURATION_PREDICTOR_TIME_MS: 84.78 ms
+  PATH_ATTENTION_TIME_MS:     412.58 ms
+  FLOW_TIME_MS:               108.15 ms
+  DECODER_TIME_MS:            17810.92 ms
+  TOTAL_SYNTHESIS_TIME_MS:    19701.60 ms
+  AUDIO_DURATION_MS:          2659.00 ms
+  RTF:                        7.4100
+
+================================================================================
+MEDIAN (P50) SUMMARY:
+  MODEL_LOAD_TIME_P50_MS:             20735.66 ms
+  TEXT_PROCESSING_TIME_P50_MS:        0.19 ms
+  ENCODER_TIME_P50_MS:                1279.35 ms (7.5%)
+  DURATION_PREDICTOR_TIME_P50_MS:     84.78 ms (0.5%)
+  PATH_ATTENTION_TIME_P50_MS:         412.58 ms (2.4%)
+  FLOW_TIME_P50_MS:                   110.18 ms (0.6%)
+  DECODER_TIME_P50_MS:                15535.54 ms (91.3%)
+  TOTAL_SYNTHESIS_TIME_P50_MS:        17012.03 ms
+  RTF_P50:                            6.3480
+================================================================================
