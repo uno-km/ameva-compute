@@ -5,3 +5,11 @@ build-*
 # Generated consolidated audits
 ameva_compute_consolidated.md
 *.md.tmp
+
+# Sensitive transcript and internal execution dumps
+chronological_test_*
+chronological*transcript*.txt
+session*transcript*.jsonl
+.system_generated/
+scratch/
+
