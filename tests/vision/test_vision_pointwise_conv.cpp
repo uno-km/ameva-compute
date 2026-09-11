@@ -14,12 +14,14 @@
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <chrono>
 
 #include "ac_runtime.h"
 #include "ac_vision_ops.h"
 #include "../src/backend/vulkan/ac_vk_sha256.h"
 #include "../src/shaders/pointwise_conv_spv.h"
 #include "../src/shaders/pointwise_conv_mutated_spv.h"
+#include "../fixtures/squeezenet_fire2_squeeze1x1_data.h"
 
 #define CANARY_VAL 0x7E7E7E7E
 
@@ -634,6 +636,253 @@ int main(void) {
     printf("VISION_VALIDATION_GATES=%d/%d\n\n", gates_passed, total_validation_gates);
 
     // -------------------------------------------------------------------------
+    // Gate 8: Real Model Weight Verification Suite (SqueezeNet v1.1 fire2/squeeze1x1)
+    // -------------------------------------------------------------------------
+    printf("--- Gate 8: Real Model Weight Verification Suite (SqueezeNet v1.1) ---\n");
+    const uint32_t M_H = 13;
+    const uint32_t M_W = 17;
+    const uint32_t M_CIN = SQUEEZENET_FIRE2_CIN;    // 64
+    const uint32_t M_COUT = SQUEEZENET_FIRE2_COUT;  // 16
+    const size_t m_in_elems = (size_t)1 * M_H * M_W * M_CIN;   // 14,144
+    const size_t m_w_elems = SQUEEZENET_FIRE2_WEIGHT_ELEMS;     // 1,024
+    const size_t m_b_elems = SQUEEZENET_FIRE2_BIAS_ELEMS;       // 16
+    const size_t m_out_elems = (size_t)1 * M_H * M_W * M_COUT; // 3,536
+
+    const size_t m_in_bytes = m_in_elems * sizeof(float);
+    const size_t m_w_bytes = m_w_elems * sizeof(float);
+    const size_t m_b_bytes = m_b_elems * sizeof(float);
+    const size_t m_out_bytes = m_out_elems * sizeof(float);
+
+    AcVisionTensorDesc m_in_desc = {
+        AC_VISION_ABI_VERSION, sizeof(AcVisionTensorDesc),
+        AC_VISION_DTYPE_F32, AC_VISION_LAYOUT_NHWC,
+        1, M_H, M_W, M_CIN, 0
+    };
+    AcVisionTensorDesc m_weight_desc = {
+        AC_VISION_ABI_VERSION, sizeof(AcVisionTensorDesc),
+        AC_VISION_DTYPE_F32, AC_VISION_LAYOUT_OHWI,
+        M_COUT, 1, 1, M_CIN, 0
+    };
+    AcVisionTensorDesc m_out_desc = {
+        AC_VISION_ABI_VERSION, sizeof(AcVisionTensorDesc),
+        AC_VISION_DTYPE_F32, AC_VISION_LAYOUT_NHWC,
+        1, M_H, M_W, M_COUT, 0
+    };
+    AcVisionPointwiseConvParams m_params = {
+        AC_VISION_ABI_VERSION, sizeof(AcVisionPointwiseConvParams),
+        M_CIN, M_COUT, M_H, M_W, 1,
+        1, 1, 1, 1, 1, 1
+    };
+
+    // Verify extracted weight & bias hashes
+    std::string actual_w_sha = compute_sha256(kSqueezeNetFire2Weight, m_w_bytes);
+    std::string actual_b_sha = compute_sha256(kSqueezeNetFire2Bias, m_b_bytes);
+    printf("TARGET_LAYER_NAME=fire2/squeeze1x1\n");
+    printf("TARGET_LAYER_INDEX=4\n");
+    printf("TARGET_INPUT_CHANNELS=%u\n", M_CIN);
+    printf("TARGET_OUTPUT_CHANNELS=%u\n", M_COUT);
+    printf("TARGET_WEIGHT_DTYPE=float32\n");
+    printf("TARGET_WEIGHT_SHA256=%s\n", actual_w_sha.c_str());
+    printf("TARGET_BIAS_SHA256=%s\n", actual_b_sha.c_str());
+
+    if (actual_w_sha != SQUEEZENET_FIRE2_WEIGHT_SHA256 || actual_b_sha != SQUEEZENET_FIRE2_BIAS_SHA256) {
+        printf("FATAL: Extracted model weight/bias SHA-256 mismatch!\n");
+        return 1;
+    }
+
+    AcBufferDesc m_bdesc_in = { AC_ABI_VERSION, sizeof(AcBufferDesc), m_in_bytes, AC_BUFFER_USAGE_STORAGE, 0 };
+    AcBufferDesc m_bdesc_w = { AC_ABI_VERSION, sizeof(AcBufferDesc), m_w_bytes, AC_BUFFER_USAGE_STORAGE, 0 };
+    AcBufferDesc m_bdesc_b = { AC_ABI_VERSION, sizeof(AcBufferDesc), m_b_bytes, AC_BUFFER_USAGE_STORAGE, 0 };
+    AcBufferDesc m_bdesc_out = { AC_ABI_VERSION, sizeof(AcBufferDesc), m_out_bytes, AC_BUFFER_USAGE_STORAGE, 0 };
+
+    AcBuffer *buf_m_in = nullptr, *buf_m_w = nullptr, *buf_m_b = nullptr, *buf_m_out = nullptr;
+    track_buffer_create(ctx, &m_bdesc_in, &buf_m_in);
+    track_buffer_create(ctx, &m_bdesc_w, &buf_m_w);
+    track_buffer_create(ctx, &m_bdesc_b, &buf_m_b);
+    track_buffer_create(ctx, &m_bdesc_out, &buf_m_out);
+
+    float *host_m_in = nullptr, *host_m_w = nullptr, *host_m_b = nullptr, *host_m_out = nullptr;
+    ac_runtime_buffer_get_mapped_ptr(buf_m_in, (void**)&host_m_in);
+    ac_runtime_buffer_get_mapped_ptr(buf_m_w, (void**)&host_m_w);
+    ac_runtime_buffer_get_mapped_ptr(buf_m_b, (void**)&host_m_b);
+    ac_runtime_buffer_get_mapped_ptr(buf_m_out, (void**)&host_m_out);
+
+    memcpy(host_m_w, kSqueezeNetFire2Weight, m_w_bytes);
+    memcpy(host_m_b, kSqueezeNetFire2Bias, m_b_bytes);
+
+    std::vector<std::string> m_input_hashes;
+    std::vector<std::string> m_output_hashes;
+    uint32_t m_challenge_passed = 0;
+    double m_worst_cosine = 1.0;
+    double m_worst_rmse = 0.0;
+    double m_worst_p99 = 0.0;
+    double m_worst_max = 0.0;
+    uint32_t m_total_nan = 0;
+    uint32_t m_total_inf = 0;
+
+    double last_cpu_ref_time_us = 0.0;
+    double last_upload_time_us = 0.0;
+    double last_dispatch_time_us = 0.0;
+    double last_readback_time_us = 0.0;
+    double last_total_time_us = 0.0;
+
+    std::vector<float> m_cpu_ref(m_out_elems, 0.0f);
+
+    for (int s = 0; s < 3; ++s) {
+        uint32_t seed = kSeeds[s];
+        uint32_t rng = seed;
+        for (size_t i = 0; i < m_in_elems; ++i) host_m_in[i] = lcg_uniform(rng, -1.5f, 1.5f);
+        memset(host_m_out, 0, m_out_bytes);
+
+        // Upload timing
+        auto t_up_start = std::chrono::high_resolution_clock::now();
+        ac_runtime_buffer_flush(buf_m_in, 0, m_in_bytes);
+        ac_runtime_buffer_flush(buf_m_w, 0, m_w_bytes);
+        ac_runtime_buffer_flush(buf_m_b, 0, m_b_bytes);
+        ac_runtime_buffer_flush(buf_m_out, 0, m_out_bytes);
+        auto t_up_end = std::chrono::high_resolution_clock::now();
+        last_upload_time_us = std::chrono::duration<double, std::micro>(t_up_end - t_up_start).count();
+
+        std::string in_hash = compute_sha256(host_m_in, m_in_bytes);
+        m_input_hashes.push_back(in_hash);
+
+        // CPU reference timing
+        auto t_cpu_start = std::chrono::high_resolution_clock::now();
+        cpu_pointwise_conv_f32(host_m_in, kSqueezeNetFire2Weight, kSqueezeNetFire2Bias, m_cpu_ref.data(), M_H, M_W, M_CIN, M_COUT, 1);
+        auto t_cpu_end = std::chrono::high_resolution_clock::now();
+        last_cpu_ref_time_us = std::chrono::duration<double, std::micro>(t_cpu_end - t_cpu_start).count();
+
+        std::string cpu_hash = compute_sha256(m_cpu_ref.data(), m_out_bytes);
+
+        // GPU dispatch timing
+        AcEvent* ev = nullptr;
+        auto t_disp_start = std::chrono::high_resolution_clock::now();
+        AcResult dres = ac_vision_pointwise_conv_with_kernel_f32(
+            ctx, normal_kernel, &m_params,
+            buf_m_in, &m_in_desc, buf_m_w, &m_weight_desc, buf_m_b,
+            buf_m_out, &m_out_desc, &ev
+        );
+        if (dres != AC_SUCCESS) {
+            printf("  -> FAIL: Model Weight Seed %u GPU dispatch failed (%d)\n", seed, dres);
+            continue;
+        }
+        vision_gpu_op_count++;
+        if (ev) {
+            g_life.event_created++;
+            ac_runtime_event_wait(ev, 5000000000ull);
+            track_event_destroy(ev);
+        }
+        auto t_disp_end = std::chrono::high_resolution_clock::now();
+        last_dispatch_time_us = std::chrono::duration<double, std::micro>(t_disp_end - t_disp_start).count();
+
+        // Readback timing
+        auto t_rb_start = std::chrono::high_resolution_clock::now();
+        ac_runtime_buffer_invalidate(buf_m_out, 0, m_out_bytes);
+        auto t_rb_end = std::chrono::high_resolution_clock::now();
+        last_readback_time_us = std::chrono::duration<double, std::micro>(t_rb_end - t_rb_start).count();
+        last_total_time_us = last_upload_time_us + last_dispatch_time_us + last_readback_time_us;
+
+        std::string gpu_hash = compute_sha256(host_m_out, m_out_bytes);
+        m_output_hashes.push_back(gpu_hash);
+
+        NumericalMetrics nm = evaluate_parity(m_cpu_ref.data(), host_m_out, m_out_elems);
+        if (nm.cosine_similarity < m_worst_cosine) m_worst_cosine = nm.cosine_similarity;
+        if (nm.rmse > m_worst_rmse) m_worst_rmse = nm.rmse;
+        if (nm.p99_abs_error > m_worst_p99) m_worst_p99 = nm.p99_abs_error;
+        if (nm.max_abs_error > m_worst_max) m_worst_max = nm.max_abs_error;
+        m_total_nan += nm.nan_count;
+        m_total_inf += nm.inf_count;
+
+        printf("[MODEL WEIGHT] SEED=%u\n", seed);
+        printf("  INPUT_SHA256=%s\n", in_hash.c_str());
+        printf("  CPU_OUTPUT_SHA256=%s\n", cpu_hash.c_str());
+        printf("  GPU_OUTPUT_SHA256=%s\n", gpu_hash.c_str());
+        printf("  COSINE_SIMILARITY=%.7f\n", nm.cosine_similarity);
+        printf("  RMSE=%.7f\n", nm.rmse);
+        printf("  P99_ABS_ERROR=%.7f\n", nm.p99_abs_error);
+        printf("  MAX_ABS_ERROR=%.7f\n", nm.max_abs_error);
+        printf("  NAN_COUNT=%u, INF_COUNT=%u\n", nm.nan_count, nm.inf_count);
+
+        if (nm.cosine_similarity >= 0.99999 &&
+            nm.rmse <= 0.005 &&
+            nm.p99_abs_error <= 0.01 &&
+            nm.max_abs_error <= 0.05 &&
+            nm.nan_count == 0 &&
+            nm.inf_count == 0) {
+            m_challenge_passed++;
+        }
+    }
+
+    std::sort(m_input_hashes.begin(), m_input_hashes.end());
+    size_t unique_m_in_hashes = std::unique(m_input_hashes.begin(), m_input_hashes.end()) - m_input_hashes.begin();
+    std::sort(m_output_hashes.begin(), m_output_hashes.end());
+    size_t unique_m_out_hashes = std::unique(m_output_hashes.begin(), m_output_hashes.end()) - m_output_hashes.begin();
+
+    // Model Weight SPIR-V Dataflow Anti-Fake Verification (+0.25)
+    printf("\n--- Gate 8.2: Model Weight SPIR-V Dataflow Anti-Fake Verification ---\n");
+    uint32_t m_seed0 = kSeeds[0];
+    uint32_t m_rng0 = m_seed0;
+    for (size_t i = 0; i < m_in_elems; ++i) host_m_in[i] = lcg_uniform(m_rng0, -1.0f, 1.0f);
+    ac_runtime_buffer_flush(buf_m_in, 0, m_in_bytes);
+    memset(host_m_out, 0, m_out_bytes);
+    ac_runtime_buffer_flush(buf_m_out, 0, m_out_bytes);
+
+    ac_vision_pointwise_conv_with_kernel_f32(
+        ctx, normal_kernel, &m_params,
+        buf_m_in, &m_in_desc, buf_m_w, &m_weight_desc, buf_m_b,
+        buf_m_out, &m_out_desc, nullptr
+    );
+    vision_gpu_op_count++;
+    ac_runtime_buffer_invalidate(buf_m_out, 0, m_out_bytes);
+    std::string m_norm_hash = compute_sha256(host_m_out, m_out_bytes);
+    std::vector<float> m_norm_copy(host_m_out, host_m_out + m_out_elems);
+
+    AcKernel* m_mut_kernel = nullptr;
+    ac_vision_pointwise_conv_kernel_create(
+        ctx, kPointwiseConvMutatedSpv, kPointwiseConvMutatedSpvByteSize, kPointwiseConvMutatedSpvSha256, &m_mut_kernel
+    );
+    g_life.kernel_created++;
+
+    memset(host_m_out, 0, m_out_bytes);
+    ac_runtime_buffer_flush(buf_m_out, 0, m_out_bytes);
+    ac_vision_pointwise_conv_with_kernel_f32(
+        ctx, m_mut_kernel, &m_params,
+        buf_m_in, &m_in_desc, buf_m_w, &m_weight_desc, buf_m_b,
+        buf_m_out, &m_out_desc, nullptr
+    );
+    vision_gpu_op_count++;
+    ac_runtime_buffer_invalidate(buf_m_out, 0, m_out_bytes);
+    std::string m_mut_hash = compute_sha256(host_m_out, m_out_bytes);
+
+    NumericalMetrics m_mut_m = evaluate_parity(m_norm_copy.data(), host_m_out, m_out_elems);
+    double m_observed_mean_delta = m_mut_m.mean_delta;
+    bool m_hash_changed = (m_norm_hash != m_mut_hash);
+    bool m_delta_match = fabs(m_observed_mean_delta - 0.25) <= 0.001;
+    bool m_mut_pass = (m_hash_changed && m_delta_match);
+
+    printf("NORMAL_MODEL_WEIGHT_OUTPUT_SHA256=%s\n", m_norm_hash.c_str());
+    printf("MUTATED_MODEL_WEIGHT_OUTPUT_SHA256=%s\n", m_mut_hash.c_str());
+    printf("OUTPUT_HASH_CHANGED=%s\n", m_hash_changed ? "true" : "false");
+    printf("OBSERVED_MEAN_DELTA=%.6f\n", m_observed_mean_delta);
+    printf("MODEL_WEIGHT_SPIRV_DATAFLOW_SENSITIVITY=%s\n\n", m_mut_pass ? "PASS" : "FAIL");
+
+    track_kernel_destroy(m_mut_kernel);
+    track_buffer_destroy(buf_m_in);
+    track_buffer_destroy(buf_m_w);
+    track_buffer_destroy(buf_m_b);
+    track_buffer_destroy(buf_m_out);
+
+    bool model_weight_parity_pass = (m_challenge_passed == 3) &&
+                                    (unique_m_in_hashes == 3) &&
+                                    (unique_m_out_hashes == 3) &&
+                                    (m_worst_cosine >= 0.99999) &&
+                                    (m_worst_rmse <= 0.005) &&
+                                    (m_worst_p99 <= 0.01) &&
+                                    (m_worst_max <= 0.05) &&
+                                    (m_total_nan == 0) &&
+                                    (m_total_inf == 0);
+
+    // -------------------------------------------------------------------------
     // Gate 7: Partial Initialization Rollback & Lifecycle Instrumentation
     // -------------------------------------------------------------------------
     printf("--- Gate 7: Partial Initialization Rollback & Lifecycle Balance ---\n");
@@ -674,45 +923,65 @@ int main(void) {
     // -------------------------------------------------------------------------
     // Final Summary Block
     // -------------------------------------------------------------------------
+    uint32_t syn_challenge_ops = 3;
+    uint32_t syn_mut_baseline_ops = 1;
+    uint32_t syn_mut_shader_ops = 1;
+    uint32_t m_challenge_ops = 3;
+    uint32_t m_mut_baseline_ops = 1;
+    uint32_t m_mut_shader_ops = 1;
+    uint32_t total_expected_ops = syn_challenge_ops + syn_mut_baseline_ops + syn_mut_shader_ops +
+                                  m_challenge_ops + m_mut_baseline_ops + m_mut_shader_ops;
+    bool count_reconciled = (total_expected_ops == vision_gpu_op_count);
+
     printf("======================================================================\n");
-    printf("  AMUDA Vision V1 Verification Summary\n");
+    printf("  AMUDA Vision V2 Model Weight Verification Summary\n");
     printf("======================================================================\n");
-    printf("TARGET_OPERATOR=NHWC_POINTWISE_CONV_1X1\n");
-    printf("CONV2D_GPU_NATIVE=false\n");
-    printf("CONV2D_LOWERED_TO_MATMUL=true\n");
-    printf("GPU_COMPUTE_PORTION=F32_GEMM\n");
-    printf("RANDOM_TENSOR_CHALLENGE=%u/3\n", challenge_passed);
-    printf("UNIQUE_OUTPUT_HASH_COUNT=%zu\n", unique_hashes);
-    printf("COSINE_SIMILARITY=%.7f\n", worst_cosine);
-    printf("RMSE=%.7f\n", worst_rmse);
-    printf("P99_ABS_ERROR=%.7f\n", worst_p99);
-    printf("MAX_ABS_ERROR=%.7f\n", worst_max);
-    printf("SPIRV_DATAFLOW_SENSITIVITY=PASS\n");
-    printf("CORRUPTED_SPIRV_FAIL_CLOSED=%s\n", corrupted_fail_closed ? "PASS" : "FAIL");
-    printf("FORCED_DISPATCH_FAIL_CLOSED=%s\n", forced_fail_closed ? "PASS" : "FAIL");
-    printf("VISION_VALIDATION_GATES=%d/%d\n", gates_passed, total_validation_gates);
-    printf("NORMAL_LIFECYCLE_BALANCED=%s\n", lifecycle_balanced ? "true" : "false");
-    printf("FAILURE_LIFECYCLE_BALANCED=true\n");
-    printf("REAL_MODEL_AVAILABLE=false\n");
-    printf("REAL_MODEL_WEIGHT_USED=false\n");
+    printf("MODEL_NAME=SqueezeNet_v1.1\n");
+    printf("MODEL_FORMAT=NCNN\n");
+    printf("MODEL_BIN_PATH=/data/data/com.termux/files/home/ncnn/examples/squeezenet_v1.1.bin\n");
+    printf("MODEL_PARAM_PATH=/data/data/com.termux/files/home/ncnn/examples/squeezenet_v1.1.param\n");
+    printf("MODEL_BIN_SHA256=d0f7370ab3c163778c449a93b76799ea770e629b1b3c7afdb3981c1cd1e20243\n");
+    printf("MODEL_PARAM_SHA256=1e37b434d50e59dd924777d26bdacee36e30c446139681931005c89f53ace25c\n");
+    printf("TARGET_LAYER_NAME=fire2/squeeze1x1\n");
+    printf("TARGET_LAYER_INDEX=4\n");
+    printf("TARGET_INPUT_CHANNELS=%u\n", M_CIN);
+    printf("TARGET_OUTPUT_CHANNELS=%u\n", M_COUT);
+    printf("TARGET_WEIGHT_DTYPE=float32\n");
+    printf("TARGET_WEIGHT_SHA256=%s\n", actual_w_sha.c_str());
+    printf("REAL_MODEL_WEIGHT_USED=true\n");
     printf("REAL_IMAGE_USED=false\n");
     printf("REAL_RUNTIME_ACTIVATION_USED=false\n");
     printf("VISION_GRAPH_EXECUTION=false\n");
-    uint32_t random_challenge_gpu_ops = 3;
-    uint32_t normal_mutation_baseline_gpu_ops = 1;
-    uint32_t mutated_shader_gpu_ops = 1;
-    uint32_t total_vision_gpu_ops = random_challenge_gpu_ops + normal_mutation_baseline_gpu_ops + mutated_shader_gpu_ops;
-    bool count_reconciled = (total_vision_gpu_ops == vision_gpu_op_count);
-
-    printf("RANDOM_CHALLENGE_GPU_OP_COUNT=%u\n", random_challenge_gpu_ops);
-    printf("NORMAL_MUTATION_BASELINE_GPU_OP_COUNT=%u\n", normal_mutation_baseline_gpu_ops);
-    printf("MUTATED_SHADER_GPU_OP_COUNT=%u\n", mutated_shader_gpu_ops);
-    printf("TOTAL_VISION_GPU_OP_COUNT=%u\n", total_vision_gpu_ops);
+    printf("MODEL_WEIGHT_RANDOM_CHALLENGE=%u/3\n", m_challenge_passed);
+    printf("UNIQUE_INPUT_HASH_COUNT=%zu\n", unique_m_in_hashes);
+    printf("UNIQUE_OUTPUT_HASH_COUNT=%zu\n", unique_m_out_hashes);
+    printf("WORST_COSINE_SIMILARITY=%.7f\n", m_worst_cosine);
+    printf("WORST_RMSE=%.7f\n", m_worst_rmse);
+    printf("WORST_P99_ABS_ERROR=%.7f\n", m_worst_p99);
+    printf("WORST_MAX_ABS_ERROR=%.7f\n", m_worst_max);
+    printf("NAN_COUNT=%u\n", m_total_nan);
+    printf("INF_COUNT=%u\n", m_total_inf);
+    printf("MODEL_WEIGHT_POINTWISE_PARITY=%s\n", model_weight_parity_pass ? "PASS" : "FAIL");
+    printf("AMEVA_VS_DOUBLE_REFERENCE=%s\n", model_weight_parity_pass ? "PASS" : "FAIL");
+    printf("AMEVA_VS_NCNN_CPU=NOT_RUN\n");
+    printf("MODEL_WEIGHT_SPIRV_DATAFLOW_SENSITIVITY=%s\n", m_mut_pass ? "PASS" : "FAIL");
+    printf("CPU_REFERENCE_TIME_US=%.1f\n", last_cpu_ref_time_us);
+    printf("AMEVA_UPLOAD_TIME_US=%.1f\n", last_upload_time_us);
+    printf("AMEVA_DISPATCH_TIME_US=%.1f\n", last_dispatch_time_us);
+    printf("AMEVA_READBACK_TIME_US=%.1f\n", last_readback_time_us);
+    printf("AMEVA_TOTAL_TIME_US=%.1f\n", last_total_time_us);
+    printf("RANDOM_CHALLENGE_GPU_OP_COUNT=%u\n", syn_challenge_ops);
+    printf("NORMAL_MUTATION_BASELINE_GPU_OP_COUNT=%u\n", syn_mut_baseline_ops);
+    printf("MUTATED_SHADER_GPU_OP_COUNT=%u\n", syn_mut_shader_ops);
+    printf("MODEL_WEIGHT_CHALLENGE_GPU_OP_COUNT=%u\n", m_challenge_ops);
+    printf("MODEL_WEIGHT_NORMAL_BASELINE_GPU_OP_COUNT=%u\n", m_mut_baseline_ops);
+    printf("MODEL_WEIGHT_MUTATED_GPU_OP_COUNT=%u\n", m_mut_shader_ops);
+    printf("TOTAL_VISION_GPU_OP_COUNT=%u\n", vision_gpu_op_count);
     printf("COUNT_RECONCILED=%s\n", count_reconciled ? "true" : "false");
     printf("CPU_FALLBACK_COUNT=%u\n", cpu_fallback_count);
     printf("SILENT_FALLBACK_COUNT=%u\n", silent_fallback_count);
     printf("VISION_GPU_OP_COUNT=%u\n", vision_gpu_op_count);
-    printf("NEXT_BLOCKER=LOCAL_MODEL_FIXTURE_ABSENT\n");
+    printf("NEXT_BLOCKER=NCNN_CPU_LAYER_REFERENCE_UNAVAILABLE\n");
 
     bool all_pass = (challenge_passed == 3) &&
                     (unique_hashes == 3) &&
@@ -721,7 +990,10 @@ int main(void) {
                     (gates_passed == total_validation_gates) &&
                     (lifecycle_balanced) &&
                     (cpu_fallback_count == 0) &&
-                    (silent_fallback_count == 0);
+                    (silent_fallback_count == 0) &&
+                    (model_weight_parity_pass) &&
+                    (m_mut_pass) &&
+                    (count_reconciled);
 
     return all_pass ? 0 : 1;
 }
