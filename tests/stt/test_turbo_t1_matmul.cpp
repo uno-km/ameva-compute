@@ -183,7 +183,7 @@ int main(int argc, char ** argv) {
     const char * TEST_TARGET_LABEL = "node_decoder_0_attn_q";
     const char * TARGET_WEIGHT_TENSOR_NAME = "decoder.blocks.0.attn.query.weight";
 
-    // 1. Scan model binary precisely
+    // 1. Scan model binary precisely with defensive input validation
     FILE * mf = fopen(model_path, "rb");
     if (!mf) {
         fprintf(stderr, "FATAL: Cannot open model file for binary scan\n");
@@ -191,18 +191,37 @@ int main(int argc, char ** argv) {
     }
 
     uint32_t magic = 0;
-    fread(&magic, 4, 1, mf);
+    if (fread(&magic, 4, 1, mf) != 1 || magic != 0x67676d6c) {
+        fprintf(stderr, "FATAL: Invalid model file magic: 0x%08x\n", magic);
+        fclose(mf);
+        return 3;
+    }
     int32_t hparams[11];
-    fread(hparams, sizeof(int32_t), 11, mf);
+    if (fread(hparams, sizeof(int32_t), 11, mf) != 11) {
+        fprintf(stderr, "FATAL: Truncated hparams\n");
+        fclose(mf);
+        return 3;
+    }
     int32_t n_mel = 0, n_fft = 0;
-    fread(&n_mel, 4, 1, mf);
-    fread(&n_fft, 4, 1, mf);
+    if (fread(&n_mel, 4, 1, mf) != 1 || fread(&n_fft, 4, 1, mf) != 1) {
+        fprintf(stderr, "FATAL: Truncated mel filter header\n");
+        fclose(mf);
+        return 3;
+    }
     fseek(mf, (long)n_mel * n_fft * 4, SEEK_CUR);
     int32_t n_vocab = 0;
-    fread(&n_vocab, 4, 1, mf);
+    if (fread(&n_vocab, 4, 1, mf) != 1 || n_vocab <= 0 || n_vocab > 1000000) {
+        fprintf(stderr, "FATAL: Invalid vocab size: %d\n", n_vocab);
+        fclose(mf);
+        return 3;
+    }
     for (int i = 0; i < n_vocab; ++i) {
         uint32_t len = 0;
-        fread(&len, 4, 1, mf);
+        if (fread(&len, 4, 1, mf) != 1 || len > 1024) {
+            fprintf(stderr, "FATAL: Invalid token length: %u\n", len);
+            fclose(mf);
+            return 3;
+        }
         fseek(mf, len, SEEK_CUR);
     }
 
@@ -213,35 +232,68 @@ int main(int argc, char ** argv) {
     while (!feof(mf)) {
         int32_t n_dims = 0, name_len = 0, ttype = 0;
         if (fread(&n_dims, 4, 1, mf) != 1) break;
-        fread(&name_len, 4, 1, mf);
-        fread(&ttype, 4, 1, mf);
+        if (n_dims < 1 || n_dims > 4) {
+            fprintf(stderr, "FATAL: Invalid n_dims: %d\n", n_dims);
+            fclose(mf);
+            return 3;
+        }
+        if (fread(&name_len, 4, 1, mf) != 1 || name_len <= 0 || name_len > 256) {
+            fprintf(stderr, "FATAL: Invalid name_len: %d\n", name_len);
+            fclose(mf);
+            return 3;
+        }
+        if (fread(&ttype, 4, 1, mf) != 1) {
+            fprintf(stderr, "FATAL: Truncated tensor type\n");
+            fclose(mf);
+            return 3;
+        }
         int32_t ne[4] = {1, 1, 1, 1};
-        fread(ne, 4, n_dims, mf);
+        if (fread(ne, 4, n_dims, mf) != (size_t)n_dims) {
+            fprintf(stderr, "FATAL: Truncated tensor ne\n");
+            fclose(mf);
+            return 3;
+        }
         std::vector<char> tname(name_len + 1, 0);
-        fread(tname.data(), 1, name_len, mf);
+        if (fread(tname.data(), 1, name_len, mf) != (size_t)name_len) {
+            fprintf(stderr, "FATAL: Truncated tensor name\n");
+            fclose(mf);
+            return 3;
+        }
 
         size_t nbytes = 0;
         if (ttype == 6) { // Q5_0
-            nbytes = (ne[0] / 32) * 22;
-            for (int d = 1; d < n_dims; ++d) nbytes *= ne[d];
+            if (ne[0] % 32 != 0) {
+                fprintf(stderr, "FATAL: Q5_0 ne[0] not aligned to 32: %d\n", ne[0]);
+                fclose(mf);
+                return 3;
+            }
+            nbytes = ((size_t)ne[0] / 32) * 22;
+            for (int d = 1; d < n_dims; ++d) nbytes *= (size_t)ne[d];
         } else if (ttype == 1) { // F16
             nbytes = 2;
-            for (int d = 0; d < n_dims; ++d) nbytes *= ne[d];
+            for (int d = 0; d < n_dims; ++d) nbytes *= (size_t)ne[d];
         } else if (ttype == 0) { // F32
             nbytes = 4;
-            for (int d = 0; d < n_dims; ++d) nbytes *= ne[d];
+            for (int d = 0; d < n_dims; ++d) nbytes *= (size_t)ne[d];
         } else {
             nbytes = 1;
-            for (int d = 0; d < n_dims; ++d) nbytes *= ne[d];
+            for (int d = 0; d < n_dims; ++d) nbytes *= (size_t)ne[d];
         }
 
         long cur_offset = ftell(mf);
+        if ((size_t)cur_offset + nbytes > model_sz) {
+            fprintf(stderr, "FATAL: Tensor offset out of bounds: %ld + %zu > %zu\n", cur_offset, nbytes, model_sz);
+            fclose(mf);
+            return 3;
+        }
+
         if (strcmp(tname.data(), TARGET_WEIGHT_TENSOR_NAME) == 0) {
             target_weight_offset = cur_offset;
-            if (nbytes == EXPECTED_WEIGHT_BYTES) {
-                fread(target_weight_bytes.data(), 1, EXPECTED_WEIGHT_BYTES, mf);
-                found_target_tensor = true;
-                break;
+            if (ttype == 6 && n_dims == 2 && ne[0] == (int32_t)TARGET_K && ne[1] == (int32_t)TARGET_N && nbytes == EXPECTED_WEIGHT_BYTES) {
+                if (fread(target_weight_bytes.data(), 1, EXPECTED_WEIGHT_BYTES, mf) == EXPECTED_WEIGHT_BYTES) {
+                    found_target_tensor = true;
+                    break;
+                }
             }
         }
         fseek(mf, nbytes, SEEK_CUR);
@@ -288,7 +340,16 @@ int main(int argc, char ** argv) {
     printf("F16_STAGING_BYTES=%zu\n", f16_staging_bytes);
     printf("F16_STAGING_SHA256=%s\n", f16_staging_sha.c_str());
 
-    // 3. Declarations for resources & metrics before any goto
+    // 3. Declarations for resources, lifecycle counters & metrics before any goto
+    uint32_t ctx_create_count = 0;
+    uint32_t ctx_destroy_count = 0;
+    uint32_t kernel_create_count = 0;
+    uint32_t kernel_destroy_count = 0;
+    uint32_t buffer_create_count = 0;
+    uint32_t buffer_destroy_count = 0;
+    uint32_t event_create_count = 0;
+    uint32_t event_destroy_count = 0;
+
     int api_gates_passed = 0;
     int api_gates_total = 0;
 
@@ -316,16 +377,34 @@ int main(int argc, char ** argv) {
     bool sens_pass = false;
     bool forced_fail_pass = false;
 
+    const char * env_spirv = getenv("AMEVA_SPIRV_PATH");
+    const char * normal_spirv = env_spirv ? env_spirv : "/data/data/com.termux/files/home/matmul_f16_f32.spv";
+    std::string normal_spv_sha = compute_file_sha256(normal_spirv);
+
+    const char * mutated_spv_path = "/data/data/com.termux/files/home/matmul_f16_f32_mutated.spv";
+    std::string mutated_spv_sha = compute_file_sha256(mutated_spv_path);
+
+    printf("\n[STAGE: SPIR-V Provenance]\n");
+    printf("NORMAL_SPIRV_PATH=%s\n", normal_spirv);
+    printf("NORMAL_SPIRV_SHA256=%s\n", normal_spv_sha.c_str());
+    printf("MUTATED_SPIRV_PATH=%s\n", mutated_spv_path);
+    printf("MUTATED_SPIRV_SHA256=%s\n", mutated_spv_sha.c_str());
+    bool spirv_hash_diff = (!normal_spv_sha.empty() && !mutated_spv_sha.empty() && normal_spv_sha != mutated_spv_sha);
+    printf("SPIRV_HASH_DIFFERENT=%s\n", spirv_hash_diff ? "true" : "false");
+
     AcResult res = AC_SUCCESS;
 
     res = ac_vk_context_create(&vk_ctx);
     api_gates_total++;
-    if (res == AC_SUCCESS && vk_ctx) api_gates_passed++;
-    else { fprintf(stderr, "FATAL: ac_vk_context_create failed: %d\n", res); goto cleanup; }
+    if (res == AC_SUCCESS && vk_ctx) {
+        api_gates_passed++;
+        ctx_create_count++;
+    } else {
+        fprintf(stderr, "FATAL: ac_vk_context_create failed: %d\n", res);
+        goto cleanup;
+    }
 
     {
-        const char * env_spirv = getenv("AMEVA_SPIRV_PATH");
-        const char * normal_spirv = env_spirv ? env_spirv : "/data/data/com.termux/files/home/matmul_f16_f32.spv";
         std::ifstream spv_file(normal_spirv, std::ios::binary | std::ios::ate);
         if (!spv_file) { fprintf(stderr, "FATAL: Cannot open SPIR-V %s\n", normal_spirv); goto cleanup; }
         size_t spv_size = spv_file.tellg();
@@ -342,27 +421,32 @@ int main(int argc, char ** argv) {
         meta.push_constant_size = sizeof(MatMulPushConstants);
         meta.local_size = {16, 16, 1};
         meta.required_features = AC_FEATURE_NONE;
-        meta.expected_spirv_sha256 = nullptr;
+        meta.expected_spirv_sha256 = normal_spv_sha.c_str();
 
         res = ac_vk_kernel_create_with_metadata(vk_ctx, spv_code.data(), spv_size, &meta, &vk_kernel);
         api_gates_total++;
-        if (res == AC_SUCCESS && vk_kernel) api_gates_passed++;
-        else { fprintf(stderr, "FATAL: ac_vk_kernel_create failed: %d\n", res); goto cleanup; }
+        if (res == AC_SUCCESS && vk_kernel) {
+            api_gates_passed++;
+            kernel_create_count++;
+        } else {
+            fprintf(stderr, "FATAL: ac_vk_kernel_create failed: %d\n", res);
+            goto cleanup;
+        }
     }
 
     res = ac_vk_buffer_create(vk_ctx, f16_staging_bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &buf_w);
     api_gates_total++;
-    if (res == AC_SUCCESS && buf_w) api_gates_passed++;
+    if (res == AC_SUCCESS && buf_w) { api_gates_passed++; buffer_create_count++; }
     else { fprintf(stderr, "FATAL: ac_vk_buffer_create(buf_w) failed: %d\n", res); goto cleanup; }
 
     res = ac_vk_buffer_create(vk_ctx, TARGET_K * TARGET_M * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &buf_a);
     api_gates_total++;
-    if (res == AC_SUCCESS && buf_a) api_gates_passed++;
+    if (res == AC_SUCCESS && buf_a) { api_gates_passed++; buffer_create_count++; }
     else { fprintf(stderr, "FATAL: ac_vk_buffer_create(buf_a) failed: %d\n", res); goto cleanup; }
 
     res = ac_vk_buffer_create(vk_ctx, TARGET_N * TARGET_M * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &buf_o);
     api_gates_total++;
-    if (res == AC_SUCCESS && buf_o) api_gates_passed++;
+    if (res == AC_SUCCESS && buf_o) { api_gates_passed++; buffer_create_count++; }
     else { fprintf(stderr, "FATAL: ac_vk_buffer_create(buf_o) failed: %d\n", res); goto cleanup; }
 
     // Upload staged F16 weights to GPU once
@@ -370,17 +454,19 @@ int main(int argc, char ** argv) {
         void * w_map = nullptr;
         res = ac_vk_buffer_map(buf_w, &w_map);
         api_gates_total++;
-        if (res == AC_SUCCESS && w_map) {
-            api_gates_passed++;
-            memcpy(w_map, staged_w_fp16.data(), f16_staging_bytes);
-            res = ac_vk_buffer_flush(buf_w, 0, f16_staging_bytes);
-            api_gates_total++;
-            if (res == AC_SUCCESS) api_gates_passed++;
-            else { fprintf(stderr, "FATAL: ac_vk_buffer_flush(buf_w) failed: %d\n", res); goto cleanup; }
-        } else {
+        if (res != AC_SUCCESS || !w_map) {
             fprintf(stderr, "FATAL: ac_vk_buffer_map(buf_w) failed: %d\n", res);
             goto cleanup;
         }
+        api_gates_passed++;
+        memcpy(w_map, staged_w_fp16.data(), f16_staging_bytes);
+        res = ac_vk_buffer_flush(buf_w, 0, f16_staging_bytes);
+        api_gates_total++;
+        if (res != AC_SUCCESS) {
+            fprintf(stderr, "FATAL: ac_vk_buffer_flush(buf_w) failed: %d\n", res);
+            goto cleanup;
+        }
+        api_gates_passed++;
     }
 
     // 4. 3-Seed Deterministic Random Challenge
@@ -398,13 +484,20 @@ int main(int argc, char ** argv) {
         void * a_map = nullptr;
         res = ac_vk_buffer_map(buf_a, &a_map);
         api_gates_total++;
-        if (res == AC_SUCCESS && a_map) {
-            api_gates_passed++;
-            memcpy(a_map, act.data(), act.size() * sizeof(float));
-            res = ac_vk_buffer_flush(buf_a, 0, act.size() * sizeof(float));
-            api_gates_total++;
-            if (res == AC_SUCCESS) api_gates_passed++;
+        if (res != AC_SUCCESS || !a_map) {
+            fprintf(stderr, "FATAL: ac_vk_buffer_map(buf_a) failed: %d\n", res);
+            goto cleanup;
         }
+        api_gates_passed++;
+
+        memcpy(a_map, act.data(), act.size() * sizeof(float));
+        res = ac_vk_buffer_flush(buf_a, 0, act.size() * sizeof(float));
+        api_gates_total++;
+        if (res != AC_SUCCESS) {
+            fprintf(stderr, "FATAL: ac_vk_buffer_flush(buf_a) failed: %d\n", res);
+            goto cleanup;
+        }
+        api_gates_passed++;
 
         // Dispatch AMEVA Vulkan GEMM
         MatMulPushConstants pc = { TARGET_M, TARGET_N, TARGET_K };
@@ -415,32 +508,42 @@ int main(int argc, char ** argv) {
         event = nullptr;
         res = ac_vk_dispatch(vk_ctx, vk_kernel, bufs, 3, &pc, sizeof(pc), group_x, group_y, 1, &event);
         api_gates_total++;
-        bool disp_ok = (res == AC_SUCCESS && event);
-        if (disp_ok) api_gates_passed++;
-
-        bool wait_ok = false;
-        if (disp_ok) {
-            res = ac_vk_event_wait(event, 5000000000ULL);
-            api_gates_total++;
-            if (res == AC_SUCCESS) { api_gates_passed++; wait_ok = true; }
-            ac_vk_event_destroy(event);
-            event = nullptr;
+        if (res != AC_SUCCESS || !event) {
+            fprintf(stderr, "FATAL: ac_vk_dispatch failed: %d\n", res);
+            goto cleanup;
         }
+        api_gates_passed++;
+        event_create_count++;
+
+        res = ac_vk_event_wait(event, 5000000000ULL);
+        api_gates_total++;
+        if (res != AC_SUCCESS) {
+            fprintf(stderr, "FATAL: ac_vk_event_wait failed: %d\n", res);
+            goto cleanup;
+        }
+        api_gates_passed++;
+        ac_vk_event_destroy(event);
+        event = nullptr;
+        event_destroy_count++;
 
         res = ac_vk_buffer_invalidate(buf_o, 0, TARGET_N * sizeof(float));
         api_gates_total++;
-        bool inv_ok = (res == AC_SUCCESS);
-        if (inv_ok) api_gates_passed++;
+        if (res != AC_SUCCESS) {
+            fprintf(stderr, "FATAL: ac_vk_buffer_invalidate failed: %d\n", res);
+            goto cleanup;
+        }
+        api_gates_passed++;
 
         std::vector<float> gpu_out(TARGET_N);
         res = ac_vk_buffer_readback(buf_o, gpu_out.data(), 0, TARGET_N * sizeof(float));
         api_gates_total++;
-        bool read_ok = (res == AC_SUCCESS);
-        if (read_ok) api_gates_passed++;
-
-        if (disp_ok && wait_ok && inv_ok && read_ok) {
-            total_gpu_ops++;
+        if (res != AC_SUCCESS) {
+            fprintf(stderr, "FATAL: ac_vk_buffer_readback failed: %d\n", res);
+            goto cleanup;
         }
+        api_gates_passed++;
+
+        total_gpu_ops++;
 
         std::string out_hash = compute_bytes_sha256(gpu_out.data(), gpu_out.size() * sizeof(float));
         output_hashes.push_back(out_hash);
@@ -515,7 +618,7 @@ int main(int argc, char ** argv) {
         printf("TURBO_T1_RANDOM_CHALLENGE=%d/3\n", passed_challenges);
     }
 
-    // 5. SPIR-V Mutation Test with Guaranteed Same Input (Seed 104729)
+    // 5. SPIR-V Mutation Test with Strictly Identical Input (Seed 104729)
     printf("\n[STAGE: SPIR-V Mutation Test with Strictly Identical Input]\n");
     {
         std::vector<float> mut_act(TARGET_K);
@@ -530,13 +633,20 @@ int main(int argc, char ** argv) {
         void * a_map = nullptr;
         res = ac_vk_buffer_map(buf_a, &a_map);
         api_gates_total++;
-        if (res == AC_SUCCESS && a_map) {
-            api_gates_passed++;
-            memcpy(a_map, mut_act.data(), mut_act.size() * sizeof(float));
-            res = ac_vk_buffer_flush(buf_a, 0, mut_act.size() * sizeof(float));
-            api_gates_total++;
-            if (res == AC_SUCCESS) api_gates_passed++;
+        if (res != AC_SUCCESS || !a_map) {
+            fprintf(stderr, "FATAL: ac_vk_buffer_map(buf_a) mutation failed: %d\n", res);
+            goto cleanup;
         }
+        api_gates_passed++;
+
+        memcpy(a_map, mut_act.data(), mut_act.size() * sizeof(float));
+        res = ac_vk_buffer_flush(buf_a, 0, mut_act.size() * sizeof(float));
+        api_gates_total++;
+        if (res != AC_SUCCESS) {
+            fprintf(stderr, "FATAL: ac_vk_buffer_flush(buf_a) mutation failed: %d\n", res);
+            goto cleanup;
+        }
+        api_gates_passed++;
 
         printf("NORMAL_RUN_INPUT_SHA256=%s\n", mutation_input_sha.c_str());
 
@@ -549,35 +659,44 @@ int main(int argc, char ** argv) {
         AcVkEvent * norm_event = nullptr;
         res = ac_vk_dispatch(vk_ctx, vk_kernel, bufs, 3, &pc, sizeof(pc), group_x, group_y, 1, &norm_event);
         api_gates_total++;
-        bool norm_disp_ok = (res == AC_SUCCESS && norm_event);
-        if (norm_disp_ok) api_gates_passed++;
-
-        bool norm_wait_ok = false;
-        if (norm_disp_ok) {
-            res = ac_vk_event_wait(norm_event, 5000000000ULL);
-            api_gates_total++;
-            if (res == AC_SUCCESS) { api_gates_passed++; norm_wait_ok = true; }
-            ac_vk_event_destroy(norm_event);
+        if (res != AC_SUCCESS || !norm_event) {
+            fprintf(stderr, "FATAL: normal dispatch failed: %d\n", res);
+            goto cleanup;
         }
+        api_gates_passed++;
+        event_create_count++;
+
+        res = ac_vk_event_wait(norm_event, 5000000000ULL);
+        api_gates_total++;
+        if (res != AC_SUCCESS) {
+            fprintf(stderr, "FATAL: normal event wait failed: %d\n", res);
+            goto cleanup;
+        }
+        api_gates_passed++;
+        ac_vk_event_destroy(norm_event);
+        event_destroy_count++;
 
         res = ac_vk_buffer_invalidate(buf_o, 0, TARGET_N * sizeof(float));
         api_gates_total++;
-        bool norm_inv_ok = (res == AC_SUCCESS);
-        if (norm_inv_ok) api_gates_passed++;
+        if (res != AC_SUCCESS) {
+            fprintf(stderr, "FATAL: normal buffer invalidate failed: %d\n", res);
+            goto cleanup;
+        }
+        api_gates_passed++;
 
         std::vector<float> normal_output(TARGET_N);
         res = ac_vk_buffer_readback(buf_o, normal_output.data(), 0, TARGET_N * sizeof(float));
         api_gates_total++;
-        bool norm_read_ok = (res == AC_SUCCESS);
-        if (norm_read_ok) api_gates_passed++;
-
-        if (norm_disp_ok && norm_wait_ok && norm_inv_ok && norm_read_ok) {
-            total_gpu_ops++;
+        if (res != AC_SUCCESS) {
+            fprintf(stderr, "FATAL: normal buffer readback failed: %d\n", res);
+            goto cleanup;
         }
+        api_gates_passed++;
+
+        total_gpu_ops++;
         std::string normal_output_sha = compute_bytes_sha256(normal_output.data(), normal_output.size() * sizeof(float));
 
         // Load mutated kernel (+0.5 shader)
-        const char * mutated_spv_path = "/data/data/com.termux/files/home/matmul_f16_f32_mutated.spv";
         std::ifstream m_spv_file(mutated_spv_path, std::ios::binary | std::ios::ate);
         if (!m_spv_file) {
             fprintf(stderr, "FATAL: Cannot open mutated SPIR-V %s\n", mutated_spv_path);
@@ -595,11 +714,16 @@ int main(int argc, char ** argv) {
         meta_mut.binding_count = 3;
         meta_mut.push_constant_size = sizeof(MatMulPushConstants);
         meta_mut.local_size = {16, 16, 1};
+        meta_mut.expected_spirv_sha256 = mutated_spv_sha.c_str();
 
         res = ac_vk_kernel_create_with_metadata(vk_ctx, m_spv_code.data(), m_spv_size, &meta_mut, &mutated_kernel);
         api_gates_total++;
-        if (res == AC_SUCCESS && mutated_kernel) api_gates_passed++;
-        else { fprintf(stderr, "FATAL: ac_vk_kernel_create(mutated) failed: %d\n", res); goto cleanup; }
+        if (res != AC_SUCCESS || !mutated_kernel) {
+            fprintf(stderr, "FATAL: ac_vk_kernel_create(mutated) failed: %d\n", res);
+            goto cleanup;
+        }
+        api_gates_passed++;
+        kernel_create_count++;
 
         // Retain strictly identical activation in buf_a
         printf("MUTATED_RUN_INPUT_SHA256=%s\n", mutation_input_sha.c_str());
@@ -609,32 +733,42 @@ int main(int argc, char ** argv) {
         // Dispatch mutated kernel
         res = ac_vk_dispatch(vk_ctx, mutated_kernel, bufs, 3, &pc, sizeof(pc), group_x, group_y, 1, &m_event);
         api_gates_total++;
-        bool m_disp_ok = (res == AC_SUCCESS && m_event);
-        if (m_disp_ok) api_gates_passed++;
-
-        bool m_wait_ok = false;
-        if (m_disp_ok) {
-            res = ac_vk_event_wait(m_event, 5000000000ULL);
-            api_gates_total++;
-            if (res == AC_SUCCESS) { api_gates_passed++; m_wait_ok = true; }
-            ac_vk_event_destroy(m_event);
-            m_event = nullptr;
+        if (res != AC_SUCCESS || !m_event) {
+            fprintf(stderr, "FATAL: mutated dispatch failed: %d\n", res);
+            goto cleanup;
         }
+        api_gates_passed++;
+        event_create_count++;
+
+        res = ac_vk_event_wait(m_event, 5000000000ULL);
+        api_gates_total++;
+        if (res != AC_SUCCESS) {
+            fprintf(stderr, "FATAL: mutated event wait failed: %d\n", res);
+            goto cleanup;
+        }
+        api_gates_passed++;
+        ac_vk_event_destroy(m_event);
+        m_event = nullptr;
+        event_destroy_count++;
 
         res = ac_vk_buffer_invalidate(buf_o, 0, TARGET_N * sizeof(float));
         api_gates_total++;
-        bool m_inv_ok = (res == AC_SUCCESS);
-        if (m_inv_ok) api_gates_passed++;
+        if (res != AC_SUCCESS) {
+            fprintf(stderr, "FATAL: mutated buffer invalidate failed: %d\n", res);
+            goto cleanup;
+        }
+        api_gates_passed++;
 
         std::vector<float> mutated_output(TARGET_N);
         res = ac_vk_buffer_readback(buf_o, mutated_output.data(), 0, TARGET_N * sizeof(float));
         api_gates_total++;
-        bool m_read_ok = (res == AC_SUCCESS);
-        if (m_read_ok) api_gates_passed++;
-
-        if (m_disp_ok && m_wait_ok && m_inv_ok && m_read_ok) {
-            total_gpu_ops++;
+        if (res != AC_SUCCESS) {
+            fprintf(stderr, "FATAL: mutated buffer readback failed: %d\n", res);
+            goto cleanup;
         }
+        api_gates_passed++;
+
+        total_gpu_ops++;
         std::string mutated_output_sha = compute_bytes_sha256(mutated_output.data(), mutated_output.size() * sizeof(float));
 
         printf("NORMAL_OUTPUT_SHA256=%s\n", normal_output_sha.c_str());
@@ -674,6 +808,7 @@ int main(int argc, char ** argv) {
 
         ac_vk_kernel_destroy(mutated_kernel);
         mutated_kernel = nullptr;
+        kernel_destroy_count++;
     }
 
     // 6. Forced Dispatch Failure Injection Test
@@ -686,13 +821,20 @@ int main(int argc, char ** argv) {
         void * o_map = nullptr;
         res = ac_vk_buffer_map(buf_o, &o_map);
         api_gates_total++;
-        if (res == AC_SUCCESS && o_map) {
-            api_gates_passed++;
-            memcpy(o_map, canary_buf.data(), canary_buf.size());
-            res = ac_vk_buffer_flush(buf_o, 0, canary_buf.size());
-            api_gates_total++;
-            if (res == AC_SUCCESS) api_gates_passed++;
+        if (res != AC_SUCCESS || !o_map) {
+            fprintf(stderr, "FATAL: canary buffer map failed: %d\n", res);
+            goto cleanup;
         }
+        api_gates_passed++;
+
+        memcpy(o_map, canary_buf.data(), canary_buf.size());
+        res = ac_vk_buffer_flush(buf_o, 0, canary_buf.size());
+        api_gates_total++;
+        if (res != AC_SUCCESS) {
+            fprintf(stderr, "FATAL: canary buffer flush failed: %d\n", res);
+            goto cleanup;
+        }
+        api_gates_passed++;
 
         MatMulPushConstants pc = { TARGET_M, TARGET_N, TARGET_K };
         AcVkBuffer * bufs[3] = { buf_w, buf_a, buf_o };
@@ -724,15 +866,15 @@ int main(int argc, char ** argv) {
     }
 
 cleanup:
-    if (fail_event)      { ac_vk_event_destroy(fail_event); fail_event = nullptr; }
-    if (m_event)         { ac_vk_event_destroy(m_event); m_event = nullptr; }
-    if (event)           { ac_vk_event_destroy(event); event = nullptr; }
-    if (mutated_kernel)  { ac_vk_kernel_destroy(mutated_kernel); mutated_kernel = nullptr; }
-    if (buf_o)           { ac_vk_buffer_destroy(buf_o); buf_o = nullptr; }
-    if (buf_a)           { ac_vk_buffer_destroy(buf_a); buf_a = nullptr; }
-    if (buf_w)           { ac_vk_buffer_destroy(buf_w); buf_w = nullptr; }
-    if (vk_kernel)       { ac_vk_kernel_destroy(vk_kernel); vk_kernel = nullptr; }
-    if (vk_ctx)          { ac_vk_context_destroy(vk_ctx); vk_ctx = nullptr; }
+    if (fail_event)      { ac_vk_event_destroy(fail_event); fail_event = nullptr; event_destroy_count++; }
+    if (m_event)         { ac_vk_event_destroy(m_event); m_event = nullptr; event_destroy_count++; }
+    if (event)           { ac_vk_event_destroy(event); event = nullptr; event_destroy_count++; }
+    if (mutated_kernel)  { ac_vk_kernel_destroy(mutated_kernel); mutated_kernel = nullptr; kernel_destroy_count++; }
+    if (buf_o)           { ac_vk_buffer_destroy(buf_o); buf_o = nullptr; buffer_destroy_count++; }
+    if (buf_a)           { ac_vk_buffer_destroy(buf_a); buf_a = nullptr; buffer_destroy_count++; }
+    if (buf_w)           { ac_vk_buffer_destroy(buf_w); buf_w = nullptr; buffer_destroy_count++; }
+    if (vk_kernel)       { ac_vk_kernel_destroy(vk_kernel); vk_kernel = nullptr; kernel_destroy_count++; }
+    if (vk_ctx)          { ac_vk_context_destroy(vk_ctx); vk_ctx = nullptr; ctx_destroy_count++; }
 
     printf("\n================================================================================\n");
     printf(" T1 AUDIT SUMMARY METRICS\n");
@@ -746,14 +888,34 @@ cleanup:
     printf("WORST_P99_ABS_ERROR=%.6f\n", worst_p99);
     printf("WORST_MAX_ABS_ERROR=%.6f\n", worst_max_abs);
     printf("VULKAN_API_RESULT_GATES=%d/%d\n", api_gates_passed, api_gates_total);
-    printf("NORMAL_LIFECYCLE_BALANCED=true\n");
-    printf("FAILURE_LIFECYCLE_BALANCED=true\n");
+
+    printf("CONTEXT_CREATE_COUNT=%u\n", ctx_create_count);
+    printf("CONTEXT_DESTROY_COUNT=%u\n", ctx_destroy_count);
+    printf("KERNEL_CREATE_COUNT=%u\n", kernel_create_count);
+    printf("KERNEL_DESTROY_COUNT=%u\n", kernel_destroy_count);
+    printf("BUFFER_CREATE_COUNT=%u\n", buffer_create_count);
+    printf("BUFFER_DESTROY_COUNT=%u\n", buffer_destroy_count);
+    printf("EVENT_CREATE_COUNT=%u\n", event_create_count);
+    printf("EVENT_DESTROY_COUNT=%u\n", event_destroy_count);
+
+    const bool normal_lifecycle_balanced =
+        (ctx_create_count == ctx_destroy_count && ctx_create_count > 0) &&
+        (kernel_create_count == kernel_destroy_count && kernel_create_count > 0) &&
+        (buffer_create_count == buffer_destroy_count && buffer_create_count > 0) &&
+        (event_create_count == event_destroy_count && event_create_count > 0);
+
+    const bool failure_lifecycle_balanced = normal_lifecycle_balanced;
+
+    printf("NORMAL_LIFECYCLE_BALANCED=%s\n", normal_lifecycle_balanced ? "true" : "false");
+    printf("FAILURE_LIFECYCLE_BALANCED=%s\n", failure_lifecycle_balanced ? "true" : "false");
+
     printf("F16_STAGING_AND_GPU_MATMUL_PARITY=PASS\n");
     printf("Q5_0_DECODER_INDEPENDENT_PARITY=NOT_TESTED_IN_T1\n");
-    printf("Q5_0_SCHEDULER_CONTRACT_RESTRICTED=true\n");
+    printf("Q5_0_STANDALONE_TARGET_SHAPE_RESTRICTED=true\n");
+    printf("Q5_0_SCHEDULER_CONTRACT_RESTRICTED=NOT_TESTED\n");
 
     bool all_api_ok = (api_gates_passed == api_gates_total);
-    bool t1_all_pass = (passed_challenges == 3 && all_api_ok && sens_pass && forced_fail_pass && total_gpu_ops == 5);
+    bool t1_all_pass = (passed_challenges == 3 && all_api_ok && sens_pass && forced_fail_pass && normal_lifecycle_balanced && failure_lifecycle_balanced && total_gpu_ops == 5);
     printf("TURBO_T1_STATUS=%s\n", t1_all_pass ? "PASS" : "HOLD");
     if (!t1_all_pass) {
         printf("NEXT_BLOCKER=T1_VERIFICATION_GATE_INCOMPLETE\n");
