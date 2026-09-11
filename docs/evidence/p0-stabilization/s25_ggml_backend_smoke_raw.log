@@ -1,0 +1,50 @@
+=======================================================================
+DEVICE: S25
+COMMAND: cd /data/data/com.termux/files/home/ameva-compute/build-audit && LD_LIBRARY_PATH=/data/data/com.termux/files/home/BitNet_ms/3rdparty/llama.cpp/build/bin:. ./test_amuda_ggml_backend
+WORKTREE_HEAD_COMMIT: 4756cac786f466aaaead6bf2eb3bc07b5d914a7a
+BINARY_SOURCE_COMMIT: UNKNOWN
+SOURCE_BINARY_CORRESPONDENCE: NOT_ESTABLISHED
+BINARY_SHA256: N/A
+MODEL_SHA256: N/A
+START_TIMESTAMP: 2026-09-11T04:28:13.417891+00:00
+END_TIMESTAMP: 2026-09-11T04:28:13.628423+00:00
+PROCESS_EXIT_CODE: 0
+=======================================================================
+[STDOUT]
+=======================================================================
+  AMEVA Native GGML Backend Verification Suite
+=======================================================================
+
+--- PART 1: Backend Registration & Buffer Smoke Test ---
+AMEVA_GGML_BACKEND_REGISTERED=true
+AMEVA_BACKEND_DEVICE_COUNT=1
+AMEVA_BACKEND_NAME=AMEVA
+AMEVA_DEVICE_NAME=AMEVA0
+AMEVA_BUFFER_ALLOC=PASS
+AMEVA_TENSOR_SET=PASS
+AMEVA_TENSOR_GET=PASS
+AMEVA_SYNCHRONIZE=PASS
+
+--- PART 2: Synthetic Non-Power-of-2 MUL_MAT (M=37, N=29, K=41) ---
+AMEVA_SUPPORTS_OP=PASS
+AMEVA_SUPPORTED_OP_COUNT=1
+AMEVA_GPU_OP_COUNT=1
+MAX_ABS_ERROR=1.144409e-05
+MISMATCH_COUNT=0
+SILENT_FALLBACK_COUNT=0
+SYNTHETIC_MUL_MAT_PARITY=PASS
+
+--- PART 3: Qwen2.5-0.5B Graph Audit Against Contract ---
+TARGET_NODE=blk.0.attn_q.weight
+SRC0_TYPE=GGML_TYPE_Q5_0 (type_id=6)
+SRC1_TYPE=GGML_TYPE_F32
+DST_TYPE=GGML_TYPE_F32
+LAYOUT=CONTIGUOUS_2D
+SUPPORTED_BY_AMEVA=false
+NEXT_BLOCKER=IMPLEMENT_Q5_0_MUL_MAT
+
+PROCESS_EXIT_CODE=0
+
+[STDERR]
+
+=======================================================================

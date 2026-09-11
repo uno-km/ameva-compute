@@ -30,6 +30,7 @@ typedef enum {
     GGUF_TYPE_FLOAT64 = 12,
 } GgufType;
 
+#ifndef GGML_FILE_VERSION
 typedef enum {
     GGML_TYPE_F32  = 0,
     GGML_TYPE_F16  = 1,
@@ -47,6 +48,9 @@ typedef enum {
     GGML_TYPE_Q8_K = 15,
     GGML_TYPE_I2_S = 36, /* BitNet 1.58b */
 } GgmlType;
+#else
+typedef enum ggml_type GgmlType;
+#endif
 
 typedef struct {
     char     name[64];

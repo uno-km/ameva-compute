@@ -187,3 +187,44 @@ if(UNIX AND NOT APPLE)
 endif()
 add_test(NAME amuda_qwen_parity COMMAND test_amuda_qwen_parity)
 
+# =============================================================================
+# Native AMEVA GGML Backend & Verification Suite
+# =============================================================================
+set(LLAMA_CPP_DIR "/data/data/com.termux/files/home/BitNet_ms/3rdparty/llama.cpp" CACHE PATH "Path to pinned llama.cpp repository")
+
+set(AMEVA_GGML_SOURCES
+    adapters/llama/ggml-ameva/ggml-ameva.cpp
+    adapters/llama/ggml-ameva/ggml-ameva-buffer.cpp
+    adapters/llama/ggml-ameva/ggml-ameva-device.cpp
+)
+
+add_executable(test_amuda_ggml_backend
+    tests/test_amuda_ggml_backend.cpp
+    ${AMEVA_GGML_SOURCES}
+)
+
+target_include_directories(test_amuda_ggml_backend PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/adapters/llama/ggml-ameva
+    ${LLAMA_CPP_DIR}/ggml/include
+    ${LLAMA_CPP_DIR}/ggml/src
+)
+
+target_link_directories(test_amuda_ggml_backend PRIVATE
+    ${LLAMA_CPP_DIR}/build/bin
+)
+
+target_link_libraries(test_amuda_ggml_backend
+    ac_vulkan_core
+    amuda_static
+    ggml
+    ggml-base
+    ggml-cpu
+)
+
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_amuda_ggml_backend vulkan dl m pthread)
+endif()
+add_test(NAME amuda_ggml_backend COMMAND test_amuda_ggml_backend)
+
+

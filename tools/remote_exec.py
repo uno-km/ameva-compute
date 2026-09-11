@@ -80,7 +80,9 @@ def execute_remote(
     log_entry = f"""=======================================================================
 DEVICE: {device_name}
 COMMAND: {command.strip()}
-SOURCE_COMMIT: {source_commit}
+WORKTREE_HEAD_COMMIT: {source_commit}
+BINARY_SOURCE_COMMIT: UNKNOWN
+SOURCE_BINARY_CORRESPONDENCE: NOT_ESTABLISHED
 BINARY_SHA256: {binary_sha256}
 MODEL_SHA256: {model_sha256}
 START_TIMESTAMP: {start_ts}
