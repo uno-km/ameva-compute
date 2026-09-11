@@ -285,8 +285,8 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
         const char* fail_stage = getenv("AMEVA_FAIL_STAGE");
         if (fail_stage && strcmp(fail_stage, "dispatch") == 0) {
             ameva_increment_dispatch_attempt_count();
-            fprintf(stderr, "ggml-ameva [FAIL_FAST]: AMEVA_FAIL_STAGE=dispatch triggered, aborting dispatch\n");
-            return GGML_STATUS_FAILED;
+            fprintf(stderr, "ggml-ameva [FAIL_FAST]: AMEVA_FAIL_STAGE=dispatch triggered, terminating with fail-fast exit code 1\n");
+            std::exit(1);
         }
 
         // Failure Injection: TENSOR_RANGE_OOB
