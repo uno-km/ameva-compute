@@ -11,15 +11,25 @@
 | **AMEVA_BACKEND_SELECTED** | **PASS** | `AMEVA0` accelerator selected by llama.cpp scheduler and assigned to supported graph nodes |
 | **GGML_CPU_BACKEND_AVAILABLE** | **PASS** | Standard CPU backend available and active for handling non-offloaded model tensors |
 | **SEPARATE_GGML_VULKAN_PLUGIN_LOAD** | **NOT_ASSERTED** | Separate `libggml-vulkan.so` registration/usage is not asserted; AMEVA operates its own Vulkan compute pipeline |
-| **GENERATED_TOKEN_PROVENANCE** | **SEALED** | Token sequence `[52854, 16032, 151645]` uniquely generated; prompt echo unambiguously excluded |
-| **PROMPT_ECHO_EXCLUDED** | **true** | Prompt string `"Reply with exactly one word: Tokyo"` isolated; assistant output contains only `"Tokyo"` |
+| **GENERATED_TOKEN_SEQUENCE_OBSERVED** | **true** | Token sequence `[52854, 16032, 151645]` observed in runtime generation log |
+| **GENERATED_TOKEN_IDS** | **52854, 16032, 151645** | Decoded token sequence: `'Tok'`, `'yo'`, `<|im_end|>` |
+| **GENERATED_TEXT** | **Tokyo** | Parsed assistant content |
+| **PROMPT_ECHO_EXCLUDED_FROM_ASSISTANT_CONTENT** | **true** | Prompt string excluded from parsed assistant message |
+| **TOKEN_PROVENANCE_SCOPE** | **LLAMA_RUNTIME_GENERATION_LOG** | Provenance established via llama-cli runtime decoding log |
 | **SEMANTIC_COMPLETION** | **PASS** | Single-word directive satisfied and properly terminated on `<|im_end|>` (Token ID: 151645) |
 | **BACKEND_PROCESS_TERMINATION_CALL_COUNT** | **0** | Zero calls to `exit`, `_Exit`, `abort`, or `quick_exit` across entire `adapters/llama/ggml-ameva` codebase |
 | **BACKEND_ERROR_PROPAGATION** | **PASS** | `GGML_STATUS_FAILED` propagates to `llama_decode` fail (`-3`), yielding CLI process exit code 1 |
 | **NORMAL_LIFECYCLE_BALANCED** | **true** | Context 1/1, Kernel 1/1, Buffer 665/665, Event 660/660, Staging 660/660 balanced upon exit |
 | **FORCED_FAILURE_LIFECYCLE_BALANCED** | **true** | Context 1/1, Kernel 1/1, Buffer 5/5, Event 0/0, Staging 0/0 balanced upon early failure |
+| **LIFECYCLE_BALANCE_SCOPE** | **AMEVA_INSTRUMENTED_RESOURCE_COUNTERS** | Verified across internal wrapper create/destroy tracking |
+| **VULKAN_VALIDATION_LAYER_LEAK_CHECK** | **NOT_ASSERTED** | External Vulkan validation layer leak check is not asserted |
+| **PROCESS_HEAP_LEAK_CHECK** | **NOT_ASSERTED** | Full OS/process heap leak analysis is not asserted |
 | **SILENT_RUNTIME_FALLBACK_COUNT** | **0** | Zero runtime fallback on operations accepted by AMEVA (`SILENT_FALLBACK_COUNT=0`) |
-| **CPU_PREASSIGNED_OR_RETAINED_OPS** | **PRESENT** | Non-supported tensor types (`F32: 121, Q8_0: 13, Q4_K: 12, Q6_K: 12`) retained on CPU by design |
+| **CPU_RETAINED_MODEL_TENSORS** | **F32: 121, Q8_0: 13, Q4_K: 12, Q6_K: 12** | Model tensors retained on CPU by scheduler graph placement |
+| **AMEVA_ACCEPTED_MUL_MAT_WEIGHT_TYPE** | **Q5_0** | Model weight dtype accepted for offloaded MUL_MAT |
+| **AMEVA_GPU_KERNEL_OPERAND_TYPE** | **F32** | Native shader operand type executed on Vulkan GPU |
+| **Q5_0_DEQUANT_EXECUTION_DEVICE** | **CPU** | Q5_0 weights dequantized to F32 on host CPU |
+| **F32_SGEMM_EXECUTION_DEVICE** | **AMEVA_VULKAN_GPU** | F32 SGEMM executed via AMEVA Vulkan compute shader |
 | **FULL_MODEL_GPU_EXECUTION** | **false** | Not a full-model GPU execution; hybrid CPU/GPU topology |
 | **HYBRID_CPU_AMEVA_EXECUTION** | **true** | Model execution divided between host CPU and AMEVA Vulkan GPU |
 | **REMOTE_PUSH_STATUS** | **HOLD** | Changes isolated to local worktree branch `fix/p0-stabilization`; remote push prohibited |
@@ -29,12 +39,13 @@
 
 ## 2. Provenance and Source-Binary Correspondence
 
-* **EVIDENCE_COMMIT**: `e46c0fb580e922a80576240022b1b65bba2c7e5d`
 * **TESTED_SOURCE_COMMIT**: `de9183f7f212cb5cb74e4b262810b3fbf6504d3f`
 * **BINARY_SOURCE_COMMIT**: `de9183f7f212cb5cb74e4b262810b3fbf6504d3f`
-* **SOURCE_BINARY_CORRESPONDENCE**: `ESTABLISHED_FOR_de9183f`
+* **RAW_EVIDENCE_COMMIT**: `e46c0fb580e922a80576240022b1b65bba2c7e5d`
+* **BINARY_SOURCE_CORRESPONDENCE**: `ESTABLISHED_FOR_de9183f`
+* **REPORT_CONTAINS_POST_EXECUTION_ANALYSIS**: `true`
 * **LOCAL_SOURCE_MANIFEST_SHA256**: `8bce0957b61f92f5ce4adccb73d26ce8cfe1a938f45e83f2bc679e91469c649f`
-* **REMOTE_SOURCE_MANIFEST_SHA256**: `8bce0957b61f92f5ce4adccb73d26ce8cfe1a938f45e83f2bc679e91469c649f`
+* **S25_SOURCE_MANIFEST_SHA256**: `8bce0957b61f92f5ce4adccb73d26ce8cfe1a938f45e83f2bc679e91469c649f`
 * **SOURCE_MANIFEST_MATCH**: `true`
 
 > [!NOTE]
@@ -72,7 +83,7 @@ $$\text{Q5\_0 Model Weight} \xrightarrow{\text{CPU Dequantization}} \text{F32 St
   * `Q4_K`: 12
   * `Q6_K`: 12
 * **Scheduler Assignment**:
-  해당 타입(`F32`, `Q8_0`, `Q4_K`, `Q6_K`)의 MUL_MAT 및 비지원 연산은 GGML 스케줄러에 의해 CPU 백엔드에 유지되었으며, AMEVA가 수락한 Q5_0 MUL_MAT에서의 런타임 silent fallback은 0건이었다.
+  일부 F32 모델 텐서 및 Q8_0, Q4_K, Q6_K 텐서는 스케줄러의 노드 적합성 판단에 따라 CPU에 유지되었다. 이는 AMEVA의 F32 SGEMM 커널 지원 여부와 동일한 개념이 아니다. AMEVA가 수락한 Q5_0 MUL_MAT 경로에서는 CPU 역양자화로 생성된 F32 operand를 사용해 GPU SGEMM이 실행되었으며, AMEVA가 수락한 연산에서의 런타임 silent fallback은 0건이었다.
 * **Dispatch Totals**:
   * `PROMPT_PHASE_AMEVA_DISPATCH_COUNT`: 390
   * `GENERATION_PHASE_AMEVA_DISPATCH_COUNT`: 270
@@ -92,7 +103,8 @@ $$\text{Q5\_0 Model Weight} \xrightarrow{\text{CPU Dequantization}} \text{F32 St
   0.17.912.913 D slot process_toke: id  0 | task 0 | n_decoded = 3, n_remaining = 5, next token: 151645 ''
   0.17.912.981 D Parsed message: {"role":"assistant","content":"Tokyo"}
   ```
-* **Metrics**:
+* **Metrics & Provenance**:
+  * Token sequence `[52854, 16032, 151645]` observed in the llama runtime generation log after prompt processing. The parsed assistant content was `"Tokyo"`.
   * Prompt Processing: 3,153.68 ms / 36 tokens (11.42 t/s)
   * Token Generation: 5,928.72 ms / 3 tokens (0.51 t/s)
   * Process Return Code: 0
@@ -118,7 +130,7 @@ $$\text{Q5\_0 Model Weight} \xrightarrow{\text{CPU Dequantization}} \text{F32 St
 2. 생성 응답 `"Tokyo"` (`Tok` + `yo`) 및 EOS (`<|im_end|>`) 수렴 확인
 3. Q5_0 CPU dequantization 후 AMEVA Vulkan F32 SGEMM 660회 성공
 4. AMEVA 수락 연산의 silent runtime fallback 0건
-5. 정상 및 강제 실패 경로의 리소스 카운터 균형
+5. 정상 및 강제 실패 경로의 계측된 리소스 카운터 균형 (`LIFECYCLE_BALANCE_SCOPE = AMEVA_INSTRUMENTED_RESOURCE_COUNTERS`)
 6. Backend 내부 프로세스 종료 호출 제거 및 CLI RC=1 오류 전파
 
 ### 5.2 검증되지 않았거나 주장하지 않는 범위 (Out-of-Scope / Not Asserted)
@@ -127,3 +139,4 @@ $$\text{Q5\_0 Model Weight} \xrightarrow{\text{CPU Dequantization}} \text{F32 St
 3. 전체 모델의 GPU-only 실행
 4. 모든 비지원 연산의 CPU 미사용
 5. Evidence commit `e46c0fb`와 실행 바이너리의 직접 correspondence
+6. Vulkan validation layer 기준 leak 부재 및 OS 프로세스 힙 전체 leak 검증
