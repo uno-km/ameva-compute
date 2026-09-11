@@ -164,3 +164,61 @@ target_link_libraries(test_phase4b_specialization ac_vulkan_core)
 if(UNIX AND NOT APPLE)
     target_link_libraries(test_phase4b_specialization vulkan dl m)
 endif()
+
+# =============================================================================
+# STT / Whisper GGML Formal Backend Verification Targets
+# =============================================================================
+set(STT_BACKEND_ADAPTER adapters/whisper/ggml-backend-ameva.cpp)
+
+add_executable(test_ggml_ameva_interface_smoke
+    tests/stt/test_ggml_ameva_interface_smoke.cpp
+    ${STT_BACKEND_ADAPTER}
+)
+target_include_directories(test_ggml_ameva_interface_smoke PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/adapters/whisper
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/whisper.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/whisper.cpp/ggml/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/whisper.cpp/ggml/src
+)
+target_link_libraries(test_ggml_ameva_interface_smoke ac_vulkan_core)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_ggml_ameva_interface_smoke vulkan dl m)
+endif()
+
+add_executable(test_whisper_fixture_backend
+    tests/stt/test_whisper_fixture_backend.cpp
+    ${STT_BACKEND_ADAPTER}
+)
+target_include_directories(test_whisper_fixture_backend PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/adapters/whisper
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/whisper.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/whisper.cpp/ggml/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/whisper.cpp/ggml/src
+)
+target_link_libraries(test_whisper_fixture_backend ac_vulkan_core)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_whisper_fixture_backend vulkan dl m)
+endif()
+
+add_executable(test_repeat_formal_backend
+    tests/stt/test_repeat_formal_backend.cpp
+    ${STT_BACKEND_ADAPTER}
+)
+target_include_directories(test_repeat_formal_backend PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/adapters/whisper
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/whisper.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/whisper.cpp/ggml/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/whisper.cpp/ggml/src
+)
+target_link_libraries(test_repeat_formal_backend ac_vulkan_core)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_repeat_formal_backend vulkan dl m)
+endif()
+
+add_test(NAME test_ggml_ameva_interface_smoke COMMAND test_ggml_ameva_interface_smoke)
+add_test(NAME test_whisper_fixture_backend COMMAND test_whisper_fixture_backend)
+add_test(NAME test_repeat_formal_backend COMMAND test_repeat_formal_backend)
+

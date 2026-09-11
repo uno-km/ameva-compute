@@ -29,6 +29,10 @@ typedef struct {
     uint64_t buffer_free_count;
     uint64_t sync_count;
 
+    // Granular graph kind dispatch counters
+    uint64_t encoder_dispatch_count;
+    uint64_t cross_dispatch_count;
+
     // Symmetric Lifecycle counters
     uint64_t context_create_count;
     uint64_t context_destroy_count;
@@ -48,6 +52,7 @@ GGML_API void ameva_backend_get_counters(AmevaBackendCounters * out_counters);
 GGML_API void ameva_backend_reset_counters(void);
 GGML_API void ameva_backend_teardown_hardware(void);
 GGML_API void ameva_backend_register(void);
+GGML_API void ameva_backend_set_graph_kind(const char * kind);
 
 #ifdef __cplusplus
 }

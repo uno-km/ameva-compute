@@ -95,10 +95,6 @@ int main() {
         backend->iface.free(backend);
         buf->iface.free_buffer(buf);
         return 8;
-    }
-    printf("AMEVA_SUPPORTED_OP_COUNT=1\n");
-    printf("GRAPH_MUTATION_REQUIRED=false\n");
-    printf("SILENT_FALLBACK_COUNT=0\n");
 
     // 6. Cleanup
     ggml_free(ctx);

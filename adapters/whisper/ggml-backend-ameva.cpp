@@ -131,9 +131,37 @@ void ameva_backend_teardown_hardware(void) {
     if (s_vk_ctx) { ac_vk_context_destroy(s_vk_ctx); s_vk_ctx = nullptr; g_counters.context_destroy_count++; }
 }
 
-static bool execute_vulkan_matmul(struct ggml_tensor * t) {
+static uint32_t s_graph_run_id = 0;
+static uint64_t s_dispatch_index = 0;
+static char s_graph_kind[32] = "UNKNOWN";
+
+void ameva_backend_set_graph_kind(const char * kind) {
+    if (kind) {
+        strncpy(s_graph_kind, kind, sizeof(s_graph_kind) - 1);
+        s_graph_kind[sizeof(s_graph_kind) - 1] = '\0';
+    }
+}
+
+static bool execute_vulkan_matmul(struct ggml_tensor * t, uint32_t graph_run_id, uint64_t dispatch_index, int node_index) {
     if (!t || !s_vk_ctx || !s_vk_kernel || !s_buf_w || !s_buf_a || !s_buf_o) {
         return false;
+    }
+
+    const char * current_kind = s_graph_kind;
+    if (strcmp(current_kind, "UNKNOWN") == 0) {
+        const char * env_kind = getenv("AMEVA_GRAPH_KIND");
+        if (env_kind) {
+            current_kind = env_kind;
+        } else {
+            const char * n = (t->name[0] ? t->name : (t->src[0]->name[0] ? t->src[0]->name : ""));
+            if (strstr(n, "cross") || strstr(n, "cross_attn")) {
+                current_kind = "CROSS";
+            } else if (strstr(n, "encoder") || strstr(n, "enc")) {
+                current_kind = "ENCODER";
+            } else {
+                current_kind = "ENCODER";
+            }
+        }
     }
 
     const char * fail_stage = getenv("AMEVA_BACKEND_FAIL_STAGE");
@@ -221,6 +249,22 @@ static bool execute_vulkan_matmul(struct ggml_tensor * t) {
     }
     if (t->data && t->data != s_buf_o->mapped_ptr) {
         memcpy(t->data, s_buf_o->mapped_ptr, OUT_BYTES);
+    }
+
+    const char * tensor_name = t->name[0] ? t->name : (t->src[0]->name[0] ? t->src[0]->name : "unnamed");
+    printf("[AMEVA_DISPATCH] GRAPH_KIND=%s GRAPH_RUN_ID=%u DISPATCH_INDEX=%llu NODE_INDEX=%d NODE_NAME=%s OP=%d SRC0_TYPE=%d SRC1_TYPE=%d DST_TYPE=%d SRC0_NE=[%lld,%lld,%lld,%lld] SRC1_NE=[%lld,%lld,%lld,%lld] DST_NE=[%lld,%lld,%lld,%lld] DISPATCH_RESULT=0 WAIT_RESULT=0 INVALIDATE_RESULT=0\n",
+           current_kind, graph_run_id, (unsigned long long)dispatch_index, node_index,
+           tensor_name,
+           (int)t->op, (int)t->src[0]->type, (int)t->src[1]->type, (int)t->type,
+           (long long)t->src[0]->ne[0], (long long)t->src[0]->ne[1], (long long)t->src[0]->ne[2], (long long)t->src[0]->ne[3],
+           (long long)t->src[1]->ne[0], (long long)t->src[1]->ne[1], (long long)t->src[1]->ne[2], (long long)t->src[1]->ne[3],
+           (long long)t->ne[0], (long long)t->ne[1], (long long)t->ne[2], (long long)t->ne[3]);
+    fflush(stdout);
+
+    if (strcmp(current_kind, "ENCODER") == 0) {
+        g_counters.encoder_dispatch_count++;
+    } else if (strcmp(current_kind, "CROSS") == 0) {
+        g_counters.cross_dispatch_count++;
     }
 
     return true;
@@ -424,12 +468,14 @@ static enum ggml_status ameva_backend_graph_compute(ggml_backend_t backend, stru
         return GGML_STATUS_FAILED;
     }
 
+    s_graph_run_id++;
     const int n_nodes = ggml_graph_n_nodes(cgraph);
     for (int i = 0; i < n_nodes; ++i) {
         struct ggml_tensor * node = ggml_graph_node(cgraph, i);
         if (!node) continue;
 
         if (ggml_backend_dev_supports_op(ggml_backend_ameva_device(), node)) {
+            s_dispatch_index++;
             g_counters.ameva_dispatch_attempt_count++;
 
             // 1. Initialize hardware pipeline if not already active
@@ -440,7 +486,7 @@ static enum ggml_status ameva_backend_graph_compute(ggml_backend_t backend, stru
             }
 
             // 2. Perform real Vulkan compute dispatch
-            if (!execute_vulkan_matmul(node)) {
+            if (!execute_vulkan_matmul(node, s_graph_run_id, s_dispatch_index, i)) {
                 g_counters.ameva_dispatch_failure_count++;
                 fprintf(stderr, "[AMEVA_BACKEND] FATAL: Vulkan MatMul dispatch failed\n");
                 return GGML_STATUS_FAILED;
@@ -665,6 +711,11 @@ void ameva_backend_reset_counters(void) {
     g_counters.ameva_dispatch_success_count = 0;
     g_counters.ameva_gpu_op_count = 0;
     g_counters.ameva_dispatch_failure_count = 0;
+    g_counters.encoder_dispatch_count = 0;
+    g_counters.cross_dispatch_count = 0;
+    s_graph_run_id = 0;
+    s_dispatch_index = 0;
+    strcpy(s_graph_kind, "UNKNOWN");
     s_bounds_violation = false;
 }
 
