@@ -1,0 +1,287 @@
+================================================================================
+AMEVA COMPUTE - TTS PART: WAVE 1A PRODUCTION CLOSURE AUDIT EVIDENCE
+================================================================================
+Timestamp: 2026-09-11T17:16:30+09:00
+Target Repository: dev/ameva-compute-tts (Worktree)
+Track Branch: track/tts
+Implementation Commit: 7173c30
+Hardware Target: Samsung Galaxy A35 (Exynos 1380 / ARM Mali-G68 MP5)
+Operating System: Android 16 (API 36, Termux aarch64)
+
+--------------------------------------------------------------------------------
+1. MANDATORY METRIC SPECIFICATION BLOCK
+--------------------------------------------------------------------------------
+TTS_BRANCH=track/tts
+IMPLEMENTATION_COMMIT=7173c30
+HARDWARE_TARGET=Samsung Galaxy A35 (Exynos 1380 / ARM Mali-G68 MP5)
+
+LEAKY_RELU_UNIT_PARITY=PASS
+GLSLANG_VERSION=11:16.5.0
+SPIRV_SHA256=e7cf4d0a0bfc0fa21a56469a59c94cf0ce3a119b37a5ba646d6b4bdcb702afed
+
+CUSTOM_LAYER_REGISTERED=true
+CUSTOM_LAYER_CREATED=true
+CUSTOM_LAYER_EXECUTION_COUNT=1
+
+NCNN_TENSOR_SHAPE=[1, 1, 256, 1840] (dims=2, w=1840, h=256, c=1, total=471040)
+NCNN_TENSOR_STORAGE=CPU_MAT
+MEASURED_STAGING_H2D_BYTES=1884160
+MEASURED_STAGING_D2H_BYTES=1884160
+
+AMEVA_CONTEXT_CREATE_COUNT=1
+AMEVA_CONTEXT_DESTROY_COUNT=1
+AMEVA_KERNEL_CREATE_COUNT=1
+AMEVA_KERNEL_DESTROY_COUNT=1
+AMEVA_BUFFER_CREATE_COUNT=2
+AMEVA_BUFFER_DESTROY_COUNT=2
+EVENT_CREATE_COUNT=0
+EVENT_DESTROY_COUNT=0
+STAGING_ALLOC_COUNT=2
+STAGING_FREE_COUNT=2
+CUSTOM_LAYER_CREATE_COUNT=1
+CUSTOM_LAYER_DESTROY_COUNT=1
+DOUBLE_DESTROY_COUNT=0
+USE_AFTER_FREE_COUNT=0
+TEARDOWN_REENTRANCY_REQUIRED=false
+TEARDOWN_CALL_DEPTH_MAX=1
+
+AMEVA_GPU_DISPATCH_COUNT=1
+AMEVA_GPU_FAILURE_COUNT=0
+AMEVA_GPU_OP_COUNT=1
+SILENT_FALLBACK_COUNT=0
+
+CONTEXT_LIFECYCLE_BALANCED=true
+KERNEL_LIFECYCLE_BALANCED=true
+BUFFER_LIFECYCLE_BALANCED=true
+FULL_RESOURCE_LIFECYCLE_BALANCED=true
+
+MIXED_WAV_VALIDATION=PASS
+MIXED_WAV_SHA256=0c9f90f08165ce2255b1e12b49961d44ea3f88712630e8897fc219a4fafea197
+MIXED_WAV_BYTES=117804
+MIXED_WAV_DURATION_SEC=2.6703
+MIXED_WAV_RMS_DBFS=-23.95
+MIXED_WAV_MAX_DBFS=-8.83
+
+PHONEME_TOKENIZER_MISSING_COUNT=0
+LEXICON_AMEVA_ENTRY_PRESENT=true
+
+FAILED_COMMAND=NONE
+NEXT_BLOCKER=HUMAN_LISTENING_VALIDATION
+
+--------------------------------------------------------------------------------
+2. PHONEME TOKENIZER OOV RESOLUTION EVIDENCE
+--------------------------------------------------------------------------------
+Root Cause:
+  In the initial test, the input prompt "The AMEVA text to speech pipeline is running."
+  triggered the piper-phonemize tokenizer warning:
+  "ConvertNonChinese: 294 empty ids for word AMEVA"
+  Because "AMEVA" was missing from the lexicon, the word was silently dropped from the phoneme sequence,
+  reducing tensor width from W=1840 to W=1600 (409,600 elements).
+
+Resolution:
+  Added IPA pronunciation mappings to ~/ncnn-vits-piper-en_US-lessac-high-fp16-patched/lexicon.txt:
+    ameva ɐ m ˈ i ː v ə
+    ameva's ɐ m ˈ i ː v ə z
+  Token ID sequence generated: [50, 25, 120, 21, 122, 34, 59]
+
+Verification:
+  - Tokenizer warning "ConvertNonChinese: 294 empty ids for word AMEVA" count: 0 (REMOVED)
+  - Input tensor dimensions expanded to W=1840, elements=471,040
+  - Audio duration expanded from 2.322 s to 2.670 s reflecting complete synthesis of "AMEVA"
+
+--------------------------------------------------------------------------------
+3. 6-GATE FAILURE INJECTION TEST SUITE RESULTS (Galaxy A35 Mali-G68)
+--------------------------------------------------------------------------------
+Test Command: python scripts/run_mixed_failure_injections.py
+Target Environment Variable: AMEVA_TTS_FAIL_STAGE=<stage>
+
+[Gate 1: context]
+  INJECTION_STAGE: context
+  TRIGGER_API: ac_runtime_context_create
+  RETURN_CODE: -1
+  PROCESS_EXIT_CODE: 1 (PASS: Non-zero)
+  OUTPUT_SUCCESS_NOT_REPORTED: true (PASS)
+  PARTIAL_WAV_REMOVED: true (PASS)
+  FAIL_STAGE_HIT_COUNT: 1
+  GPU_OP_DELTA: 0
+  RESOURCE_CREATE_DELTA: 0
+  RESOURCE_DESTROY_DELTA: 0
+  GATE_STATUS: PASS
+
+[Gate 2: kernel]
+  INJECTION_STAGE: kernel
+  TRIGGER_API: ac_runtime_kernel_create
+  RETURN_CODE: -2
+  PROCESS_EXIT_CODE: 1 (PASS: Non-zero)
+  OUTPUT_SUCCESS_NOT_REPORTED: true (PASS)
+  PARTIAL_WAV_REMOVED: true (PASS)
+  FAIL_STAGE_HIT_COUNT: 1
+  GPU_OP_DELTA: 0
+  RESOURCE_CREATE_DELTA: 1 (Context)
+  RESOURCE_DESTROY_DELTA: 1 (Context destroyed on fail-fast)
+  GATE_STATUS: PASS
+
+[Gate 3: buffer]
+  INJECTION_STAGE: buffer
+  TRIGGER_API: ac_runtime_buffer_create
+  RETURN_CODE: -3
+  PROCESS_EXIT_CODE: 1 (PASS: Non-zero)
+  OUTPUT_SUCCESS_NOT_REPORTED: true (PASS)
+  PARTIAL_WAV_REMOVED: true (PASS)
+  FAIL_STAGE_HIT_COUNT: 1
+  GPU_OP_DELTA: 0
+  RESOURCE_CREATE_DELTA: 2 (Context, Kernel)
+  RESOURCE_DESTROY_DELTA: 2 (Context, Kernel destroyed via Teardown)
+  GATE_STATUS: PASS
+
+[Gate 4: dispatch]
+  INJECTION_STAGE: dispatch
+  TRIGGER_API: ac_runtime_dispatch
+  RETURN_CODE: -4
+  PROCESS_EXIT_CODE: 1 (PASS: Non-zero)
+  OUTPUT_SUCCESS_NOT_REPORTED: true (PASS)
+  PARTIAL_WAV_REMOVED: true (PASS)
+  FAIL_STAGE_HIT_COUNT: 1
+  GPU_OP_DELTA: 0
+  RESOURCE_CREATE_DELTA: 4 (Context, Kernel, 2 Buffers)
+  RESOURCE_DESTROY_DELTA: 4 (Context, Kernel, 2 Buffers destroyed via Teardown)
+  GATE_STATUS: PASS
+
+[Gate 5: wait]
+  INJECTION_STAGE: wait
+  TRIGGER_API: ac_runtime_wait
+  RETURN_CODE: -5
+  PROCESS_EXIT_CODE: 1 (PASS: Non-zero)
+  OUTPUT_SUCCESS_NOT_REPORTED: true (PASS)
+  PARTIAL_WAV_REMOVED: true (PASS)
+  FAIL_STAGE_HIT_COUNT: 1
+  GPU_OP_DELTA: 0
+  RESOURCE_CREATE_DELTA: 4 (Context, Kernel, 2 Buffers)
+  RESOURCE_DESTROY_DELTA: 4 (Context, Kernel, 2 Buffers destroyed via Teardown)
+  GATE_STATUS: PASS
+
+[Gate 6: readback]
+  INJECTION_STAGE: readback
+  TRIGGER_API: ac_runtime_buffer_invalidate
+  RETURN_CODE: -6
+  PROCESS_EXIT_CODE: 1 (PASS: Non-zero)
+  OUTPUT_SUCCESS_NOT_REPORTED: true (PASS)
+  PARTIAL_WAV_REMOVED: true (PASS)
+  FAIL_STAGE_HIT_COUNT: 1
+  GPU_OP_DELTA: 0
+  RESOURCE_CREATE_DELTA: 4 (Context, Kernel, 2 Buffers)
+  RESOURCE_DESTROY_DELTA: 4 (Context, Kernel, 2 Buffers destroyed via Teardown)
+  GATE_STATUS: PASS
+
+SUMMARY:
+  MIXED_ADAPTER_FAILURE_INJECTION_GATES=6/6 (100% PASS)
+  PARTIAL_WAV_REMOVAL_GATES=6/6 (100% PASS)
+  LIFECYCLE_BALANCE_GATES=6/6 (100% PASS)
+
+--------------------------------------------------------------------------------
+4. NORMAL INFERENCE RUNTIME EXECUTION EVIDENCE
+--------------------------------------------------------------------------------
+Command:
+  ./sherpa-ncnn-offline-tts-mixed \
+    --vits-model-dir=./ncnn-vits-piper-en_US-lessac-high-fp16-patched \
+    --use-vulkan-compute=1 --num-threads=1 \
+    --output-filename=./wave1a_mixed_en1.wav \
+    'The AMEVA text to speech pipeline is running.'
+
+Hardware Execution Log:
+  [0 Mali-G68] queueC=0[2] queueT=0[2] rebar=1 r-score=9
+  [0 Mali-G68] fp16-p/s/u/a=1/1/1/1 int8-p/s/u/a=1/1/1/1 bf16-p/s=1/0
+  [0 Mali-G68] subgroup=16(16~16) ops=1/1/1/1/1/1/1/1/0/0
+  [0 Mali-G68] fp16-cm=0 int8-cm=0 bf16-cm=0 fp8-cm=0 fp6-cm=0 fp4-cm=0
+  [AMEVA-VULKAN-TTS] Vulkan GPU Compute Pipeline ACTIVE on Mali-G68 (Device index: 0, Total GPUs: 1)
+  [AMEVA-TTS-CUSTOM-LAYER] Param loaded: negative_slope=0.100000
+  ----------------------------------------------------------------------
+  [AMEVA-TTS-CUSTOM-LAYER] FORWARD(Mat) INVOKED:
+    CUSTOM_LAYER_FORWARD_SIGNATURE=Mat
+    CUSTOM_LAYER_FORWARD_VKMAT_CALLED=false
+    BOTTOM_BLOB_STORAGE=CPU_MAT
+    BOTTOM_BLOB_DATA_PTR_NON_NULL=true
+    TOP_BLOB_STORAGE=CPU_MAT
+    DIMS=2, W=1840, H=256, D=1, C=1, ELEMSIZE=4, ELEMPACK=1, CSTEP=471040
+    TOTAL_ELEMENTS=471040, TOTAL_BYTES=1884160
+  [AMEVA-TTS-LIFECYCLE] Initializing AMEVA Compute Runtime Context...
+  [AMEVA-TTS-LIFECYCLE] AMEVA Compute Runtime Context & LeakyReLU Kernel INITIALIZED (1 Context, 1 Kernel).
+  [AMEVA-TTS-CUSTOM-LAYER] FORWARD(Mat) SUCCESSFUL: AMEVA GPU Dispatched 471040 elements.
+  ----------------------------------------------------------------------
+  Number of threads: 1
+  Elapsed seconds: 12.285 s
+  Audio duration: 2.670 s
+  Real-time factor (RTF): 12.285/2.670 = 4.601
+  The text is: The AMEVA text to speech pipeline is running.. Speaker ID: 0
+  Saved to ./wave1a_mixed_en1.wav successfully!
+  [AMEVA-TTS-LIFECYCLE] Tearing down AMEVA Compute Runtime Context (unlocked)...
+  ======================================================================
+  [AMEVA-TTS-METRICS] HARDWARE & RUNTIME EXECUTION COUNTERS:
+    AMEVA_CONTEXT_CREATE_COUNT=1
+    AMEVA_CONTEXT_DESTROY_COUNT=1
+    AMEVA_KERNEL_CREATE_COUNT=1
+    AMEVA_KERNEL_DESTROY_COUNT=1
+    AMEVA_BUFFER_CREATE_COUNT=2
+    AMEVA_BUFFER_DESTROY_COUNT=2
+    EVENT_CREATE_COUNT=0
+    EVENT_DESTROY_COUNT=0
+    STAGING_ALLOC_COUNT=2
+    STAGING_FREE_COUNT=2
+    CUSTOM_LAYER_CREATE_COUNT=1
+    CUSTOM_LAYER_DESTROY_COUNT=1
+    DOUBLE_DESTROY_COUNT=0
+    USE_AFTER_FREE_COUNT=0
+    TEARDOWN_REENTRANCY_REQUIRED=false
+    TEARDOWN_CALL_DEPTH_MAX=1
+    CUSTOM_LAYER_EXECUTION_COUNT=1
+    AMEVA_GPU_DISPATCH_COUNT=1
+    AMEVA_GPU_FAILURE_COUNT=0
+    AMEVA_GPU_OP_COUNT=1
+    SILENT_FALLBACK_COUNT=0
+    MEASURED_STAGING_H2D_BYTES=1884160
+    MEASURED_STAGING_D2H_BYTES=1884160
+    CONTEXT_LIFECYCLE_BALANCED=true
+    KERNEL_LIFECYCLE_BALANCED=true
+    BUFFER_LIFECYCLE_BALANCED=true
+    FULL_RESOURCE_LIFECYCLE_BALANCED=true
+  ======================================================================
+  RETURNCODE: 0
+
+----------------------------------------------------------------------
+5. GENERATED WAV PHYSICAL CHARACTERISTICS & DELIVERY
+----------------------------------------------------------------------
+Delivered Paths:
+  - C:\Users\GAME\Desktop\tts_wavs\wave1a_mixed_en1.wav
+  - C:\Users\GAME\Desktop\uno-km\dev\tts_wavs\wave1a_mixed_en1.wav
+  - C:\Users\GAME\.cache\ameva-audits\tts\wave1a\wave1a_mixed_en1.wav
+
+Acoustic & Container Parameters:
+  - File Size: 117,804 bytes
+  - SHA-256: 0c9f90f08165ce2255b1e12b49961d44ea3f88712630e8897fc219a4fafea197
+  - Format: RIFF WAVE, 1 channel (Mono), 16-bit PCM
+  - Sample Rate: 22,050 Hz
+  - Audio Frames: 58,880 frames
+  - Duration: 2.6703 seconds
+  - Peak Amplitude: 11,862 (-8.83 dBFS)
+  - RMS Energy: 2,080.12 (-23.95 dBFS)
+  - DC Offset: +2.2500
+  - Non-Silent Verification: PASS (RMS > 0.001)
+
+----------------------------------------------------------------------
+6. AUDIT STATUS FOR PRODUCTION CLOSURE
+----------------------------------------------------------------------
+AUDIT_ITEMS:
+  - NCNN Custom Layer LeakyReLU Registration: PASS
+  - AMEVA Vulkan LeakyReLU Dispatch on Mali-G68: PASS (1 Op)
+  - Zero Silent Fallback (Fail-Fast): PASS (0 Silent Fallbacks)
+  - 6/6 Failure Injection Gates With Exit Code 1: PASS (6/6)
+  - Incomplete WAV Deletion On Failure: PASS (6/6)
+  - Zero Resource Leaks / Symmetrical Teardown: PASS (Full Balanced)
+  - No Mutex Reentrancy / Double-Destroy: PASS (0/0)
+  - Lexicon OOV Fix & Zero Tokenizer Drops: PASS (0 Empty IDs)
+  - Non-Silent Audio File Generation: PASS (2.670 s, -23.95 dBFS)
+  - Human Listening Validation: PENDING USER AUDIT (Delivered to Desktop)
+
+WAVE_1A_ENGINEERING_VERIFICATION=PASS
+WAVE_1A_PRODUCTION_CLOSURE=READY_FOR_USER_AUDIT
+================================================================================
