@@ -39,6 +39,13 @@ GGML_API int64_t ggml_backend_ameva_get_event_create_count(void);
 GGML_API int64_t ggml_backend_ameva_get_event_destroy_count(void);
 GGML_API int64_t ggml_backend_ameva_get_q5_0_staging_alloc_count(void);
 GGML_API int64_t ggml_backend_ameva_get_q5_0_staging_free_count(void);
+GGML_API int64_t ggml_backend_ameva_get_scheduler_node_count(void);
+GGML_API int64_t ggml_backend_ameva_get_qwen_dispatch_count(void);
+GGML_API int64_t ggml_backend_ameva_get_dispatch_attempt_count(void);
+GGML_API int64_t ggml_backend_ameva_get_dispatch_success_count(void);
+GGML_API bool ggml_backend_ameva_is_plugin_loaded(void);
+GGML_API bool ggml_backend_ameva_is_backend_selected(void);
+GGML_API bool ggml_backend_ameva_is_real_activation_captured(void);
 GGML_API const char* ggml_backend_ameva_get_build_commit(void);
 GGML_API void ggml_backend_ameva_reset_counters(void);
 

@@ -218,7 +218,7 @@ static const struct ggml_backend_buffer_type_i ggml_backend_ameva_buffer_type_i 
     /* .is_host        = */ ggml_backend_ameva_buffer_type_is_host,
 };
 
-static struct ggml_backend_buffer_type g_ameva_buft = {
+struct ggml_backend_buffer_type g_ameva_buft = {
     /* .iface   = */ ggml_backend_ameva_buffer_type_i,
     /* .device  = */ nullptr,
     /* .context = */ nullptr,

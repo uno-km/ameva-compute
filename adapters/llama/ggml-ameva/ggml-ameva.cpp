@@ -26,6 +26,13 @@ void ameva_increment_event_create_count(void);
 void ameva_increment_event_destroy_count(void);
 void ameva_increment_q5_0_staging_alloc_count(void);
 void ameva_increment_q5_0_staging_free_count(void);
+void ameva_mark_plugin_loaded(void);
+void ameva_mark_backend_selected(void);
+void ameva_increment_scheduler_node_count(int64_t count);
+void ameva_mark_real_activation_captured(void);
+void ameva_increment_qwen_dispatch_count(void);
+void ameva_increment_dispatch_attempt_count(void);
+void ameva_increment_dispatch_success_count(void);
 
 // =============================================================================
 // Standalone Minimal Q5_0 Decoder (Zero Upstream Private Symbol Dependency)
@@ -231,6 +238,8 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
     (void)backend;
     if (!cgraph) return GGML_STATUS_FAILED;
 
+    ameva_increment_scheduler_node_count(cgraph->n_nodes);
+
     AcContext* ctx = ameva_get_ac_context();
     AcKernel* kernel = ameva_get_mul_mat_kernel();
     if (!ctx || !kernel) {
@@ -265,6 +274,17 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
         uint32_t K = (uint32_t)src0->ne[0];
         uint32_t N = (uint32_t)src0->ne[1];
         uint32_t M = (uint32_t)src1->ne[1];
+
+        if (src1->data != nullptr && M > 0) {
+            ameva_mark_real_activation_captured();
+        }
+
+        const char* fail_stage = getenv("AMEVA_FAIL_STAGE");
+        if (fail_stage && strcmp(fail_stage, "dispatch") == 0) {
+            ameva_increment_dispatch_attempt_count();
+            fprintf(stderr, "ggml-ameva [FAIL_FAST]: AMEVA_FAIL_STAGE=dispatch triggered, aborting dispatch\n");
+            return GGML_STATUS_FAILED;
+        }
 
         // Failure Injection: TENSOR_RANGE_OOB
         if (fi == AMEVA_FAIL_TENSOR_RANGE_OOB) {
@@ -518,10 +538,13 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
 
         // Failure Injection: DISPATCH_FAIL
         if (fi == AMEVA_FAIL_DISPATCH) {
+            ameva_increment_dispatch_attempt_count();
             fprintf(stderr, "ggml-ameva [FAILURE_INJECTION]: DISPATCH_FAIL triggered\n");
             cleanup_temps();
             return GGML_STATUS_FAILED;
         }
+
+        ameva_increment_dispatch_attempt_count();
 
         AcEvent* ev = nullptr;
         AcResult dres = ac_runtime_dispatch(ctx, &ldesc, &ev);
@@ -578,7 +601,9 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
         cleanup_temps();
 
         // Increment verified execution counters ONLY on verified completion
+        ameva_increment_dispatch_success_count();
         ameva_increment_f32_gpu_sgemm_dispatch_count();
+        ameva_increment_qwen_dispatch_count();
         ameva_increment_gpu_op_count();
     }
 
@@ -606,6 +631,7 @@ static const struct ggml_backend_i ggml_backend_ameva_i = {
 
 ggml_backend_t ggml_backend_ameva_init(size_t dev_num) {
     (void)dev_num;
+    ameva_mark_plugin_loaded();
     auto* ctx = new ggml_backend_ameva_context{ 0 };
     auto* backend = new ggml_backend{
         /* .guid    = */ ggml_backend_ameva_guid(),
@@ -619,6 +645,7 @@ ggml_backend_t ggml_backend_ameva_init(size_t dev_num) {
 // Dynamic Loader Entrypoints
 extern "C" {
 GGML_BACKEND_API ggml_backend_reg_t ggml_backend_init(void) {
+    ameva_mark_plugin_loaded();
     return ggml_backend_ameva_reg();
 }
 
