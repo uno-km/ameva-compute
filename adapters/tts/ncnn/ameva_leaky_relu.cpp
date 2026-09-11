@@ -1,4 +1,4 @@
-﻿#include "ameva_leaky_relu.h"
+#include "ameva_leaky_relu.h"
 #include "ameva_tts_counters.h"
 #include "ac_runtime.h"
 #include "../../src/shaders/tts/leaky_relu_spv.h"
@@ -27,10 +27,21 @@ public:
     }
 
     bool EnsureInitialized() {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (initialized_) return true;
 
+        const char* fail_stage = getenv("AMEVA_TTS_FAIL_STAGE");
+
         fprintf(stderr, "[AMEVA-TTS-LIFECYCLE] Initializing AMEVA Compute Runtime Context...\n");
+
+        // Gate 1: Context failure injection
+        if (fail_stage && strcmp(fail_stage, "context") == 0) {
+            fprintf(stderr, "[AMEVA-TTS-FAIL-INJECT] Simulating failure at stage 'context'\n");
+            g_counters.gpu_failure_count++;
+            DumpCounters();
+            return false;
+        }
+
         AcContextDesc ctx_desc = {};
         ctx_desc.abi_version = AC_ABI_VERSION;
         ctx_desc.struct_size = sizeof(AcContextDesc);
@@ -40,10 +51,22 @@ public:
         AcResult res = ac_runtime_context_create(&ctx_desc, &ctx_);
         if (res != AC_SUCCESS || !ctx_) {
             fprintf(stderr, "[AMEVA-TTS-FAIL-FAST] ac_runtime_context_create failed with error %d\n", res);
-            g_counters.silent_fallback_count++;
+            g_counters.gpu_failure_count++;
+            DumpCounters();
             return false;
         }
         g_counters.context_create_count++;
+
+        // Gate 2: Kernel failure injection
+        if (fail_stage && strcmp(fail_stage, "kernel") == 0) {
+            fprintf(stderr, "[AMEVA-TTS-FAIL-INJECT] Simulating failure at stage 'kernel'\n");
+            g_counters.gpu_failure_count++;
+            ac_runtime_context_destroy(ctx_);
+            ctx_ = nullptr;
+            g_counters.context_destroy_count++;
+            DumpCounters();
+            return false;
+        }
 
         AcRuntimeBindingDesc bindings[2] = {
             { 0, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE },
@@ -71,7 +94,9 @@ public:
             fprintf(stderr, "[AMEVA-TTS-FAIL-FAST] ac_runtime_kernel_create failed with error %d\n", res);
             ac_runtime_context_destroy(ctx_);
             ctx_ = nullptr;
-            g_counters.silent_fallback_count++;
+            g_counters.context_destroy_count++;
+            g_counters.gpu_failure_count++;
+            DumpCounters();
             return false;
         }
         g_counters.kernel_create_count++;
@@ -82,14 +107,14 @@ public:
 
     AcContext* GetContext() { return ctx_; }
     AcKernel* GetKernel() { return kernel_; }
-    std::mutex& GetMutex() { return mutex_; }
+    std::recursive_mutex& GetMutex() { return mutex_; }
 
     ~AmevaComputeManager() {
         Teardown();
     }
 
     void Teardown() {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (!initialized_) return;
 
         fprintf(stderr, "[AMEVA-TTS-LIFECYCLE] Tearing down AMEVA Compute Runtime Context...\n");
@@ -109,7 +134,7 @@ public:
 
 private:
     AmevaComputeManager() = default;
-    std::mutex mutex_;
+    std::recursive_mutex mutex_;
     AcContext* ctx_{nullptr};
     AcKernel* kernel_{nullptr};
     bool initialized_{false};
@@ -160,24 +185,38 @@ int AmevaLeakyReLU::forward(const ncnn::Mat& bottom_blob, ncnn::Mat& top_blob, c
 
     if (total_elements == 0 || !bottom_blob.data) {
         fprintf(stderr, "[AMEVA-TTS-FAIL-FAST] Empty or null bottom_blob!\n");
-        g_counters.silent_fallback_count++;
+        g_counters.gpu_failure_count++;
+        DumpCounters();
         return -1;
     }
 
     top_blob.create(w, h, c, elemsize, elempack, opt.blob_allocator);
     if (!top_blob.data) {
         fprintf(stderr, "[AMEVA-TTS-FAIL-FAST] Failed to allocate top_blob with NCNN allocator!\n");
-        g_counters.silent_fallback_count++;
+        g_counters.gpu_failure_count++;
+        DumpCounters();
         return -1;
     }
 
     auto& mgr = AmevaComputeManager::Instance();
     if (!mgr.EnsureInitialized()) {
         fprintf(stderr, "[AMEVA-TTS-FAIL-FAST] Failed to initialize AMEVA context/kernel!\n");
+        top_blob.release();
         return -1;
     }
 
-    std::lock_guard<std::mutex> lock(mgr.GetMutex());
+    const char* fail_stage = getenv("AMEVA_TTS_FAIL_STAGE");
+
+    // Gate 3: Buffer allocation failure injection
+    if (fail_stage && strcmp(fail_stage, "buffer") == 0) {
+        fprintf(stderr, "[AMEVA-TTS-FAIL-INJECT] Simulating failure at stage 'buffer'\n");
+        g_counters.gpu_failure_count++;
+        top_blob.release();
+        mgr.Teardown();
+        return -1;
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(mgr.GetMutex());
     AcContext* ctx = mgr.GetContext();
     AcKernel* kernel = mgr.GetKernel();
 
@@ -192,14 +231,34 @@ int AmevaLeakyReLU::forward(const ncnn::Mat& bottom_blob, ncnn::Mat& top_blob, c
     AcResult res = ac_runtime_buffer_create(ctx, &buf_desc, &buf_in);
     if (res != AC_SUCCESS || !buf_in) {
         fprintf(stderr, "[AMEVA-TTS-FAIL-FAST] ac_runtime_buffer_create in failed (%d)\n", res);
-        g_counters.silent_fallback_count++;
+        g_counters.gpu_failure_count++;
+        top_blob.release();
+        mgr.Teardown();
         return -1;
     }
+    g_counters.buffer_create_count++;
+
     res = ac_runtime_buffer_create(ctx, &buf_desc, &buf_out);
     if (res != AC_SUCCESS || !buf_out) {
         ac_runtime_buffer_destroy(buf_in);
+        g_counters.buffer_destroy_count++;
         fprintf(stderr, "[AMEVA-TTS-FAIL-FAST] ac_runtime_buffer_create out failed (%d)\n", res);
-        g_counters.silent_fallback_count++;
+        g_counters.gpu_failure_count++;
+        top_blob.release();
+        mgr.Teardown();
+        return -1;
+    }
+    g_counters.buffer_create_count++;
+
+    // Gate 4: Dispatch failure injection
+    if (fail_stage && strcmp(fail_stage, "dispatch") == 0) {
+        fprintf(stderr, "[AMEVA-TTS-FAIL-INJECT] Simulating failure at stage 'dispatch'\n");
+        g_counters.gpu_failure_count++;
+        ac_runtime_buffer_destroy(buf_in);
+        ac_runtime_buffer_destroy(buf_out);
+        g_counters.buffer_destroy_count += 2;
+        top_blob.release();
+        mgr.Teardown();
         return -1;
     }
 
@@ -231,11 +290,38 @@ int AmevaLeakyReLU::forward(const ncnn::Mat& bottom_blob, ncnn::Mat& top_blob, c
     if (res != AC_SUCCESS) {
         ac_runtime_buffer_destroy(buf_in);
         ac_runtime_buffer_destroy(buf_out);
+        g_counters.buffer_destroy_count += 2;
         fprintf(stderr, "[AMEVA-TTS-FAIL-FAST] ac_runtime_dispatch failed (%d)\n", res);
-        g_counters.silent_fallback_count++;
+        g_counters.gpu_failure_count++;
+        top_blob.release();
+        mgr.Teardown();
         return -1;
     }
     g_counters.gpu_dispatch_count++;
+
+    // Gate 5: Wait failure injection
+    if (fail_stage && strcmp(fail_stage, "wait") == 0) {
+        fprintf(stderr, "[AMEVA-TTS-FAIL-INJECT] Simulating failure at stage 'wait'\n");
+        g_counters.gpu_failure_count++;
+        ac_runtime_buffer_destroy(buf_in);
+        ac_runtime_buffer_destroy(buf_out);
+        g_counters.buffer_destroy_count += 2;
+        top_blob.release();
+        mgr.Teardown();
+        return -1;
+    }
+
+    // Gate 6: Readback failure injection
+    if (fail_stage && strcmp(fail_stage, "readback") == 0) {
+        fprintf(stderr, "[AMEVA-TTS-FAIL-INJECT] Simulating failure at stage 'readback'\n");
+        g_counters.gpu_failure_count++;
+        ac_runtime_buffer_destroy(buf_in);
+        ac_runtime_buffer_destroy(buf_out);
+        g_counters.buffer_destroy_count += 2;
+        top_blob.release();
+        mgr.Teardown();
+        return -1;
+    }
 
     ac_runtime_buffer_invalidate(buf_out, 0, total_bytes);
     memcpy(top_blob.data, mapped_out, total_bytes);
@@ -243,6 +329,7 @@ int AmevaLeakyReLU::forward(const ncnn::Mat& bottom_blob, ncnn::Mat& top_blob, c
 
     ac_runtime_buffer_destroy(buf_in);
     ac_runtime_buffer_destroy(buf_out);
+    g_counters.buffer_destroy_count += 2;
 
     fprintf(stderr, "[AMEVA-TTS-CUSTOM-LAYER] FORWARD(Mat) SUCCESSFUL: AMEVA GPU Dispatched %zu elements.\n", total_elements);
     fprintf(stderr, "----------------------------------------------------------------------\n");
@@ -288,7 +375,17 @@ int AmevaLeakyReLU::forward(const ncnn::VkMat& bottom_blob, ncnn::VkMat& top_blo
         return -1;
     }
 
-    std::lock_guard<std::mutex> lock(mgr.GetMutex());
+    const char* fail_stage = getenv("AMEVA_TTS_FAIL_STAGE");
+
+    // Gate 3: Buffer allocation failure injection
+    if (fail_stage && strcmp(fail_stage, "buffer") == 0) {
+        fprintf(stderr, "[AMEVA-TTS-FAIL-INJECT] Simulating failure at stage 'buffer'\n");
+        g_counters.gpu_failure_count++;
+        mgr.Teardown();
+        return -1;
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(mgr.GetMutex());
     AcContext* ctx = mgr.GetContext();
     AcKernel* kernel = mgr.GetKernel();
 
@@ -301,10 +398,31 @@ int AmevaLeakyReLU::forward(const ncnn::VkMat& bottom_blob, ncnn::VkMat& top_blo
     AcBuffer* buf_in = nullptr;
     AcBuffer* buf_out = nullptr;
     AcResult res = ac_runtime_buffer_create(ctx, &buf_desc, &buf_in);
-    if (res != AC_SUCCESS || !buf_in) return -1;
+    if (res != AC_SUCCESS || !buf_in) {
+        g_counters.gpu_failure_count++;
+        mgr.Teardown();
+        return -1;
+    }
+    g_counters.buffer_create_count++;
+
     res = ac_runtime_buffer_create(ctx, &buf_desc, &buf_out);
     if (res != AC_SUCCESS || !buf_out) {
         ac_runtime_buffer_destroy(buf_in);
+        g_counters.buffer_destroy_count++;
+        g_counters.gpu_failure_count++;
+        mgr.Teardown();
+        return -1;
+    }
+    g_counters.buffer_create_count++;
+
+    // Gate 4: Dispatch failure injection
+    if (fail_stage && strcmp(fail_stage, "dispatch") == 0) {
+        fprintf(stderr, "[AMEVA-TTS-FAIL-INJECT] Simulating failure at stage 'dispatch'\n");
+        g_counters.gpu_failure_count++;
+        ac_runtime_buffer_destroy(buf_in);
+        ac_runtime_buffer_destroy(buf_out);
+        g_counters.buffer_destroy_count += 2;
+        mgr.Teardown();
         return -1;
     }
 
@@ -336,11 +454,35 @@ int AmevaLeakyReLU::forward(const ncnn::VkMat& bottom_blob, ncnn::VkMat& top_blo
     if (res != AC_SUCCESS) {
         ac_runtime_buffer_destroy(buf_in);
         ac_runtime_buffer_destroy(buf_out);
+        g_counters.buffer_destroy_count += 2;
         fprintf(stderr, "[AMEVA-TTS-FAIL-FAST] ac_runtime_dispatch failed (%d)\n", res);
-        g_counters.silent_fallback_count++;
+        g_counters.gpu_failure_count++;
+        mgr.Teardown();
         return -1;
     }
     g_counters.gpu_dispatch_count++;
+
+    // Gate 5: Wait failure injection
+    if (fail_stage && strcmp(fail_stage, "wait") == 0) {
+        fprintf(stderr, "[AMEVA-TTS-FAIL-INJECT] Simulating failure at stage 'wait'\n");
+        g_counters.gpu_failure_count++;
+        ac_runtime_buffer_destroy(buf_in);
+        ac_runtime_buffer_destroy(buf_out);
+        g_counters.buffer_destroy_count += 2;
+        mgr.Teardown();
+        return -1;
+    }
+
+    // Gate 6: Readback failure injection
+    if (fail_stage && strcmp(fail_stage, "readback") == 0) {
+        fprintf(stderr, "[AMEVA-TTS-FAIL-INJECT] Simulating failure at stage 'readback'\n");
+        g_counters.gpu_failure_count++;
+        ac_runtime_buffer_destroy(buf_in);
+        ac_runtime_buffer_destroy(buf_out);
+        g_counters.buffer_destroy_count += 2;
+        mgr.Teardown();
+        return -1;
+    }
 
     ac_runtime_buffer_invalidate(buf_out, 0, total_bytes);
     memcpy(host_out.data, mapped_out, total_bytes);
@@ -348,6 +490,7 @@ int AmevaLeakyReLU::forward(const ncnn::VkMat& bottom_blob, ncnn::VkMat& top_blo
 
     ac_runtime_buffer_destroy(buf_in);
     ac_runtime_buffer_destroy(buf_out);
+    g_counters.buffer_destroy_count += 2;
 
     top_blob.create_like(bottom_blob, opt.blob_vkallocator);
     cmd.record_upload(host_out, top_blob, opt);

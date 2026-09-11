@@ -1,44 +1,74 @@
-﻿================================================================================
+================================================================================
 AMEVA COMPUTE - TTS PART: WAVE 1A PRODUCTION CLOSURE AUDIT REPORT
 ================================================================================
-Timestamp: 2026-09-11T13:13:30+09:00
+Timestamp: 2026-09-11T16:36:00+09:00
 Target Repository: dev/ameva-compute-tts (Worktree)
 Track Branch: track/tts
-Implementation Commit: 0d710a6
-Evidence Commit: 7e60a24
 Hardware Target: Samsung Galaxy A35 (Exynos 1380 / ARM Mali-G68 MP5)
 Operating System: Android 16 (API 36, Termux aarch64)
 
 --------------------------------------------------------------------------------
-1. MANDATORY METRIC SPECIFICATION BLOCK
+1. COMMIT & BINARY PROVENANCE
 --------------------------------------------------------------------------------
 TTS_BRANCH=track/tts
 IMPLEMENTATION_COMMIT=0d710a6
-EVIDENCE_COMMIT=7e60a24
-
-MIXED_BINARY_SHA256=d8eb2fcabf39a0cf974afb610902b7176479578b9f6548ad6288439cf5295e75
+INITIAL_EVIDENCE_COMMIT=7e60a24
+FAILURE_TEST_COMMIT=af1c841
+MIXED_BINARY_SHA256=e86a01b647d40ebc00303158e94026c0b4a486db2d8031b022e731917451708e
 SHERPA_NCNN_SOURCE_COMMIT=13642b539f8bc3760120fbede97c11b0aa12b7b9
 NCNN_SOURCE_COMMIT=6a1bf000f363714839a36793addc8c879d3d899e
-MIXED_RUN_EXIT_CODE=0
-
-INTELLIGIBLE_SPEECH=true
-BEEP_ONLY=false
-NOISE_ONLY=false
-LANGUAGE=en
-TRANSCRIPT="The text who speech pipeline is running."
-CONTENT_MATCH=PASS
-UTTERANCE_REPEAT_COUNT=1
-AUDIBLE_ARTIFACTS=NONE
-
-FAILURE_INJECTION_GATES=6/6
-LIFECYCLE_BALANCED=true
-SILENT_FALLBACK_COUNT=0
 MODEL_MANIFEST_COMPLETE=true
 
+--------------------------------------------------------------------------------
+2. NORMAL MIXED EXECUTION & HARDWARE METRICS
+--------------------------------------------------------------------------------
+MIXED_RUN_EXIT_CODE=0
+CUSTOM_LAYER_EXECUTION_COUNT=1
+AMEVA_GPU_DISPATCH_COUNT=1
+AMEVA_GPU_OP_COUNT=1
+SILENT_FALLBACK_COUNT=0
 MEASURED_STAGING_H2D_BYTES=1638400
 MEASURED_STAGING_D2H_BYTES=1638400
 MEASURED_STAGING_TOTAL_BYTES=3276800
+MIXED_WAV_SHA256=f2f71c299702b8d28cb50a3fed89411a4819272182230b6cb48fe5909ba0dc97
+MIXED_WAV_SIGNAL_VALIDATION=PASS
 
-WAVE_1A_PRODUCTION_CLOSURE=PASS
-NEXT_BLOCKER=NONE
+--------------------------------------------------------------------------------
+3. SPEECH RECOGNITION & HUMAN LISTENING VALIDATION
+--------------------------------------------------------------------------------
+EXPECTED_TEXT="The AMEVA text to speech pipeline is running."
+AUTOMATIC_TRANSCRIPT="The text who speech pipeline is running."
+AUTOMATIC_STT_DETECTED_SPEECH=true
+AUTOMATIC_STT_LANGUAGE=en
+AUTOMATIC_STT_EXACT_MATCH=false
+AUTOMATIC_STT_NORMALIZED_EXACT_MATCH=false
+AUTOMATIC_STT_CONTENT_MATCH=PARTIAL
+TOKENIZER_TRACE="ConvertNonChinese:294 empty ids for word AMEVA"
+OBSERVED_UTTERANCE_REPEAT_COUNT=1
+
+HUMAN_LISTENING_VALIDATION=NOT_RUN
+HUMAN_UTTERANCE_REPEAT_COUNT=NOT_RUN
+HUMAN_AUDIBLE_ARTIFACTS=NOT_RUN
+
+--------------------------------------------------------------------------------
+4. NEGATIVE VALIDATION & MIXED ADAPTER FAILURE INJECTION
+--------------------------------------------------------------------------------
+RUNTIME_API_NEGATIVE_VALIDATION_GATES=6/6
+MIXED_ADAPTER_FAILURE_INJECTION_GATES=6/6
+  - Gate 1 (context):  PROCESS_EXIT_CODE=1, FAILURE_COUNT=1, WAV_REMOVED=true, BALANCED=true [PASS]
+  - Gate 2 (kernel):   PROCESS_EXIT_CODE=1, FAILURE_COUNT=1, WAV_REMOVED=true, BALANCED=true [PASS]
+  - Gate 3 (buffer):   PROCESS_EXIT_CODE=1, FAILURE_COUNT=1, WAV_REMOVED=true, BALANCED=true [PASS]
+  - Gate 4 (dispatch): PROCESS_EXIT_CODE=1, FAILURE_COUNT=1, WAV_REMOVED=true, BALANCED=true [PASS]
+  - Gate 5 (wait):     PROCESS_EXIT_CODE=1, FAILURE_COUNT=1, WAV_REMOVED=true, BALANCED=true [PASS]
+  - Gate 6 (readback): PROCESS_EXIT_CODE=1, FAILURE_COUNT=1, WAV_REMOVED=true, BALANCED=true [PASS]
+
+PARTIAL_WAV_REMOVAL_GATES=6/6
+LIFECYCLE_BALANCE_GATES=6/6
+AMEVA_SILENT_FALLBACK_COUNT=0
+
+--------------------------------------------------------------------------------
+5. PRODUCTION CLOSURE VERDICT
+--------------------------------------------------------------------------------
+WAVE_1A_PRODUCTION_CLOSURE=HOLD
+NEXT_BLOCKER=HUMAN_LISTENING_VERIFICATION
 ================================================================================
