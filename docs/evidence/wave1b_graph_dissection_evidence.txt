@@ -1,0 +1,67 @@
+================================================================================
+AMEVA COMPUTE - TTS PART: WAVE 1B GRAPH DISSECTION & INITIAL PROFILE EVIDENCE
+================================================================================
+Timestamp: 2026-09-11T17:58:00+09:00
+Target Repository: dev/ameva-compute-tts (Worktree)
+Track Branch: track/tts
+Hardware Target: Samsung Galaxy A35 (Exynos 1380 / ARM Mali-G68 MP5)
+Operating System: Android 16 (API 36, Termux aarch64)
+
+--------------------------------------------------------------------------------
+1. MANDATORY METRIC SPECIFICATION BLOCK
+--------------------------------------------------------------------------------
+CURRENT_GRAPH_NODE_COUNT=779
+CURRENT_AMEVA_NODE_COUNT=1
+CURRENT_CPU_NODE_COUNT=778
+CPU_GPU_BOUNDARY_COUNT=1
+
+TOP_10_CPU_BOTTLENECKS:
+  1. Deconvolution1D (HiFi-GAN transposed conv upsampling; 4 nodes, highest FLOPs/sample)
+  2. Convolution1D (171 nodes, 22.0% of graph; primary MAC bottleneck across encoder, flow, decoder)
+  3. MatMul (24 nodes, 3.1%; multi-head self-attention projections in Transformer encoder)
+  4. LayerNorm (36 nodes, 4.6%; recurrent normalization in encoder and WaveNet blocks)
+  5. ConvolutionDepthWise1D (12 nodes, 1.5%; depthwise separable convolutions in duration predictor)
+  6. BinaryOp (140 nodes, 18.0%; elementwise residual connections and gating)
+  7. GELU (24 nodes, 3.1%; feed-forward activation)
+  8. TanH (17 nodes, 2.2%; gated activation units)
+  9. Sigmoid (16 nodes, 2.1%; flow coupling gating)
+  10. ReLU (31 nodes, 4.0%; non-linear activations)
+
+TOP_10_MISSING_AMEVA_OPS:
+  1. Deconvolution1D (ConvTranspose1D)
+  2. Convolution1D
+  3. MatMul (GEMM)
+  4. LayerNorm
+  5. BinaryOp (Add / Mul)
+  6. ConvolutionDepthWise1D
+  7. GELU
+  8. TanH / Sigmoid
+  9. ReLU
+  10. Permute / Reshape (Device-resident tensor view/layout)
+
+CURRENT_RTF_P50=4.692
+CURRENT_FIRST_AUDIO_LATENCY_P50=12964.0ms
+FULL_NEURAL_GRAPH_ON_AMEVA=false
+FIRST_BLOCKER=MISSING_AMEVA_CONV1D_AND_CONV_TRANSPOSE1D_KERNELS
+
+--------------------------------------------------------------------------------
+2. SUBGRAPH BREAKDOWN ACROSS VITS PIPELINE
+--------------------------------------------------------------------------------
+- encoder (Text Encoder): 229 nodes (229 layers, 267 blobs)
+- dp (Duration Predictor): 185 nodes (185 layers, 206 blobs)
+- flow (Residual Coupling Flow): 173 nodes (173 layers, 221 blobs)
+- decoder (HiFi-GAN Decoder): 192 nodes (192 layers, 236 blobs; includes 1 AMEVA LeakyReLU node)
+
+--------------------------------------------------------------------------------
+3. INFERENCE PROFILE MEASUREMENT DETAILS (5 RUNS ON GALAXY A35)
+--------------------------------------------------------------------------------
+Prompt: 'The AMEVA text to speech pipeline is running.'
+Run 1: Elapsed = 13957.0 ms | Audio = 2647.0 ms | RTF = 5.273
+Run 2: Elapsed = 12964.0 ms | Audio = 2763.0 ms | RTF = 4.692
+Run 3: Elapsed = 12027.0 ms | Audio = 2659.0 ms | RTF = 4.524
+Run 4: Elapsed = 16957.0 ms | Audio = 2786.0 ms | RTF = 6.086
+Run 5: Elapsed = 12011.0 ms | Audio = 2635.0 ms | RTF = 4.557
+
+RTF P50: 4.692 (Min: 4.524, Max: 6.086)
+Latency P50: 12964.0 ms (Min: 12011.0 ms, Max: 16957.0 ms)
+================================================================================
