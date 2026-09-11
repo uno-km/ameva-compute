@@ -1,0 +1,151 @@
+================================================================================
+AMEVA COMPUTE - STT TRACK EXECUTION & AUDIT INTEGRATED LOG (WAVE 1)
+================================================================================
+Track Identifier    : AMEVA-Compute-STT (Track 2: Speech-to-Text)
+Git Branch          : track/stt
+Git Worktree Path   : ../ameva-compute-stt
+Base Commit         : c66b2be
+Timestamp (UTC)     : 2026-09-11 00:55:00
+Execution Doctrine  : Zero-Hype, Zero-Mocking, Zero-Silent-Fallback, Strict Contract
+================================================================================
+
+1. TRACK BOUNDARY & ISOLATION DISPOSITION
+--------------------------------------------------------------------------------
+- Branch Separation: Dedicated isolated branch `track/stt` and worktree.
+- Common Core Protection: Common Context, Buffer, Event, Tensor, and Vulkan ABI
+  remain strictly unmolested (0 modifications to src/runtime/ or include/ac_runtime.h).
+- Dedicated Subsystems:
+    * adapters/whisper/ (Ameva GGML Backend Skeleton implemented)
+    * examples/stt/
+    * tests/stt/
+    * docs/evidence/stt/ (Operator matrix & Reference manifest)
+    * scripts/stt/
+    * tests/fixtures/stt/
+
+2. UPSTREAM REFERENCE ENGINE PINNING
+--------------------------------------------------------------------------------
+- Upstream Repository  : https://github.com/ggml-org/whisper.cpp.git
+- Pinned Commit SHA    : df7638d8229a243af8a4b5a8ae557e0d74e0a0ae
+- Commit Author        : Daniel Bevenius <daniel.bevenius@gmail.com> (2026-06-09)
+- Commit Message       : "ci : pin github actions to commit sha's (#3865)"
+- Upstream License     : MIT
+- Local Worktree Clean : TRUE (0 modified, 0 untracked files in third_party/whisper.cpp)
+
+3. MODEL PROVENANCE & DUAL-LOCATION HASH VALIDATION
+--------------------------------------------------------------------------------
+- Canonical Source     : https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin
+- Target Filename      : ggml-tiny.bin
+- Logical Architecture : Whisper Multilingual Tiny (FTYPE=1, FP16)
+- Byte Size            : 77,691,713 bytes (~74.09 MiB)
+- Canonical SHA-256    : be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21
+- Host Model SHA-256   : be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21 (PASS)
+- A53 Model SHA-256    : be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21 (PASS)
+- S20 Model Status     : NOT_APPLICABLE (S20_STATUS=OFFLINE_EXCLUDED)
+- External Cache Path  : C:\Users\GAME\.cache\ameva-models\stt\ggml-tiny.bin
+
+4. AUDIO FIXTURES SPECIFICATION & ACCURACY METRICS (WAVE 0 CPU BASELINE)
+--------------------------------------------------------------------------------
+Format Specification   : 16,000 Hz, 1 Channel (Mono), 16-bit Signed LE PCM, WAV Container
+External Cache Path    : C:\Users\GAME\.cache\ameva-fixtures\stt\
+
+[Fixture A: Korean Speech (stt-ko-16k.wav)]
+  - Duration           : 7,000 ms (112,000 samples)
+  - Byte Size          : 224,044 bytes
+  - SHA-256            : e92b31407c1ef3c030843340a8957ae706d65447e823e1c8017a528bf5d61c8d
+  - Ground Truth Text  : "배추를 준비합니다. 쿠팡에서 2,000원이면 구입하실 수 있구요. 적당히 썰어주시면 됩니다."
+  - Raw Transcript     :
+      [00:00:00.000 --> 00:00:01.840]   배치를 준비합니다.
+      [00:00:01.840 --> 00:00:04.880]   쿠팡에서 2천원이면 구입하실 수 있고요.
+      [00:00:04.880 --> 00:00:06.800]   적당해 썰어주시면 됩니다.
+  - Raw Edit Distance  : 7 edits across 51 characters
+  - KOREAN_RAW_CER     : 0.1373 (13.73%)
+  - Normalization Rule : Unicode NFC, collapse whitespace, strip [,.], map '2,000원' -> '2천원'
+  - KOREAN_NORM_CER    : 0.1277 (12.77%, 6 edits across 47 characters: 배추->배치, 있구요->있고요, 적당히->적당해)
+  - KOREAN_WER         : 0.4000 (4 words mismatch out of 10 words; sensitive to Korean spacing/particles)
+  - Timing & RTF       : Total 7,805.62 ms (RTF = 1.115)
+
+[Fixture B: English Speech (stt-en-16k.wav)]
+  - Duration           : 7,000 ms (112,000 samples)
+  - Byte Size          : 224,044 bytes
+  - SHA-256            : 35cfbb46513ddb4d5986d04099a4f4fb198f43f3e0126cc86397fc8b82b0591a
+  - Full Source Text   : "And so, my fellow Americans: ask not what your country can do for you -- ask what you can do for your country."
+  - Expected Segment   : "And so, my fellow Americans, ask not what your country can do."
+  - Raw Transcript     :
+      [00:00:00.000 --> 00:00:06.880]   And so, my fellow Americans, ask not what your country can do.
+  - ENGLISH_EXACT_MATCH: TRUE (100% exact match against 7-second audio segment)
+  - ENGLISH_WER        : 0.0000 (0% word error rate)
+  - Timing & RTF       : Total 6,228.95 ms (RTF = 0.890, faster than real-time)
+
+[Fixture C: Silence Baseline (stt-silence-16k.wav)]
+  - Duration           : 7,000 ms (112,000 samples of 0x00)
+  - Byte Size          : 224,044 bytes
+  - SHA-256            : 4f10b21eaba59e3252f536553894c512f9ce501ae3e8f3dbb3174aac3f0046ef
+  - Raw Transcript     :
+      [00:00:00.000 --> 00:00:10.000]   [BLANK_AUDIO]
+  - SILENCE_INPUT_DURATION_MS           : 7000
+  - SILENCE_OUTPUT_SEGMENT_END_MS       : 10000
+  - SILENCE_TIMESTAMP_MATCH             : FALSE (Whisper quantizes minimum window interval to 10s)
+  - SILENCE_HALLUCINATED_LEXICAL_CONTENT: FALSE
+  - SILENCE_SPECIAL_TOKEN               : [BLANK_AUDIO] (emitted by whisper.cpp VAD energy threshold)
+
+5. HARDWARE FLEET STATUS & REVISED TOPOLOGY
+--------------------------------------------------------------------------------
+[Primary Development Device: Samsung Galaxy A53 5G]
+  - Model              : SM-A536N (Exynos 1280 / ARM Mali-G68 MP4)
+  - Android OS Release : Android 16 (API Level 36)
+  - Vulkan Driver      : 32.1.0 (Vulkan API 1.1.177, conformance 1.2.6.0)
+  - A53_CONNECTIVITY   : PASS
+  - A53_NATIVE_CPU_BUILD: PASS
+  - A53_MODEL_HASH_MATCH: PASS
+  - A53_FIXTURE_HASH_MATCH: PASS
+  - A53_CPU_TRANSCRIPTION: PASS (RUN_A Complete)
+  - A53_UPSTREAM_VULKAN: PASS (RUN_B Complete)
+      * Patch Applied: per-device VULKAN_HPP_DEFAULT_DISPATCHER.init(device->device) + buffer_device_address null-guard
+      * Korean Text Parity: 100% Exact match with RUN_A ("배치를 준비합니다. 쿠팡에서 2천원이면 구입하실 수 있고요. 적당해 썰어주시면 됩니다.")
+      * English Text Parity: 100% Exact match with RUN_A ("And so my fellow Americans, ask not what your country can do.")
+      * Silence Baseline: 100% Exact match with RUN_A ("[BLANK_AUDIO]", 0 lexical hallucinations)
+      * Vulkan Timing (ko): Load 914.00ms, Encode 6,953.24ms, Decode 1,878.50ms, Batchd 10,007.38ms, Total 20,555.91ms
+      * Vulkan Timing (en): Load 480.57ms, Encode 6,690.30ms, Decode 1,860.72ms, Batchd 9,770.77ms, Total 19,252.32ms
+      * Vulkan Timing (silence): Load 521.13ms, Encode 6,663.37ms, Decode 1,833.30ms, Batchd 6,747.20ms, Total 16,012.21ms
+      * Fallbacks: 0 p / 0 h across all runs
+  - A53_AMEVA_GPU_OP_COUNT: 1 (RUN_C Complete)
+  - A53_AMEVA_MIXED_EXECUTION: PASS (RUN_C Mixed Graph)
+      * Selected Node: node_7 (Encoder Layer 0 Query Projection, attn_q)
+      * Operator Geometry: GGML_OP_MUL_MAT, M=1500, N=384, K=384
+      * Precision & Dtype: Weights FP16 (294,912 B), Activations FP32 (2,304,000 B), Output FP32 (2,304,000 B)
+      * Standalone Vulkan Parity: PASS (MAX_ABS_ERROR=0.015440, RMSE=0.000909, NaNs=0, Infs=0)
+      * Mixed Graph Execution: AMEVA Vulkan Hardware Kernel on Mali-G68, CPU Bypassed (GGML_OP_NONE)
+      * Mixed Dispatch Latency: 132,881 us (Korean), 135,747 us (English), 133,270 us (Silence)
+      * Mixed Korean Text Parity: 100% Exact match with RUN_A ("배치를 준비합니다. 쿠팡에서 2천원이면 구입하실 수 있고요. 적당해 썰어주시면 됩니다.")
+      * Mixed English Text Parity: 100% Exact match with RUN_A ("And so, my fellow Americans, ask not what your country can do.")
+      * Mixed Silence Parity: 100% Exact match with RUN_A ("[BLANK_AUDIO]", 0 lexical hallucinations, exit code 0)
+      * Fallbacks: 0 p / 0 h across all runs
+
+[Secondary Mali Cross-Vendor: Samsung Galaxy S21 5G]
+  - Model              : SM-G991N
+  - SoC / GPU          : Samsung Exynos 2100 / ARM Mali-G78 MP14
+  - Android OS Release : Android 15
+  - Probe Disposition  : ONLINE & PROBED (Identified as Mali, designated SECONDARY_MALI_DEVICE)
+
+[Adreno Cross-Vendor Target: Samsung Galaxy S22]
+  - Target GPU         : Qualcomm Adreno 730
+  - Network Status     : OFFLINE (Tailscale timeout)
+  - Current Disposition: NOT_RUN (Non-blocking for Wave 1)
+
+[Excluded Device: Samsung Galaxy S20 5G]
+  - S20_STATUS         : OFFLINE_EXCLUDED
+  - S20_CPU_TRANSCRIPTION: NOT_APPLICABLE
+
+6. REPOSITORY HYGIENE & AUDIT CACHING
+--------------------------------------------------------------------------------
+- STT_WORKTREE_CLEAN   : TRUE (All adapter sources and patches tracked)
+- LARGE_FILES_IN_TREE  : 0 (All *.bin, *.wav, and fixtures safely excluded from git)
+- External Cache Root  : C:\Users\GAME\.cache\ameva-*
+- STT_CONSOLIDATED_EXPORT: INTERNAL_AUDIT_ONLY (Git tracked = false)
+
+7. BLOCKER STATUS
+--------------------------------------------------------------------------------
+- S20 Discarded from Critical Path : CONFIRMED
+- Wave 1 Milestone Status          : FULLY_ACCOMPLISHED (RUN_A, RUN_B, RUN_C complete)
+- Single Active Blocker            : NONE_WAVE_1_COMPLETE
+================================================================================

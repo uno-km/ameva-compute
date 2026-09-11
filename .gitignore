@@ -5,3 +5,17 @@ build-*
 # Generated consolidated audits
 ameva_compute_consolidated.md
 *.md.tmp
+*consolidated.md
+docs/evidence/stt/*consolidated.md
+
+# Large model binaries and audio fixtures
+models/*.bin
+*.bin
+tests/fixtures/stt/*.wav
+*.wav
+
+# Third-party submodules or clones
+third_party/
+
+# Local cache & temporary files
+.cache/
