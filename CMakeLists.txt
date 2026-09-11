@@ -252,3 +252,26 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(ggml-ameva vulkan dl m pthread)
 endif()
 add_test(NAME amuda_ggml_backend COMMAND test_amuda_ggml_backend)
+
+# =============================================================================
+# AMUDA Vision Ops Subsystem (Track V1 Pointwise Conv)
+# =============================================================================
+set(AC_VISION_SOURCES
+    src/vision/ac_vision_pointwise_conv.cpp
+)
+
+add_library(ac_vision_core STATIC ${AC_VISION_SOURCES})
+target_include_directories(ac_vision_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(ac_vision_core ac_vulkan_core vulkan dl m)
+endif()
+
+add_executable(test_vision_pointwise_conv tests/vision/test_vision_pointwise_conv.cpp ${AC_VISION_SOURCES})
+target_include_directories(test_vision_pointwise_conv PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_vision_pointwise_conv ac_vulkan_core)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_vision_pointwise_conv vulkan dl m pthread)
+endif()
+
+add_test(NAME vision_pointwise_conv COMMAND test_vision_pointwise_conv)
+
