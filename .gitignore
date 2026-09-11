@@ -12,4 +12,7 @@ chronological*transcript*.txt
 session*transcript*.jsonl
 .system_generated/
 scratch/
+__pycache__/
+*.pyc
+
 
