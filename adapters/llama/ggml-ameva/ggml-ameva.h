@@ -18,6 +18,7 @@ GGML_API ggml_backend_buffer_type_t ggml_backend_ameva_buffer_type(size_t dev_nu
 GGML_API ggml_backend_reg_t ggml_backend_ameva_reg(void);
 GGML_API void ggml_backend_ameva_register(void);
 GGML_API void ggml_backend_ameva_teardown(void);
+GGML_API void ameva_buffer_teardown(void);
 
 // Dynamic Loader Entrypoints (dlopen / dlsym)
 GGML_BACKEND_API ggml_backend_reg_t ggml_backend_init(void);

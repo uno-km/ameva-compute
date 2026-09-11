@@ -184,6 +184,7 @@ static AcKernel* ameva_get_mul_mat_kernel() {
 
 void ggml_backend_ameva_teardown(void) {
     std::lock_guard<std::mutex> lock(s_mutex);
+    ameva_buffer_teardown();
     if (s_kernel) {
         ac_runtime_kernel_destroy(s_kernel);
         s_kernel = nullptr;

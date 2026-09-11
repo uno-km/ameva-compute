@@ -6,6 +6,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
+#include <mutex>
+#include <unordered_set>
 
 // Forward declaration of internal context accessor
 AcContext* ameva_get_ac_context();
@@ -18,13 +20,32 @@ struct ggml_backend_ameva_buffer_context {
     size_t size;
 };
 
+static std::mutex s_buffer_mutex;
+static std::unordered_set<ggml_backend_ameva_buffer_context*> s_resident_buffers;
+
+void ameva_buffer_teardown(void) {
+    std::lock_guard<std::mutex> lock(s_buffer_mutex);
+    for (auto* ctx : s_resident_buffers) {
+        if (ctx && ctx->ac_buf) {
+            ac_runtime_buffer_destroy(ctx->ac_buf);
+            ctx->ac_buf = nullptr;
+            ameva_increment_buffer_destroy_count();
+        }
+    }
+    s_resident_buffers.clear();
+}
+
 static void ggml_backend_ameva_buffer_free_buffer(ggml_backend_buffer_t buffer) {
     if (!buffer || !buffer->context) return;
     auto* ctx = (ggml_backend_ameva_buffer_context*)buffer->context;
-    if (ctx->ac_buf) {
-        ac_runtime_buffer_destroy(ctx->ac_buf);
-        ctx->ac_buf = nullptr;
-        ameva_increment_buffer_destroy_count();
+    {
+        std::lock_guard<std::mutex> lock(s_buffer_mutex);
+        s_resident_buffers.erase(ctx);
+        if (ctx->ac_buf) {
+            ac_runtime_buffer_destroy(ctx->ac_buf);
+            ctx->ac_buf = nullptr;
+            ameva_increment_buffer_destroy_count();
+        }
     }
     delete ctx;
     buffer->context = nullptr;
@@ -185,6 +206,10 @@ static ggml_backend_buffer_t ggml_backend_ameva_buffer_type_alloc_buffer(ggml_ba
     }
 
     auto* buf_ctx = new ggml_backend_ameva_buffer_context{ ac_buf, mapped_ptr, aligned_size };
+    {
+        std::lock_guard<std::mutex> lock(s_buffer_mutex);
+        s_resident_buffers.insert(buf_ctx);
+    }
     return ggml_backend_buffer_init(buft, ggml_backend_ameva_buffer_i, buf_ctx, aligned_size);
 }
 
