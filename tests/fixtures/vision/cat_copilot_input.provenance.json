@@ -1,0 +1,13 @@
+{
+   source: Microsoft Copilot generated image saved by user,
+  original_path: <USERPROFILE>/Downloads/Designer.png,
+  original_file_name: Designer.png,
+  file_sha256: 991026ba1d9e01d6d8a3cf70c62837ff511ff37d839bcdc1aea4b6caf00a8125,
+  decoded_pixel_sha256: 8e104cd22cae1ee3675083e849eeecb94f1e5dc5c4828b03d61ea05d4b861ec7,
+  canonical_pixel_format: RGB8,
+  canonical_pixel_byte_order: ROW_MAJOR_RGB,
+  width: 1254,
+  height: 1254,
+  channels: 3,
+  usage: AMEVA Vision SqueezeNet real-image validation fixture
+}

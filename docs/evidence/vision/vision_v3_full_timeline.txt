@@ -1,0 +1,59 @@
+# AMEVA Compute Vision V3 Full Chronological Command Timeline
+# Generated: 2026-09-11T10:38:00Z
+# Sanitization: Usernames, IPs, Auth tokens, Host paths masked.
+
+[2026-09-11T08:35:38Z] RUN: Fetching source file test_vision_pointwise_conv.cpp
+COMMAND: type tests/vision/test_vision_pointwise_conv.cpp
+RESULT: SUCCESS (RC=0)
+
+[2026-09-11T08:50:33Z] RUN: S25 connectivity and binary verification
+COMMAND: ssh s25 'uname -m && sha256sum ~/ameva-compute/build-audit/test_vision_pointwise_conv'
+RESULT: aarch64, bb545d6ff724554f3107de89967ba3c514ef515a040859c8cf8c46da6fb00bc2 (RC=0)
+
+[2026-09-11T09:10:11Z] RUN: Pre-inspect NCNN convert_packing API signature
+COMMAND: ssh s25 'grep -rn convert_packing ~/ncnn/src/mat.h'
+RESULT: /data/.../mat.h:881:NCNN_EXPORT void convert_packing(const Mat& src, Mat& dst, int elempack, const Option& opt = Option()); (RC=0)
+
+[2026-09-11T10:10:25Z] RUN: Inspect Git revision of repository
+COMMAND: git rev-parse HEAD
+RESULT: a1493a1b75bf388a724e98d8e9f5039a64627d3a (RC=0)
+
+[2026-09-11T10:23:36Z] RUN: S25 baseline metadata and elempack measurement
+COMMAND: ssh s25 'clang++ -O2 check_pack.cpp ... && ./check_pack'
+RESULT: OUTPUT_DIMS=3, OUTPUT_W=56, OUTPUT_H=56, OUTPUT_C=16, OUTPUT_ELEMSIZE=4, OUTPUT_ELEMPACK=1 (RC=0)
+
+[2026-09-11T10:24:26Z] RUN: A35 connectivity and baseline component hashing
+COMMAND: ssh a35 'sha256sum ~/ameva-compute/build-audit/test_vision_pointwise_conv ~/ncnn/examples/squeezenet_v1.1.param ...'
+RESULT: TEST_BINARY_SHA256=d0fa1480830ebf5b0fec6d7bd12d7cd09f4ea8c7cc9640034b1d66fca41850af (RC=0)
+
+[2026-09-11T10:27:45Z] RUN: Snapshot source code and CMakeLists to evidence
+COMMAND: Copy-Item tests/vision/test_vision_pointwise_conv.cpp, CMakeLists.txt, scripts/extract_squeezenet_activation.cpp
+RESULT: Preserved under docs/evidence/vision/*.txt (RC=0)
+
+[2026-09-11T10:29:10Z] RUN: Scan Windows Downloads for user-saved Copilot cat image
+COMMAND: python scan_downloads.py
+RESULT: Found Designer.png (1254x1254, 2181715 bytes, RGB, SHA256: 991026ba1d9e01d6d8a3cf70c62837ff511ff37d839bcdc1aea4b6caf00a8125) (RC=0)
+
+[2026-09-11T10:29:35Z] RUN: Seal cat image fixture and provenance JSON
+COMMAND: Copy-Item Designer.png tests/fixtures/vision/cat_copilot_input.png
+RESULT: tests/fixtures/vision/cat_copilot_input.png sealed (RC=0)
+
+[2026-09-11T10:30:40Z] RUN: Apply P0-3, P0-4, P0-5 packing, layout and contract patch to test_vision_pointwise_conv.cpp
+COMMAND: replace_file_content tests/vision/test_vision_pointwise_conv.cpp
+RESULT: Patched contract verification, top-20 error matrix, finite checks, fail-closed gate (RC=0)
+
+[2026-09-11T10:34:07Z] RUN: Build patched test_vision_pointwise_conv on Galaxy S25 (Adreno 830)
+COMMAND: ssh s25 'cd ~/ameva-compute/build-audit && cmake .. && make test_vision_pointwise_conv -j4'
+RESULT: [100%] Built target test_vision_pointwise_conv, SHA256: 0d2219c2451b083345955f2c799b785fcd25e79c6bbe9b37b0cfeb9441f2f77a (RC=0)
+
+[2026-09-11T10:34:25Z] RUN: Execute patched test_vision_pointwise_conv on Galaxy S25
+COMMAND: ssh s25 'cd ~/ameva-compute && ./build-audit/test_vision_pointwise_conv'
+RESULT: AMEVA_VS_DOUBLE_REFERENCE=PASS, AMEVA_VS_NCNN_CPU=FAIL_UNDER_CURRENT_ABSOLUTE_ERROR_CONTRACT (RC=1, as expected by fail-closed gate)
+
+[2026-09-11T10:35:40Z] RUN: Build patched test_vision_pointwise_conv on Galaxy A35 (Mali-G68)
+COMMAND: ssh a35 'cd ~/ameva-compute/build-audit && cmake .. && make test_vision_pointwise_conv -j4'
+RESULT: [100%] Built target test_vision_pointwise_conv, SHA256: 20d414d1079f6d68294ad78d33adabb4fc44f0de80360e346b1df309a595b2ec (RC=0)
+
+[2026-09-11T10:36:42Z] RUN: Execute patched test_vision_pointwise_conv on Galaxy A35
+COMMAND: ssh a35 'cd ~/ameva-compute && ./build-audit/test_vision_pointwise_conv'
+RESULT: AMEVA_VS_DOUBLE_REFERENCE=PASS, AMEVA_VS_NCNN_CPU=FAIL_UNDER_CURRENT_ABSOLUTE_ERROR_CONTRACT, CROSS_VENDOR_PARITY=PASS (RC=1)
