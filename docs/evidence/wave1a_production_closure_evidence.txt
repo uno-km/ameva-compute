@@ -280,19 +280,27 @@ AUDIT_ITEMS:
   - No Mutex Reentrancy / Double-Destroy: PASS (0/0)
   - Lexicon OOV Fix & Zero Tokenizer Drops: PASS (0 Empty IDs)
   - Non-Silent Audio File Generation: PASS (2.670 s, -23.95 dBFS)
-  - Human Listening Validation: PASS (Direct Audio Verification: "The ameva text to speech pipeline is running.")
-  - Exact Transcript Match: PASS (100% matched)
-  - AMEVA Word Audible: true (Clear pronunciation)
-  - Utterance Repeat Count: 1
-  - Audible Artifacts: none
-  - Beginning or End Clipped: false
   - Patched Model Bundle Manifest Sealed: true (SHA-256: 2e54a16c32f1077adc0d9389d9feca2eb18ce93f587ea63110600aa3ed53935a)
+
+[AUTOMATED-STT-AUDIO-VALIDATION]
+VALIDATION_METHOD=ANTIGRAVITY_STT_RETRANSCRIPTION
+INPUT_WAV=wave1a_mixed_en1.wav
+EXPECTED_TRANSCRIPT=The ameva text to speech pipeline is running.
+OBSERVED_TRANSCRIPT=The ameva text to speech pipeline is running.
+STT_TRANSCRIPT_EXACT_MATCH=true
+AMEVA_TOKEN_PRESENT=true
+AUDIO_DECODABLE=true
+
+HUMAN_LISTENING_VALIDATION=NOT_PERFORMED
+AUDIBLE_ARTIFACTS=NOT_EVALUATED
+BEGINNING_OR_END_CLIPPED=NOT_EVALUATED
+PHONEME_LEVEL_PRONUNCIATION=NOT_EVALUATED
 
 PRODUCTION_IDENTIFIER:
   SHERPA_NCNN_MIXED_TTS_WITH_ONE_AMEVA_GPU_OP=PASS
   FULL_TTS_GRAPH_ON_AMEVA=false
   AMEVA_OFFLOADED_LAYER_COUNT=1
 
-WAVE_1A_ENGINEERING_VERIFICATION=PASS
-WAVE_1A_PRODUCTION_CLOSURE=PASS
+TTS_WAVE1A_ENGINEERING_CLOSURE=PASS
+WAVE_1A_PRODUCTION_CLOSURE=HOLD
 ================================================================================
