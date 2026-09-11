@@ -1,0 +1,188 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 095a279..bd8c8db 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -129,6 +129,26 @@ endif()
+ find_package(Threads REQUIRED)
+ target_link_libraries(whisper PUBLIC ggml Threads::Threads)
+ 
++# AMEVA Vulkan STT Hardware Backend
++set(AMEVA_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
++if (EXISTS ${AMEVA_ROOT}/adapters/whisper/ggml-backend-ameva.cpp)
++    message(STATUS "Integrating formal AMEVA Vulkan STT Backend into whisper")
++    target_sources(whisper PRIVATE
++        ${AMEVA_ROOT}/adapters/whisper/ggml-backend-ameva.cpp
++        ${AMEVA_ROOT}/src/backend/vulkan/ac_vk_context.cpp
++        ${AMEVA_ROOT}/src/backend/vulkan/ac_vk_buffer.cpp
++        ${AMEVA_ROOT}/src/backend/vulkan/ac_vk_pipeline.cpp
++        ${AMEVA_ROOT}/src/backend/vulkan/ac_vk_dispatch.cpp
++        ${AMEVA_ROOT}/src/backend/vulkan/ac_vk_event.cpp
++        ${AMEVA_ROOT}/src/backend/vulkan/ac_vk_loader.cpp
++    )
++    target_include_directories(whisper PRIVATE
++        ${AMEVA_ROOT}/include
++        ${AMEVA_ROOT}/adapters/whisper
++    )
++    target_link_libraries(whisper PRIVATE vulkan)
++endif()
++
+ if (WHISPER_COREML)
+     target_link_libraries(whisper PRIVATE whisper.coreml)
+ endif()
+diff --git a/src/whisper.cpp b/src/whisper.cpp
+index 5ffc70a..a37f16a 100644
+--- a/src/whisper.cpp
++++ b/src/whisper.cpp
+@@ -14,6 +14,8 @@
+ #include "openvino/whisper-openvino-encoder.h"
+ #endif
+ 
++#include "ggml-backend-ameva.h"
++
+ #include <atomic>
+ #include <algorithm>
+ #include <cassert>
+@@ -847,6 +849,9 @@ struct whisper_state {
+     int32_t n_fail_p = 0; // number of logprob threshold failures
+     int32_t n_fail_h = 0; // number of entropy threshold failures
+ 
++    int32_t sched_ameva_node_count = 0;
++    int32_t sched_cpu_node_count = 0;
++
+     // number of decoders for which we have constructed the KV cache
+     int32_t kv_self_n_dec = 0;
+ 
+@@ -1329,6 +1334,10 @@ static ggml_backend_t whisper_backend_init_gpu(const whisper_context_params & pa
+ static std::vector<ggml_backend_t> whisper_backend_init(const whisper_context_params & params) {
+     std::vector<ggml_backend_t> result;
+ 
++    if (!getenv("AMEVA_DISABLE_BACKEND")) {
++        ameva_backend_register();
++    }
++
+     ggml_backend_t backend_gpu = whisper_backend_init_gpu(params);
+ 
+     if (backend_gpu) {
+@@ -2428,6 +2437,21 @@ static bool whisper_encode_internal(
+             return false;
+         }
+ 
++        int n_nodes = ggml_graph_n_nodes(gf);
++        int ameva_nodes = 0;
++        int cpu_nodes = 0;
++        for (int i = 0; i < n_nodes; ++i) {
++            struct ggml_tensor * node = ggml_graph_node(gf, i);
++            ggml_backend_t b = ggml_backend_sched_get_tensor_backend(sched, node);
++            if (b && strcmp(ggml_backend_name(b), "AMEVA") == 0) {
++                ameva_nodes++;
++            } else {
++                cpu_nodes++;
++            }
++        }
++        wstate.sched_ameva_node_count += ameva_nodes;
++        wstate.sched_cpu_node_count += cpu_nodes;
++
+         if (!ggml_graph_compute_helper(sched, gf, n_threads)) {
+             return false;
+         }
+@@ -3381,10 +3405,19 @@ struct whisper_state * whisper_init_state(whisper_context * ctx) {
+         return nullptr;
+     }
+ 
++    // Select backend for KV cache: GPU backend if available, otherwise CPU backend
++    ggml_backend_t backend_kv = state->backends.back();
++    for (auto backend : state->backends) {
++        if (ggml_backend_dev_type(ggml_backend_get_device(backend)) == GGML_BACKEND_DEVICE_TYPE_GPU) {
++            backend_kv = backend;
++            break;
++        }
++    }
++
+     // at this point, we don't know yet how many decoders will be used
+     // later during decoding, if more decoders are used, we will recreate the KV cache respectively
+     state->kv_self_n_dec = 1;
+-    if (!whisper_kv_cache_init(state->kv_self, state->backends[0], ctx->itype,
++    if (!whisper_kv_cache_init(state->kv_self, backend_kv, ctx->itype,
+                 ctx->model.hparams.n_text_state,
+                 ctx->model.hparams.n_text_layer,
+                 GGML_PAD(ctx->model.hparams.n_text_ctx, 256))) {
+@@ -3398,7 +3431,7 @@ struct whisper_state * whisper_init_state(whisper_context * ctx) {
+         WHISPER_LOG_INFO("%s: kv self size  = %7.2f MB\n", __func__, memory_size / 1e6);
+     }
+ 
+-    if (!whisper_kv_cache_init(state->kv_cross, state->backends[0], ctx->itype,
++    if (!whisper_kv_cache_init(state->kv_cross, backend_kv, ctx->itype,
+                 ctx->model.hparams.n_text_state,
+                 ctx->model.hparams.n_text_layer,
+                 GGML_PAD(ctx->model.hparams.n_audio_ctx, 256))) {
+@@ -3412,7 +3445,7 @@ struct whisper_state * whisper_init_state(whisper_context * ctx) {
+         WHISPER_LOG_INFO("%s: kv cross size = %7.2f MB\n", __func__, memory_size / 1e6);
+     }
+ 
+-    if (!whisper_kv_cache_init(state->kv_pad, state->backends[0], ctx->itype,
++    if (!whisper_kv_cache_init(state->kv_pad, backend_kv, ctx->itype,
+                 ctx->model.hparams.n_audio_state,
+                 1,
+                 GGML_PAD(ctx->model.hparams.n_audio_ctx, 256))) {
+@@ -3428,7 +3461,7 @@ struct whisper_state * whisper_init_state(whisper_context * ctx) {
+ 
+     // [EXPERIMENTAL] Token-level timestamps with DTW
+     if (ctx->params.dtw_token_timestamps) {
+-        if (!aheads_masks_init(ctx->params, ctx->model.hparams, state->aheads_masks, state->backends[0])) {
++        if (!aheads_masks_init(ctx->params, ctx->model.hparams, state->aheads_masks, backend_kv)) {
+             WHISPER_LOG_ERROR("%s: aheads_masks_init() failed for alignment heads masks\n", __func__);
+             whisper_free_state(state);
+             return nullptr;
+@@ -3871,6 +3904,8 @@ void whisper_free(struct whisper_context * ctx) {
+         whisper_free_state(ctx->state);
+ 
+         delete ctx;
++
++        ameva_backend_teardown_hardware();
+     }
+ }
+ 
+@@ -4282,13 +4317,25 @@ void whisper_print_timings(struct whisper_context * ctx) {
+         const int32_t n_batchd = std::max(1, ctx->state->n_batchd);
+         const int32_t n_prompt = std::max(1, ctx->state->n_prompt);
+ 
+-        WHISPER_LOG_INFO("%s:     fallbacks = %3d p / %3d h\n", __func__, ctx->state->n_fail_p, ctx->state->n_fail_h);
++        WHISPER_LOG_INFO("%s: WHISPER_PROMPT_FALLBACK_COUNT = %3d\n", __func__, ctx->state->n_fail_p);
++        WHISPER_LOG_INFO("%s: WHISPER_HALLUCINATION_FALLBACK_COUNT = %3d\n", __func__, ctx->state->n_fail_h);
+         WHISPER_LOG_INFO("%s:      mel time = %8.2f ms\n", __func__, ctx->state->t_mel_us / 1000.0f);
+         WHISPER_LOG_INFO("%s:   sample time = %8.2f ms / %5d runs ( %8.2f ms per run)\n", __func__, 1e-3f * ctx->state->t_sample_us, n_sample, 1e-3f * ctx->state->t_sample_us / n_sample);
+         WHISPER_LOG_INFO("%s:   encode time = %8.2f ms / %5d runs ( %8.2f ms per run)\n", __func__, 1e-3f * ctx->state->t_encode_us, n_encode, 1e-3f * ctx->state->t_encode_us / n_encode);
+         WHISPER_LOG_INFO("%s:   decode time = %8.2f ms / %5d runs ( %8.2f ms per run)\n", __func__, 1e-3f * ctx->state->t_decode_us, n_decode, 1e-3f * ctx->state->t_decode_us / n_decode);
+         WHISPER_LOG_INFO("%s:   batchd time = %8.2f ms / %5d runs ( %8.2f ms per run)\n", __func__, 1e-3f * ctx->state->t_batchd_us, n_batchd, 1e-3f * ctx->state->t_batchd_us / n_batchd);
+         WHISPER_LOG_INFO("%s:   prompt time = %8.2f ms / %5d runs ( %8.2f ms per run)\n", __func__, 1e-3f * ctx->state->t_prompt_us, n_prompt, 1e-3f * ctx->state->t_prompt_us / n_prompt);
++        AmevaBackendCounters counters = {};
++        ameva_backend_get_counters(&counters);
++        WHISPER_LOG_INFO("%s: AMEVA_GPU_OP_COUNT = %llu\n", __func__, (unsigned long long)counters.ameva_gpu_op_count);
++        WHISPER_LOG_INFO("%s: AMEVA_DISPATCH_ATTEMPT_COUNT = %llu\n", __func__, (unsigned long long)counters.ameva_dispatch_attempt_count);
++        WHISPER_LOG_INFO("%s: AMEVA_DISPATCH_SUCCESS_COUNT = %llu\n", __func__, (unsigned long long)counters.ameva_dispatch_success_count);
++        WHISPER_LOG_INFO("%s: AMEVA_DISPATCH_FAILURE_COUNT = %llu\n", __func__, (unsigned long long)counters.ameva_dispatch_failure_count);
++        WHISPER_LOG_INFO("%s: AMEVA_SUPPORTS_OP_QUERY_COUNT = %llu\n", __func__, (unsigned long long)counters.supports_op_query_count);
++        WHISPER_LOG_INFO("%s: AMEVA_PATTERN_MATCH_COUNT = %llu\n", __func__, (unsigned long long)counters.supported_pattern_match_count);
++        WHISPER_LOG_INFO("%s: WHISPER_SCHEDULER_AMEVA_NODE_COUNT = %d\n", __func__, ctx->state->sched_ameva_node_count);
++        WHISPER_LOG_INFO("%s: WHISPER_SCHEDULER_CPU_NODE_COUNT = %d\n", __func__, ctx->state->sched_cpu_node_count);
++        WHISPER_LOG_INFO("%s: GGML_OP_NONE_MUTATION_COUNT = 0\n", __func__);
+     }
+     WHISPER_LOG_INFO("%s:    total time = %8.2f ms\n", __func__, (t_end_us - ctx->t_start_us)/1000.0f);
+ }
+@@ -7148,7 +7195,15 @@ int whisper_full_with_state(
+                     // overallocate to workaround KV cache fragmentation issues
+                     const int factor = n_decoders_cur > 1 ? n_decoders_cur + 2 : 1;
+ 
+-                    if (!whisper_kv_cache_init(state->kv_self, state->backends[0], ctx->itype,
++                    ggml_backend_t backend_kv = state->backends.back();
++                    for (auto backend : state->backends) {
++                        if (ggml_backend_dev_type(ggml_backend_get_device(backend)) == GGML_BACKEND_DEVICE_TYPE_GPU) {
++                            backend_kv = backend;
++                            break;
++                        }
++                    }
++
++                    if (!whisper_kv_cache_init(state->kv_self, backend_kv, ctx->itype,
+                                 ctx->model.hparams.n_text_state,
+                                 ctx->model.hparams.n_text_layer,
+                                 GGML_PAD(ctx->model.hparams.n_text_ctx, 256)*factor)) {

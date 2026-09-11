@@ -1,0 +1,885 @@
+==================================================================
+ AMEVA FORMAL GGML BACKEND ON GALAXY A53 (Mali-G68) RAW EVIDENCE
+ DATE: 2026-09-11T05:05:13.012693Z
+ DEVICE: SM-A536N (Samsung Galaxy A53 5G)
+ GPU: ARM Mali-G68 MP4
+ ARCH: aarch64 (ARMv8.2-A)
+==================================================================
+
+### 1. E2E KOREAN TRANSCRIPTION (stt-ko-16k.wav)
+whisper_init_from_file_with_params_no_state: loading model from '/data/data/com.termux/files/home/ameva-models/stt/ggml-tiny.bin'
+whisper_init_with_params_no_state: use gpu    = 1
+whisper_init_with_params_no_state: flash attn = 1
+whisper_init_with_params_no_state: gpu_device = 0
+whisper_init_with_params_no_state: dtw        = 0
+whisper_init_with_params_no_state: devices    = 1
+whisper_init_with_params_no_state: backends   = 1
+whisper_model_load: loading model
+whisper_model_load: n_vocab       = 51865
+whisper_model_load: n_audio_ctx   = 1500
+whisper_model_load: n_audio_state = 384
+whisper_model_load: n_audio_head  = 6
+whisper_model_load: n_audio_layer = 4
+whisper_model_load: n_text_ctx    = 448
+whisper_model_load: n_text_state  = 384
+whisper_model_load: n_text_head   = 6
+whisper_model_load: n_text_layer  = 4
+whisper_model_load: n_mels        = 80
+whisper_model_load: ftype         = 1
+whisper_model_load: qntvr         = 0
+whisper_model_load: type          = 1 (tiny)
+whisper_model_load: adding 1608 extra tokens
+whisper_model_load: n_langs       = 99
+whisper_model_load:          CPU total size =    77.11 MB
+whisper_model_load: model size    =   77.11 MB
+whisper_backend_init_gpu: device 0: CPU (type: 0)
+whisper_backend_init_gpu: device 1: AMEVA0 (type: 3)
+whisper_backend_init_gpu: no GPU found
+whisper_backend_init: using AMEVA0 backend
+whisper_init_state: kv self size  =    3.15 MB
+whisper_init_state: kv cross size =    9.44 MB
+whisper_init_state: kv pad  size  =    2.36 MB
+whisper_init_state: compute buffer (conv)   =   13.21 MB
+whisper_init_state: compute buffer (encode) =   18.01 MB
+whisper_init_state: compute buffer (cross)  =    6.49 MB
+whisper_init_state: compute buffer (decode) =   95.91 MB
+read_audio_data: reading audio data from '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' ...
+read_audio_data: trying to decode with miniaudio
+
+system_info: n_threads = 4 / 8 | WHISPER : COREML = 0 | OPENVINO = 0 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | DOTPROD = 1 | OPENMP = 1 | REPACK = 1 | 
+
+main: processing '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' (112000 samples, 7.0 sec), 4 threads, 1 processors, 5 beams + best of 5, lang = ko, task = transcribe, timestamps = 1 ...
+
+
+[00:00:00.000 --> 00:00:01.840]   배치를 준비합니다.
+[00:00:01.840 --> 00:00:04.920]   쿠팡에서 2천원이면 구입하실 수 있고요.
+[00:00:04.920 --> 00:00:06.880]   적당해 썰어주시면 됩니다.
+
+whisper_print_timings:     load time =   309.57 ms
+whisper_print_timings: WHISPER_PROMPT_FALLBACK_COUNT =   0
+whisper_print_timings: WHISPER_HALLUCINATION_FALLBACK_COUNT =   0
+whisper_print_timings:      mel time =    54.73 ms
+whisper_print_timings:   sample time =  1077.50 ms /   185 runs (     5.82 ms per run)
+whisper_print_timings:   encode time =  7844.97 ms /     1 runs (  7844.97 ms per run)
+whisper_print_timings:   decode time =   104.71 ms /     5 runs (    20.94 ms per run)
+whisper_print_timings:   batchd time =  1798.82 ms /   178 runs (    10.11 ms per run)
+whisper_print_timings:   prompt time =     0.00 ms /     1 runs (     0.00 ms per run)
+whisper_print_timings: AMEVA_GPU_OP_COUNT = 24
+whisper_print_timings: AMEVA_DISPATCH_ATTEMPT_COUNT = 24
+whisper_print_timings: AMEVA_DISPATCH_SUCCESS_COUNT = 24
+whisper_print_timings: AMEVA_DISPATCH_FAILURE_COUNT = 0
+whisper_print_timings: AMEVA_SUPPORTS_OP_QUERY_COUNT = 3994
+whisper_print_timings: AMEVA_PATTERN_MATCH_COUNT = 120
+whisper_print_timings: WHISPER_SCHEDULER_AMEVA_NODE_COUNT = 16
+whisper_print_timings: WHISPER_SCHEDULER_CPU_NODE_COUNT = 111
+whisper_print_timings: GGML_OP_NONE_MUTATION_COUNT = 0
+whisper_print_timings:    total time = 11257.88 ms
+
+EXIT_CODE=0
+
+### 2. E2E ENGLISH TRANSCRIPTION (stt-en-16k.wav)
+whisper_init_from_file_with_params_no_state: loading model from '/data/data/com.termux/files/home/ameva-models/stt/ggml-tiny.bin'
+whisper_init_with_params_no_state: use gpu    = 1
+whisper_init_with_params_no_state: flash attn = 1
+whisper_init_with_params_no_state: gpu_device = 0
+whisper_init_with_params_no_state: dtw        = 0
+whisper_init_with_params_no_state: devices    = 1
+whisper_init_with_params_no_state: backends   = 1
+whisper_model_load: loading model
+whisper_model_load: n_vocab       = 51865
+whisper_model_load: n_audio_ctx   = 1500
+whisper_model_load: n_audio_state = 384
+whisper_model_load: n_audio_head  = 6
+whisper_model_load: n_audio_layer = 4
+whisper_model_load: n_text_ctx    = 448
+whisper_model_load: n_text_state  = 384
+whisper_model_load: n_text_head   = 6
+whisper_model_load: n_text_layer  = 4
+whisper_model_load: n_mels        = 80
+whisper_model_load: ftype         = 1
+whisper_model_load: qntvr         = 0
+whisper_model_load: type          = 1 (tiny)
+whisper_model_load: adding 1608 extra tokens
+whisper_model_load: n_langs       = 99
+whisper_model_load:          CPU total size =    77.11 MB
+whisper_model_load: model size    =   77.11 MB
+whisper_backend_init_gpu: device 0: CPU (type: 0)
+whisper_backend_init_gpu: device 1: AMEVA0 (type: 3)
+whisper_backend_init_gpu: no GPU found
+whisper_backend_init: using AMEVA0 backend
+whisper_init_state: kv self size  =    3.15 MB
+whisper_init_state: kv cross size =    9.44 MB
+whisper_init_state: kv pad  size  =    2.36 MB
+whisper_init_state: compute buffer (conv)   =   13.21 MB
+whisper_init_state: compute buffer (encode) =   18.01 MB
+whisper_init_state: compute buffer (cross)  =    6.49 MB
+whisper_init_state: compute buffer (decode) =   95.91 MB
+read_audio_data: reading audio data from '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-en-16k.wav' ...
+read_audio_data: trying to decode with miniaudio
+
+system_info: n_threads = 4 / 8 | WHISPER : COREML = 0 | OPENVINO = 0 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | DOTPROD = 1 | OPENMP = 1 | REPACK = 1 | 
+
+main: processing '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-en-16k.wav' (112000 samples, 7.0 sec), 4 threads, 1 processors, 5 beams + best of 5, lang = en, task = transcribe, timestamps = 1 ...
+
+
+[00:00:00.000 --> 00:00:06.900]   And so, my fellow Americans, ask not what your country can do.
+
+whisper_print_timings:     load time =   310.45 ms
+whisper_print_timings: WHISPER_PROMPT_FALLBACK_COUNT =   0
+whisper_print_timings: WHISPER_HALLUCINATION_FALLBACK_COUNT =   0
+whisper_print_timings:      mel time =    42.73 ms
+whisper_print_timings:   sample time =   489.73 ms /    83 runs (     5.90 ms per run)
+whisper_print_timings:   encode time =  7875.45 ms /     1 runs (  7875.45 ms per run)
+whisper_print_timings:   decode time =    41.00 ms /     2 runs (    20.50 ms per run)
+whisper_print_timings:   batchd time =   821.78 ms /    79 runs (    10.40 ms per run)
+whisper_print_timings:   prompt time =     0.00 ms /     1 runs (     0.00 ms per run)
+whisper_print_timings: AMEVA_GPU_OP_COUNT = 24
+whisper_print_timings: AMEVA_DISPATCH_ATTEMPT_COUNT = 24
+whisper_print_timings: AMEVA_DISPATCH_SUCCESS_COUNT = 24
+whisper_print_timings: AMEVA_DISPATCH_FAILURE_COUNT = 0
+whisper_print_timings: AMEVA_SUPPORTS_OP_QUERY_COUNT = 2036
+whisper_print_timings: AMEVA_PATTERN_MATCH_COUNT = 120
+whisper_print_timings: WHISPER_SCHEDULER_AMEVA_NODE_COUNT = 16
+whisper_print_timings: WHISPER_SCHEDULER_CPU_NODE_COUNT = 111
+whisper_print_timings: GGML_OP_NONE_MUTATION_COUNT = 0
+whisper_print_timings:    total time =  9644.83 ms
+
+EXIT_CODE=0
+
+### 3. E2E SILENCE TRANSCRIPTION (stt-silence-16k.wav)
+whisper_init_from_file_with_params_no_state: loading model from '/data/data/com.termux/files/home/ameva-models/stt/ggml-tiny.bin'
+whisper_init_with_params_no_state: use gpu    = 1
+whisper_init_with_params_no_state: flash attn = 1
+whisper_init_with_params_no_state: gpu_device = 0
+whisper_init_with_params_no_state: dtw        = 0
+whisper_init_with_params_no_state: devices    = 1
+whisper_init_with_params_no_state: backends   = 1
+whisper_model_load: loading model
+whisper_model_load: n_vocab       = 51865
+whisper_model_load: n_audio_ctx   = 1500
+whisper_model_load: n_audio_state = 384
+whisper_model_load: n_audio_head  = 6
+whisper_model_load: n_audio_layer = 4
+whisper_model_load: n_text_ctx    = 448
+whisper_model_load: n_text_state  = 384
+whisper_model_load: n_text_head   = 6
+whisper_model_load: n_text_layer  = 4
+whisper_model_load: n_mels        = 80
+whisper_model_load: ftype         = 1
+whisper_model_load: qntvr         = 0
+whisper_model_load: type          = 1 (tiny)
+whisper_model_load: adding 1608 extra tokens
+whisper_model_load: n_langs       = 99
+whisper_model_load:          CPU total size =    77.11 MB
+whisper_model_load: model size    =   77.11 MB
+whisper_backend_init_gpu: device 0: CPU (type: 0)
+whisper_backend_init_gpu: device 1: AMEVA0 (type: 3)
+whisper_backend_init_gpu: no GPU found
+whisper_backend_init: using AMEVA0 backend
+whisper_init_state: kv self size  =    3.15 MB
+whisper_init_state: kv cross size =    9.44 MB
+whisper_init_state: kv pad  size  =    2.36 MB
+whisper_init_state: compute buffer (conv)   =   13.21 MB
+whisper_init_state: compute buffer (encode) =   18.01 MB
+whisper_init_state: compute buffer (cross)  =    6.49 MB
+whisper_init_state: compute buffer (decode) =   95.91 MB
+read_audio_data: reading audio data from '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-silence-16k.wav' ...
+read_audio_data: trying to decode with miniaudio
+
+system_info: n_threads = 4 / 8 | WHISPER : COREML = 0 | OPENVINO = 0 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | DOTPROD = 1 | OPENMP = 1 | REPACK = 1 | 
+
+main: processing '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-silence-16k.wav' (112000 samples, 7.0 sec), 4 threads, 1 processors, 5 beams + best of 5, lang = en, task = transcribe, timestamps = 1 ...
+
+
+[00:00:00.000 --> 00:00:10.000]   [BLANK_AUDIO]
+
+whisper_print_timings:     load time =   311.02 ms
+whisper_print_timings: WHISPER_PROMPT_FALLBACK_COUNT =   0
+whisper_print_timings: WHISPER_HALLUCINATION_FALLBACK_COUNT =   0
+whisper_print_timings:      mel time =    51.65 ms
+whisper_print_timings:   sample time =   126.18 ms /    25 runs (     5.05 ms per run)
+whisper_print_timings:   encode time =  7798.70 ms /     1 runs (  7798.70 ms per run)
+whisper_print_timings:   decode time =    19.89 ms /     1 runs (    19.89 ms per run)
+whisper_print_timings:   batchd time =   241.65 ms /    22 runs (    10.98 ms per run)
+whisper_print_timings:   prompt time =     0.00 ms /     1 runs (     0.00 ms per run)
+whisper_print_timings: AMEVA_GPU_OP_COUNT = 24
+whisper_print_timings: AMEVA_DISPATCH_ATTEMPT_COUNT = 24
+whisper_print_timings: AMEVA_DISPATCH_SUCCESS_COUNT = 24
+whisper_print_timings: AMEVA_DISPATCH_FAILURE_COUNT = 0
+whisper_print_timings: AMEVA_SUPPORTS_OP_QUERY_COUNT = 968
+whisper_print_timings: AMEVA_PATTERN_MATCH_COUNT = 120
+whisper_print_timings: WHISPER_SCHEDULER_AMEVA_NODE_COUNT = 16
+whisper_print_timings: WHISPER_SCHEDULER_CPU_NODE_COUNT = 111
+whisper_print_timings: GGML_OP_NONE_MUTATION_COUNT = 0
+whisper_print_timings:    total time =  8616.05 ms
+
+EXIT_CODE=0
+
+### 4. 6-STAGE FAILURE INJECTION GATES (Fail-Fast, Zero-Silent-Fallback)
+
+--- STAGE: map ---
+whisper_init_from_file_with_params_no_state: loading model from '/data/data/com.termux/files/home/ameva-models/stt/ggml-tiny.bin'
+whisper_init_with_params_no_state: use gpu    = 1
+whisper_init_with_params_no_state: flash attn = 1
+whisper_init_with_params_no_state: gpu_device = 0
+whisper_init_with_params_no_state: dtw        = 0
+whisper_init_with_params_no_state: devices    = 1
+whisper_init_with_params_no_state: backends   = 1
+whisper_model_load: loading model
+whisper_model_load: n_vocab       = 51865
+whisper_model_load: n_audio_ctx   = 1500
+whisper_model_load: n_audio_state = 384
+whisper_model_load: n_audio_head  = 6
+whisper_model_load: n_audio_layer = 4
+whisper_model_load: n_text_ctx    = 448
+whisper_model_load: n_text_state  = 384
+whisper_model_load: n_text_head   = 6
+whisper_model_load: n_text_layer  = 4
+whisper_model_load: n_mels        = 80
+whisper_model_load: ftype         = 1
+whisper_model_load: qntvr         = 0
+whisper_model_load: type          = 1 (tiny)
+whisper_model_load: adding 1608 extra tokens
+whisper_model_load: n_langs       = 99
+whisper_model_load:          CPU total size =    77.11 MB
+whisper_model_load: model size    =   77.11 MB
+whisper_backend_init_gpu: device 0: CPU (type: 0)
+whisper_backend_init_gpu: device 1: AMEVA0 (type: 3)
+whisper_backend_init_gpu: no GPU found
+whisper_backend_init: using AMEVA0 backend
+whisper_init_state: kv self size  =    3.15 MB
+whisper_init_state: kv cross size =    9.44 MB
+whisper_init_state: kv pad  size  =    2.36 MB
+whisper_init_state: compute buffer (conv)   =   13.21 MB
+whisper_init_state: compute buffer (encode) =   18.01 MB
+whisper_init_state: compute buffer (cross)  =    6.49 MB
+whisper_init_state: compute buffer (decode) =   95.91 MB
+read_audio_data: reading audio data from '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' ...
+read_audio_data: trying to decode with miniaudio
+
+system_info: n_threads = 4 / 8 | WHISPER : COREML = 0 | OPENVINO = 0 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | DOTPROD = 1 | OPENMP = 1 | REPACK = 1 | 
+
+main: processing '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' (112000 samples, 7.0 sec), 4 threads, 1 processors, 5 beams + best of 5, lang = ko, task = transcribe, timestamps = 1 ...
+
+[AMEVA_BACKEND_FAIL_INJECTION] Simulated failure at stage: map
+[AMEVA_BACKEND] FATAL: Vulkan MatMul dispatch failed
+whisper_full_with_state: failed to encode
+/data/data/com.termux/files/home/ameva-compute-stt/build-whisper-cpu/bin/whisper-cli: failed to process audio
+
+STAGE=map EXIT_CODE=10
+
+--- STAGE: flush ---
+whisper_init_from_file_with_params_no_state: loading model from '/data/data/com.termux/files/home/ameva-models/stt/ggml-tiny.bin'
+whisper_init_with_params_no_state: use gpu    = 1
+whisper_init_with_params_no_state: flash attn = 1
+whisper_init_with_params_no_state: gpu_device = 0
+whisper_init_with_params_no_state: dtw        = 0
+whisper_init_with_params_no_state: devices    = 1
+whisper_init_with_params_no_state: backends   = 1
+whisper_model_load: loading model
+whisper_model_load: n_vocab       = 51865
+whisper_model_load: n_audio_ctx   = 1500
+whisper_model_load: n_audio_state = 384
+whisper_model_load: n_audio_head  = 6
+whisper_model_load: n_audio_layer = 4
+whisper_model_load: n_text_ctx    = 448
+whisper_model_load: n_text_state  = 384
+whisper_model_load: n_text_head   = 6
+whisper_model_load: n_text_layer  = 4
+whisper_model_load: n_mels        = 80
+whisper_model_load: ftype         = 1
+whisper_model_load: qntvr         = 0
+whisper_model_load: type          = 1 (tiny)
+whisper_model_load: adding 1608 extra tokens
+whisper_model_load: n_langs       = 99
+whisper_model_load:          CPU total size =    77.11 MB
+whisper_model_load: model size    =   77.11 MB
+whisper_backend_init_gpu: device 0: CPU (type: 0)
+whisper_backend_init_gpu: device 1: AMEVA0 (type: 3)
+whisper_backend_init_gpu: no GPU found
+whisper_backend_init: using AMEVA0 backend
+whisper_init_state: kv self size  =    3.15 MB
+whisper_init_state: kv cross size =    9.44 MB
+whisper_init_state: kv pad  size  =    2.36 MB
+whisper_init_state: compute buffer (conv)   =   13.21 MB
+whisper_init_state: compute buffer (encode) =   18.01 MB
+whisper_init_state: compute buffer (cross)  =    6.49 MB
+whisper_init_state: compute buffer (decode) =   95.91 MB
+read_audio_data: reading audio data from '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' ...
+read_audio_data: trying to decode with miniaudio
+
+system_info: n_threads = 4 / 8 | WHISPER : COREML = 0 | OPENVINO = 0 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | DOTPROD = 1 | OPENMP = 1 | REPACK = 1 | 
+
+main: processing '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' (112000 samples, 7.0 sec), 4 threads, 1 processors, 5 beams + best of 5, lang = ko, task = transcribe, timestamps = 1 ...
+
+[AMEVA_BACKEND_FAIL_INJECTION] Simulated failure at stage: flush
+[AMEVA_BACKEND] FATAL: Vulkan MatMul dispatch failed
+whisper_full_with_state: failed to encode
+/data/data/com.termux/files/home/ameva-compute-stt/build-whisper-cpu/bin/whisper-cli: failed to process audio
+
+STAGE=flush EXIT_CODE=10
+
+--- STAGE: dispatch ---
+whisper_init_from_file_with_params_no_state: loading model from '/data/data/com.termux/files/home/ameva-models/stt/ggml-tiny.bin'
+whisper_init_with_params_no_state: use gpu    = 1
+whisper_init_with_params_no_state: flash attn = 1
+whisper_init_with_params_no_state: gpu_device = 0
+whisper_init_with_params_no_state: dtw        = 0
+whisper_init_with_params_no_state: devices    = 1
+whisper_init_with_params_no_state: backends   = 1
+whisper_model_load: loading model
+whisper_model_load: n_vocab       = 51865
+whisper_model_load: n_audio_ctx   = 1500
+whisper_model_load: n_audio_state = 384
+whisper_model_load: n_audio_head  = 6
+whisper_model_load: n_audio_layer = 4
+whisper_model_load: n_text_ctx    = 448
+whisper_model_load: n_text_state  = 384
+whisper_model_load: n_text_head   = 6
+whisper_model_load: n_text_layer  = 4
+whisper_model_load: n_mels        = 80
+whisper_model_load: ftype         = 1
+whisper_model_load: qntvr         = 0
+whisper_model_load: type          = 1 (tiny)
+whisper_model_load: adding 1608 extra tokens
+whisper_model_load: n_langs       = 99
+whisper_model_load:          CPU total size =    77.11 MB
+whisper_model_load: model size    =   77.11 MB
+whisper_backend_init_gpu: device 0: CPU (type: 0)
+whisper_backend_init_gpu: device 1: AMEVA0 (type: 3)
+whisper_backend_init_gpu: no GPU found
+whisper_backend_init: using AMEVA0 backend
+whisper_init_state: kv self size  =    3.15 MB
+whisper_init_state: kv cross size =    9.44 MB
+whisper_init_state: kv pad  size  =    2.36 MB
+whisper_init_state: compute buffer (conv)   =   13.21 MB
+whisper_init_state: compute buffer (encode) =   18.01 MB
+whisper_init_state: compute buffer (cross)  =    6.49 MB
+whisper_init_state: compute buffer (decode) =   95.91 MB
+read_audio_data: reading audio data from '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' ...
+read_audio_data: trying to decode with miniaudio
+
+system_info: n_threads = 4 / 8 | WHISPER : COREML = 0 | OPENVINO = 0 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | DOTPROD = 1 | OPENMP = 1 | REPACK = 1 | 
+
+main: processing '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' (112000 samples, 7.0 sec), 4 threads, 1 processors, 5 beams + best of 5, lang = ko, task = transcribe, timestamps = 1 ...
+
+[AMEVA_BACKEND_FAIL_INJECTION] Simulated failure at stage: dispatch
+[AMEVA_BACKEND] FATAL: Vulkan MatMul dispatch failed
+whisper_full_with_state: failed to encode
+/data/data/com.termux/files/home/ameva-compute-stt/build-whisper-cpu/bin/whisper-cli: failed to process audio
+
+STAGE=dispatch EXIT_CODE=10
+
+--- STAGE: wait ---
+whisper_init_from_file_with_params_no_state: loading model from '/data/data/com.termux/files/home/ameva-models/stt/ggml-tiny.bin'
+whisper_init_with_params_no_state: use gpu    = 1
+whisper_init_with_params_no_state: flash attn = 1
+whisper_init_with_params_no_state: gpu_device = 0
+whisper_init_with_params_no_state: dtw        = 0
+whisper_init_with_params_no_state: devices    = 1
+whisper_init_with_params_no_state: backends   = 1
+whisper_model_load: loading model
+whisper_model_load: n_vocab       = 51865
+whisper_model_load: n_audio_ctx   = 1500
+whisper_model_load: n_audio_state = 384
+whisper_model_load: n_audio_head  = 6
+whisper_model_load: n_audio_layer = 4
+whisper_model_load: n_text_ctx    = 448
+whisper_model_load: n_text_state  = 384
+whisper_model_load: n_text_head   = 6
+whisper_model_load: n_text_layer  = 4
+whisper_model_load: n_mels        = 80
+whisper_model_load: ftype         = 1
+whisper_model_load: qntvr         = 0
+whisper_model_load: type          = 1 (tiny)
+whisper_model_load: adding 1608 extra tokens
+whisper_model_load: n_langs       = 99
+whisper_model_load:          CPU total size =    77.11 MB
+whisper_model_load: model size    =   77.11 MB
+whisper_backend_init_gpu: device 0: CPU (type: 0)
+whisper_backend_init_gpu: device 1: AMEVA0 (type: 3)
+whisper_backend_init_gpu: no GPU found
+whisper_backend_init: using AMEVA0 backend
+whisper_init_state: kv self size  =    3.15 MB
+whisper_init_state: kv cross size =    9.44 MB
+whisper_init_state: kv pad  size  =    2.36 MB
+whisper_init_state: compute buffer (conv)   =   13.21 MB
+whisper_init_state: compute buffer (encode) =   18.01 MB
+whisper_init_state: compute buffer (cross)  =    6.49 MB
+whisper_init_state: compute buffer (decode) =   95.91 MB
+read_audio_data: reading audio data from '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' ...
+read_audio_data: trying to decode with miniaudio
+
+system_info: n_threads = 4 / 8 | WHISPER : COREML = 0 | OPENVINO = 0 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | DOTPROD = 1 | OPENMP = 1 | REPACK = 1 | 
+
+main: processing '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' (112000 samples, 7.0 sec), 4 threads, 1 processors, 5 beams + best of 5, lang = ko, task = transcribe, timestamps = 1 ...
+
+[AMEVA_BACKEND_FAIL_INJECTION] Simulated failure at stage: wait
+[AMEVA_BACKEND] FATAL: Vulkan MatMul dispatch failed
+whisper_full_with_state: failed to encode
+/data/data/com.termux/files/home/ameva-compute-stt/build-whisper-cpu/bin/whisper-cli: failed to process audio
+
+STAGE=wait EXIT_CODE=10
+
+--- STAGE: invalidate ---
+whisper_init_from_file_with_params_no_state: loading model from '/data/data/com.termux/files/home/ameva-models/stt/ggml-tiny.bin'
+whisper_init_with_params_no_state: use gpu    = 1
+whisper_init_with_params_no_state: flash attn = 1
+whisper_init_with_params_no_state: gpu_device = 0
+whisper_init_with_params_no_state: dtw        = 0
+whisper_init_with_params_no_state: devices    = 1
+whisper_init_with_params_no_state: backends   = 1
+whisper_model_load: loading model
+whisper_model_load: n_vocab       = 51865
+whisper_model_load: n_audio_ctx   = 1500
+whisper_model_load: n_audio_state = 384
+whisper_model_load: n_audio_head  = 6
+whisper_model_load: n_audio_layer = 4
+whisper_model_load: n_text_ctx    = 448
+whisper_model_load: n_text_state  = 384
+whisper_model_load: n_text_head   = 6
+whisper_model_load: n_text_layer  = 4
+whisper_model_load: n_mels        = 80
+whisper_model_load: ftype         = 1
+whisper_model_load: qntvr         = 0
+whisper_model_load: type          = 1 (tiny)
+whisper_model_load: adding 1608 extra tokens
+whisper_model_load: n_langs       = 99
+whisper_model_load:          CPU total size =    77.11 MB
+whisper_model_load: model size    =   77.11 MB
+whisper_backend_init_gpu: device 0: CPU (type: 0)
+whisper_backend_init_gpu: device 1: AMEVA0 (type: 3)
+whisper_backend_init_gpu: no GPU found
+whisper_backend_init: using AMEVA0 backend
+whisper_init_state: kv self size  =    3.15 MB
+whisper_init_state: kv cross size =    9.44 MB
+whisper_init_state: kv pad  size  =    2.36 MB
+whisper_init_state: compute buffer (conv)   =   13.21 MB
+whisper_init_state: compute buffer (encode) =   18.01 MB
+whisper_init_state: compute buffer (cross)  =    6.49 MB
+whisper_init_state: compute buffer (decode) =   95.91 MB
+read_audio_data: reading audio data from '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' ...
+read_audio_data: trying to decode with miniaudio
+
+system_info: n_threads = 4 / 8 | WHISPER : COREML = 0 | OPENVINO = 0 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | DOTPROD = 1 | OPENMP = 1 | REPACK = 1 | 
+
+main: processing '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' (112000 samples, 7.0 sec), 4 threads, 1 processors, 5 beams + best of 5, lang = ko, task = transcribe, timestamps = 1 ...
+
+[AMEVA_BACKEND_FAIL_INJECTION] Simulated failure at stage: invalidate
+[AMEVA_BACKEND] FATAL: Vulkan MatMul dispatch failed
+whisper_full_with_state: failed to encode
+/data/data/com.termux/files/home/ameva-compute-stt/build-whisper-cpu/bin/whisper-cli: failed to process audio
+
+STAGE=invalidate EXIT_CODE=10
+
+--- STAGE: readback ---
+whisper_init_from_file_with_params_no_state: loading model from '/data/data/com.termux/files/home/ameva-models/stt/ggml-tiny.bin'
+whisper_init_with_params_no_state: use gpu    = 1
+whisper_init_with_params_no_state: flash attn = 1
+whisper_init_with_params_no_state: gpu_device = 0
+whisper_init_with_params_no_state: dtw        = 0
+whisper_init_with_params_no_state: devices    = 1
+whisper_init_with_params_no_state: backends   = 1
+whisper_model_load: loading model
+whisper_model_load: n_vocab       = 51865
+whisper_model_load: n_audio_ctx   = 1500
+whisper_model_load: n_audio_state = 384
+whisper_model_load: n_audio_head  = 6
+whisper_model_load: n_audio_layer = 4
+whisper_model_load: n_text_ctx    = 448
+whisper_model_load: n_text_state  = 384
+whisper_model_load: n_text_head   = 6
+whisper_model_load: n_text_layer  = 4
+whisper_model_load: n_mels        = 80
+whisper_model_load: ftype         = 1
+whisper_model_load: qntvr         = 0
+whisper_model_load: type          = 1 (tiny)
+whisper_model_load: adding 1608 extra tokens
+whisper_model_load: n_langs       = 99
+whisper_model_load:          CPU total size =    77.11 MB
+whisper_model_load: model size    =   77.11 MB
+whisper_backend_init_gpu: device 0: CPU (type: 0)
+whisper_backend_init_gpu: device 1: AMEVA0 (type: 3)
+whisper_backend_init_gpu: no GPU found
+whisper_backend_init: using AMEVA0 backend
+whisper_init_state: kv self size  =    3.15 MB
+whisper_init_state: kv cross size =    9.44 MB
+whisper_init_state: kv pad  size  =    2.36 MB
+whisper_init_state: compute buffer (conv)   =   13.21 MB
+whisper_init_state: compute buffer (encode) =   18.01 MB
+whisper_init_state: compute buffer (cross)  =    6.49 MB
+whisper_init_state: compute buffer (decode) =   95.91 MB
+read_audio_data: reading audio data from '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' ...
+read_audio_data: trying to decode with miniaudio
+
+system_info: n_threads = 4 / 8 | WHISPER : COREML = 0 | OPENVINO = 0 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | DOTPROD = 1 | OPENMP = 1 | REPACK = 1 | 
+
+main: processing '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' (112000 samples, 7.0 sec), 4 threads, 1 processors, 5 beams + best of 5, lang = ko, task = transcribe, timestamps = 1 ...
+
+[AMEVA_BACKEND_FAIL_INJECTION] Simulated failure at stage: readback
+[AMEVA_BACKEND] FATAL: Vulkan MatMul dispatch failed
+whisper_full_with_state: failed to encode
+/data/data/com.termux/files/home/ameva-compute-stt/build-whisper-cpu/bin/whisper-cli: failed to process audio
+
+STAGE=readback EXIT_CODE=10
+
+### 5. 5-ITERATION REPEATED STABILITY TEST
+
+--- REPEAT ITERATION 1 ---
+whisper_init_from_file_with_params_no_state: loading model from '/data/data/com.termux/files/home/ameva-models/stt/ggml-tiny.bin'
+whisper_init_with_params_no_state: use gpu    = 1
+whisper_init_with_params_no_state: flash attn = 1
+whisper_init_with_params_no_state: gpu_device = 0
+whisper_init_with_params_no_state: dtw        = 0
+whisper_init_with_params_no_state: devices    = 1
+whisper_init_with_params_no_state: backends   = 1
+whisper_model_load: loading model
+whisper_model_load: n_vocab       = 51865
+whisper_model_load: n_audio_ctx   = 1500
+whisper_model_load: n_audio_state = 384
+whisper_model_load: n_audio_head  = 6
+whisper_model_load: n_audio_layer = 4
+whisper_model_load: n_text_ctx    = 448
+whisper_model_load: n_text_state  = 384
+whisper_model_load: n_text_head   = 6
+whisper_model_load: n_text_layer  = 4
+whisper_model_load: n_mels        = 80
+whisper_model_load: ftype         = 1
+whisper_model_load: qntvr         = 0
+whisper_model_load: type          = 1 (tiny)
+whisper_model_load: adding 1608 extra tokens
+whisper_model_load: n_langs       = 99
+whisper_model_load:          CPU total size =    77.11 MB
+whisper_model_load: model size    =   77.11 MB
+whisper_backend_init_gpu: device 0: CPU (type: 0)
+whisper_backend_init_gpu: device 1: AMEVA0 (type: 3)
+whisper_backend_init_gpu: no GPU found
+whisper_backend_init: using AMEVA0 backend
+whisper_init_state: kv self size  =    3.15 MB
+whisper_init_state: kv cross size =    9.44 MB
+whisper_init_state: kv pad  size  =    2.36 MB
+whisper_init_state: compute buffer (conv)   =   13.21 MB
+whisper_init_state: compute buffer (encode) =   18.01 MB
+whisper_init_state: compute buffer (cross)  =    6.49 MB
+whisper_init_state: compute buffer (decode) =   95.91 MB
+read_audio_data: reading audio data from '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' ...
+read_audio_data: trying to decode with miniaudio
+
+system_info: n_threads = 4 / 8 | WHISPER : COREML = 0 | OPENVINO = 0 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | DOTPROD = 1 | OPENMP = 1 | REPACK = 1 | 
+
+main: processing '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' (112000 samples, 7.0 sec), 4 threads, 1 processors, 5 beams + best of 5, lang = ko, task = transcribe, timestamps = 1 ...
+
+
+[00:00:00.000 --> 00:00:01.840]   배치를 준비합니다.
+[00:00:01.840 --> 00:00:04.920]   쿠팡에서 2천원이면 구입하실 수 있고요.
+[00:00:04.920 --> 00:00:06.880]   적당해 썰어주시면 됩니다.
+
+whisper_print_timings:     load time =   311.93 ms
+whisper_print_timings: WHISPER_PROMPT_FALLBACK_COUNT =   0
+whisper_print_timings: WHISPER_HALLUCINATION_FALLBACK_COUNT =   0
+whisper_print_timings:      mel time =    48.13 ms
+whisper_print_timings:   sample time =  1083.82 ms /   185 runs (     5.86 ms per run)
+whisper_print_timings:   encode time =  7868.79 ms /     1 runs (  7868.79 ms per run)
+whisper_print_timings:   decode time =   103.32 ms /     5 runs (    20.66 ms per run)
+whisper_print_timings:   batchd time =  1762.12 ms /   178 runs (     9.90 ms per run)
+whisper_print_timings:   prompt time =     0.00 ms /     1 runs (     0.00 ms per run)
+whisper_print_timings: AMEVA_GPU_OP_COUNT = 24
+whisper_print_timings: AMEVA_DISPATCH_ATTEMPT_COUNT = 24
+whisper_print_timings: AMEVA_DISPATCH_SUCCESS_COUNT = 24
+whisper_print_timings: AMEVA_DISPATCH_FAILURE_COUNT = 0
+whisper_print_timings: AMEVA_SUPPORTS_OP_QUERY_COUNT = 3994
+whisper_print_timings: AMEVA_PATTERN_MATCH_COUNT = 120
+whisper_print_timings: WHISPER_SCHEDULER_AMEVA_NODE_COUNT = 16
+whisper_print_timings: WHISPER_SCHEDULER_CPU_NODE_COUNT = 111
+whisper_print_timings: GGML_OP_NONE_MUTATION_COUNT = 0
+whisper_print_timings:    total time = 11248.21 ms
+
+REPEAT_ITER=1 EXIT_CODE=0
+
+--- REPEAT ITERATION 2 ---
+whisper_init_from_file_with_params_no_state: loading model from '/data/data/com.termux/files/home/ameva-models/stt/ggml-tiny.bin'
+whisper_init_with_params_no_state: use gpu    = 1
+whisper_init_with_params_no_state: flash attn = 1
+whisper_init_with_params_no_state: gpu_device = 0
+whisper_init_with_params_no_state: dtw        = 0
+whisper_init_with_params_no_state: devices    = 1
+whisper_init_with_params_no_state: backends   = 1
+whisper_model_load: loading model
+whisper_model_load: n_vocab       = 51865
+whisper_model_load: n_audio_ctx   = 1500
+whisper_model_load: n_audio_state = 384
+whisper_model_load: n_audio_head  = 6
+whisper_model_load: n_audio_layer = 4
+whisper_model_load: n_text_ctx    = 448
+whisper_model_load: n_text_state  = 384
+whisper_model_load: n_text_head   = 6
+whisper_model_load: n_text_layer  = 4
+whisper_model_load: n_mels        = 80
+whisper_model_load: ftype         = 1
+whisper_model_load: qntvr         = 0
+whisper_model_load: type          = 1 (tiny)
+whisper_model_load: adding 1608 extra tokens
+whisper_model_load: n_langs       = 99
+whisper_model_load:          CPU total size =    77.11 MB
+whisper_model_load: model size    =   77.11 MB
+whisper_backend_init_gpu: device 0: CPU (type: 0)
+whisper_backend_init_gpu: device 1: AMEVA0 (type: 3)
+whisper_backend_init_gpu: no GPU found
+whisper_backend_init: using AMEVA0 backend
+whisper_init_state: kv self size  =    3.15 MB
+whisper_init_state: kv cross size =    9.44 MB
+whisper_init_state: kv pad  size  =    2.36 MB
+whisper_init_state: compute buffer (conv)   =   13.21 MB
+whisper_init_state: compute buffer (encode) =   18.01 MB
+whisper_init_state: compute buffer (cross)  =    6.49 MB
+whisper_init_state: compute buffer (decode) =   95.91 MB
+read_audio_data: reading audio data from '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' ...
+read_audio_data: trying to decode with miniaudio
+
+system_info: n_threads = 4 / 8 | WHISPER : COREML = 0 | OPENVINO = 0 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | DOTPROD = 1 | OPENMP = 1 | REPACK = 1 | 
+
+main: processing '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' (112000 samples, 7.0 sec), 4 threads, 1 processors, 5 beams + best of 5, lang = ko, task = transcribe, timestamps = 1 ...
+
+
+[00:00:00.000 --> 00:00:01.840]   배치를 준비합니다.
+[00:00:01.840 --> 00:00:04.920]   쿠팡에서 2천원이면 구입하실 수 있고요.
+[00:00:04.920 --> 00:00:06.880]   적당해 썰어주시면 됩니다.
+
+whisper_print_timings:     load time =   312.52 ms
+whisper_print_timings: WHISPER_PROMPT_FALLBACK_COUNT =   0
+whisper_print_timings: WHISPER_HALLUCINATION_FALLBACK_COUNT =   0
+whisper_print_timings:      mel time =    56.10 ms
+whisper_print_timings:   sample time =  1089.08 ms /   185 runs (     5.89 ms per run)
+whisper_print_timings:   encode time =  7884.13 ms /     1 runs (  7884.13 ms per run)
+whisper_print_timings:   decode time =   101.90 ms /     5 runs (    20.38 ms per run)
+whisper_print_timings:   batchd time =  1797.09 ms /   178 runs (    10.10 ms per run)
+whisper_print_timings:   prompt time =     0.00 ms /     1 runs (     0.00 ms per run)
+whisper_print_timings: AMEVA_GPU_OP_COUNT = 24
+whisper_print_timings: AMEVA_DISPATCH_ATTEMPT_COUNT = 24
+whisper_print_timings: AMEVA_DISPATCH_SUCCESS_COUNT = 24
+whisper_print_timings: AMEVA_DISPATCH_FAILURE_COUNT = 0
+whisper_print_timings: AMEVA_SUPPORTS_OP_QUERY_COUNT = 3994
+whisper_print_timings: AMEVA_PATTERN_MATCH_COUNT = 120
+whisper_print_timings: WHISPER_SCHEDULER_AMEVA_NODE_COUNT = 16
+whisper_print_timings: WHISPER_SCHEDULER_CPU_NODE_COUNT = 111
+whisper_print_timings: GGML_OP_NONE_MUTATION_COUNT = 0
+whisper_print_timings:    total time = 11307.92 ms
+
+REPEAT_ITER=2 EXIT_CODE=0
+
+--- REPEAT ITERATION 3 ---
+whisper_init_from_file_with_params_no_state: loading model from '/data/data/com.termux/files/home/ameva-models/stt/ggml-tiny.bin'
+whisper_init_with_params_no_state: use gpu    = 1
+whisper_init_with_params_no_state: flash attn = 1
+whisper_init_with_params_no_state: gpu_device = 0
+whisper_init_with_params_no_state: dtw        = 0
+whisper_init_with_params_no_state: devices    = 1
+whisper_init_with_params_no_state: backends   = 1
+whisper_model_load: loading model
+whisper_model_load: n_vocab       = 51865
+whisper_model_load: n_audio_ctx   = 1500
+whisper_model_load: n_audio_state = 384
+whisper_model_load: n_audio_head  = 6
+whisper_model_load: n_audio_layer = 4
+whisper_model_load: n_text_ctx    = 448
+whisper_model_load: n_text_state  = 384
+whisper_model_load: n_text_head   = 6
+whisper_model_load: n_text_layer  = 4
+whisper_model_load: n_mels        = 80
+whisper_model_load: ftype         = 1
+whisper_model_load: qntvr         = 0
+whisper_model_load: type          = 1 (tiny)
+whisper_model_load: adding 1608 extra tokens
+whisper_model_load: n_langs       = 99
+whisper_model_load:          CPU total size =    77.11 MB
+whisper_model_load: model size    =   77.11 MB
+whisper_backend_init_gpu: device 0: CPU (type: 0)
+whisper_backend_init_gpu: device 1: AMEVA0 (type: 3)
+whisper_backend_init_gpu: no GPU found
+whisper_backend_init: using AMEVA0 backend
+whisper_init_state: kv self size  =    3.15 MB
+whisper_init_state: kv cross size =    9.44 MB
+whisper_init_state: kv pad  size  =    2.36 MB
+whisper_init_state: compute buffer (conv)   =   13.21 MB
+whisper_init_state: compute buffer (encode) =   18.01 MB
+whisper_init_state: compute buffer (cross)  =    6.49 MB
+whisper_init_state: compute buffer (decode) =   95.91 MB
+read_audio_data: reading audio data from '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' ...
+read_audio_data: trying to decode with miniaudio
+
+system_info: n_threads = 4 / 8 | WHISPER : COREML = 0 | OPENVINO = 0 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | DOTPROD = 1 | OPENMP = 1 | REPACK = 1 | 
+
+main: processing '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' (112000 samples, 7.0 sec), 4 threads, 1 processors, 5 beams + best of 5, lang = ko, task = transcribe, timestamps = 1 ...
+
+
+[00:00:00.000 --> 00:00:01.840]   배치를 준비합니다.
+[00:00:01.840 --> 00:00:04.920]   쿠팡에서 2천원이면 구입하실 수 있고요.
+[00:00:04.920 --> 00:00:06.880]   적당해 썰어주시면 됩니다.
+
+whisper_print_timings:     load time =   306.65 ms
+whisper_print_timings: WHISPER_PROMPT_FALLBACK_COUNT =   0
+whisper_print_timings: WHISPER_HALLUCINATION_FALLBACK_COUNT =   0
+whisper_print_timings:      mel time =    51.22 ms
+whisper_print_timings:   sample time =  1079.83 ms /   185 runs (     5.84 ms per run)
+whisper_print_timings:   encode time =  7836.20 ms /     1 runs (  7836.20 ms per run)
+whisper_print_timings:   decode time =   109.82 ms /     5 runs (    21.96 ms per run)
+whisper_print_timings:   batchd time =  1799.83 ms /   178 runs (    10.11 ms per run)
+whisper_print_timings:   prompt time =     0.00 ms /     1 runs (     0.00 ms per run)
+whisper_print_timings: AMEVA_GPU_OP_COUNT = 24
+whisper_print_timings: AMEVA_DISPATCH_ATTEMPT_COUNT = 24
+whisper_print_timings: AMEVA_DISPATCH_SUCCESS_COUNT = 24
+whisper_print_timings: AMEVA_DISPATCH_FAILURE_COUNT = 0
+whisper_print_timings: AMEVA_SUPPORTS_OP_QUERY_COUNT = 3994
+whisper_print_timings: AMEVA_PATTERN_MATCH_COUNT = 120
+whisper_print_timings: WHISPER_SCHEDULER_AMEVA_NODE_COUNT = 16
+whisper_print_timings: WHISPER_SCHEDULER_CPU_NODE_COUNT = 111
+whisper_print_timings: GGML_OP_NONE_MUTATION_COUNT = 0
+whisper_print_timings:    total time = 11253.29 ms
+
+REPEAT_ITER=3 EXIT_CODE=0
+
+--- REPEAT ITERATION 4 ---
+whisper_init_from_file_with_params_no_state: loading model from '/data/data/com.termux/files/home/ameva-models/stt/ggml-tiny.bin'
+whisper_init_with_params_no_state: use gpu    = 1
+whisper_init_with_params_no_state: flash attn = 1
+whisper_init_with_params_no_state: gpu_device = 0
+whisper_init_with_params_no_state: dtw        = 0
+whisper_init_with_params_no_state: devices    = 1
+whisper_init_with_params_no_state: backends   = 1
+whisper_model_load: loading model
+whisper_model_load: n_vocab       = 51865
+whisper_model_load: n_audio_ctx   = 1500
+whisper_model_load: n_audio_state = 384
+whisper_model_load: n_audio_head  = 6
+whisper_model_load: n_audio_layer = 4
+whisper_model_load: n_text_ctx    = 448
+whisper_model_load: n_text_state  = 384
+whisper_model_load: n_text_head   = 6
+whisper_model_load: n_text_layer  = 4
+whisper_model_load: n_mels        = 80
+whisper_model_load: ftype         = 1
+whisper_model_load: qntvr         = 0
+whisper_model_load: type          = 1 (tiny)
+whisper_model_load: adding 1608 extra tokens
+whisper_model_load: n_langs       = 99
+whisper_model_load:          CPU total size =    77.11 MB
+whisper_model_load: model size    =   77.11 MB
+whisper_backend_init_gpu: device 0: CPU (type: 0)
+whisper_backend_init_gpu: device 1: AMEVA0 (type: 3)
+whisper_backend_init_gpu: no GPU found
+whisper_backend_init: using AMEVA0 backend
+whisper_init_state: kv self size  =    3.15 MB
+whisper_init_state: kv cross size =    9.44 MB
+whisper_init_state: kv pad  size  =    2.36 MB
+whisper_init_state: compute buffer (conv)   =   13.21 MB
+whisper_init_state: compute buffer (encode) =   18.01 MB
+whisper_init_state: compute buffer (cross)  =    6.49 MB
+whisper_init_state: compute buffer (decode) =   95.91 MB
+read_audio_data: reading audio data from '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' ...
+read_audio_data: trying to decode with miniaudio
+
+system_info: n_threads = 4 / 8 | WHISPER : COREML = 0 | OPENVINO = 0 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | DOTPROD = 1 | OPENMP = 1 | REPACK = 1 | 
+
+main: processing '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' (112000 samples, 7.0 sec), 4 threads, 1 processors, 5 beams + best of 5, lang = ko, task = transcribe, timestamps = 1 ...
+
+
+[00:00:00.000 --> 00:00:01.840]   배치를 준비합니다.
+[00:00:01.840 --> 00:00:04.920]   쿠팡에서 2천원이면 구입하실 수 있고요.
+[00:00:04.920 --> 00:00:06.880]   적당해 썰어주시면 됩니다.
+
+whisper_print_timings:     load time =   310.09 ms
+whisper_print_timings: WHISPER_PROMPT_FALLBACK_COUNT =   0
+whisper_print_timings: WHISPER_HALLUCINATION_FALLBACK_COUNT =   0
+whisper_print_timings:      mel time =    49.81 ms
+whisper_print_timings:   sample time =  1079.17 ms /   185 runs (     5.83 ms per run)
+whisper_print_timings:   encode time =  7794.16 ms /     1 runs (  7794.16 ms per run)
+whisper_print_timings:   decode time =   105.22 ms /     5 runs (    21.04 ms per run)
+whisper_print_timings:   batchd time =  1797.34 ms /   178 runs (    10.10 ms per run)
+whisper_print_timings:   prompt time =     0.00 ms /     1 runs (     0.00 ms per run)
+whisper_print_timings: AMEVA_GPU_OP_COUNT = 24
+whisper_print_timings: AMEVA_DISPATCH_ATTEMPT_COUNT = 24
+whisper_print_timings: AMEVA_DISPATCH_SUCCESS_COUNT = 24
+whisper_print_timings: AMEVA_DISPATCH_FAILURE_COUNT = 0
+whisper_print_timings: AMEVA_SUPPORTS_OP_QUERY_COUNT = 3994
+whisper_print_timings: AMEVA_PATTERN_MATCH_COUNT = 120
+whisper_print_timings: WHISPER_SCHEDULER_AMEVA_NODE_COUNT = 16
+whisper_print_timings: WHISPER_SCHEDULER_CPU_NODE_COUNT = 111
+whisper_print_timings: GGML_OP_NONE_MUTATION_COUNT = 0
+whisper_print_timings:    total time = 11204.80 ms
+
+REPEAT_ITER=4 EXIT_CODE=0
+
+--- REPEAT ITERATION 5 ---
+whisper_init_from_file_with_params_no_state: loading model from '/data/data/com.termux/files/home/ameva-models/stt/ggml-tiny.bin'
+whisper_init_with_params_no_state: use gpu    = 1
+whisper_init_with_params_no_state: flash attn = 1
+whisper_init_with_params_no_state: gpu_device = 0
+whisper_init_with_params_no_state: dtw        = 0
+whisper_init_with_params_no_state: devices    = 1
+whisper_init_with_params_no_state: backends   = 1
+whisper_model_load: loading model
+whisper_model_load: n_vocab       = 51865
+whisper_model_load: n_audio_ctx   = 1500
+whisper_model_load: n_audio_state = 384
+whisper_model_load: n_audio_head  = 6
+whisper_model_load: n_audio_layer = 4
+whisper_model_load: n_text_ctx    = 448
+whisper_model_load: n_text_state  = 384
+whisper_model_load: n_text_head   = 6
+whisper_model_load: n_text_layer  = 4
+whisper_model_load: n_mels        = 80
+whisper_model_load: ftype         = 1
+whisper_model_load: qntvr         = 0
+whisper_model_load: type          = 1 (tiny)
+whisper_model_load: adding 1608 extra tokens
+whisper_model_load: n_langs       = 99
+whisper_model_load:          CPU total size =    77.11 MB
+whisper_model_load: model size    =   77.11 MB
+whisper_backend_init_gpu: device 0: CPU (type: 0)
+whisper_backend_init_gpu: device 1: AMEVA0 (type: 3)
+whisper_backend_init_gpu: no GPU found
+whisper_backend_init: using AMEVA0 backend
+whisper_init_state: kv self size  =    3.15 MB
+whisper_init_state: kv cross size =    9.44 MB
+whisper_init_state: kv pad  size  =    2.36 MB
+whisper_init_state: compute buffer (conv)   =   13.21 MB
+whisper_init_state: compute buffer (encode) =   18.01 MB
+whisper_init_state: compute buffer (cross)  =    6.49 MB
+whisper_init_state: compute buffer (decode) =   95.91 MB
+read_audio_data: reading audio data from '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' ...
+read_audio_data: trying to decode with miniaudio
+
+system_info: n_threads = 4 / 8 | WHISPER : COREML = 0 | OPENVINO = 0 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | DOTPROD = 1 | OPENMP = 1 | REPACK = 1 | 
+
+main: processing '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' (112000 samples, 7.0 sec), 4 threads, 1 processors, 5 beams + best of 5, lang = ko, task = transcribe, timestamps = 1 ...
+
+
+[00:00:00.000 --> 00:00:01.840]   배치를 준비합니다.
+[00:00:01.840 --> 00:00:04.920]   쿠팡에서 2천원이면 구입하실 수 있고요.
+[00:00:04.920 --> 00:00:06.880]   적당해 썰어주시면 됩니다.
+
+whisper_print_timings:     load time =   311.37 ms
+whisper_print_timings: WHISPER_PROMPT_FALLBACK_COUNT =   0
+whisper_print_timings: WHISPER_HALLUCINATION_FALLBACK_COUNT =   0
+whisper_print_timings:      mel time =    51.07 ms
+whisper_print_timings:   sample time =  1077.95 ms /   185 runs (     5.83 ms per run)
+whisper_print_timings:   encode time =  7781.41 ms /     1 runs (  7781.41 ms per run)
+whisper_print_timings:   decode time =   106.10 ms /     5 runs (    21.22 ms per run)
+whisper_print_timings:   batchd time =  1796.66 ms /   178 runs (    10.09 ms per run)
+whisper_print_timings:   prompt time =     0.00 ms /     1 runs (     0.00 ms per run)
+whisper_print_timings: AMEVA_GPU_OP_COUNT = 24
+whisper_print_timings: AMEVA_DISPATCH_ATTEMPT_COUNT = 24
+whisper_print_timings: AMEVA_DISPATCH_SUCCESS_COUNT = 24
+whisper_print_timings: AMEVA_DISPATCH_FAILURE_COUNT = 0
+whisper_print_timings: AMEVA_SUPPORTS_OP_QUERY_COUNT = 3994
+whisper_print_timings: AMEVA_PATTERN_MATCH_COUNT = 120
+whisper_print_timings: WHISPER_SCHEDULER_AMEVA_NODE_COUNT = 16
+whisper_print_timings: WHISPER_SCHEDULER_CPU_NODE_COUNT = 111
+whisper_print_timings: GGML_OP_NONE_MUTATION_COUNT = 0
+whisper_print_timings:    total time = 11191.62 ms
+
+REPEAT_ITER=5 EXIT_CODE=0
+
+==================================================================
+ ALL TESTS COMPLETED
+==================================================================
