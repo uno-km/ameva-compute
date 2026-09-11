@@ -1,0 +1,19 @@
+=======================================================================
+DEVICE: S25
+COMMAND: export LD_PRELOAD=/data/data/com.termux/files/usr/lib/libomp.so && export LD_LIBRARY_PATH=/data/data/com.termux/files/home/BitNet_ms/3rdparty/llama.cpp/build/bin:/data/data/com.termux/files/home/ameva-compute/build-audit:$LD_LIBRARY_PATH && export GGML_BACKEND_PATH=/data/data/com.termux/files/home/ameva-compute/build-audit/libggml-ameva.so && /data/data/com.termux/files/home/BitNet_ms/3rdparty/llama.cpp/build/bin/llama-cli --list-devices
+WORKTREE_HEAD_COMMIT: bcbf3d1a7a47179e279f1085702dcbd1908b877d
+BINARY_SOURCE_COMMIT: UNKNOWN
+SOURCE_BINARY_CORRESPONDENCE: NOT_ESTABLISHED
+BINARY_SHA256: 19437ccb66561c56a39e3d8663ce5453aa354797c8fb6060f938516d850d93ab
+MODEL_SHA256: N/A
+START_TIMESTAMP: 2026-09-11T05:11:43.415905+00:00
+END_TIMESTAMP: 2026-09-11T05:11:44.002320+00:00
+PROCESS_EXIT_CODE: 0
+=======================================================================
+[STDOUT]
+Available devices:
+  AMEVA0: AMEVA Vulkan Compute SGEMM Accelerator (0 MiB, 0 MiB free)
+
+[STDERR]
+
+=======================================================================
