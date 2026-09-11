@@ -198,6 +198,11 @@ set(AMEVA_GGML_SOURCES
     adapters/llama/ggml-ameva/ggml-ameva-device.cpp
 )
 
+if(DEFINED GGML_AMEVA_BUILD_COMMIT)
+    add_compile_definitions(GGML_AMEVA_BUILD_COMMIT="${GGML_AMEVA_BUILD_COMMIT}")
+endif()
+
+
 add_executable(test_amuda_ggml_backend
     tests/test_amuda_ggml_backend.cpp
     ${AMEVA_GGML_SOURCES}

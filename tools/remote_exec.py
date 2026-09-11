@@ -38,6 +38,11 @@ def execute_remote(
     output_raw_log_path: str = None,
     binary_remote_path: str = None,
     model_remote_path: str = None,
+    binary_source_commit: str = None,
+    source_binary_correspondence: str = None,
+    local_manifest_sha: str = None,
+    remote_manifest_sha: str = None,
+    source_manifest_match: bool = None,
     timeout_sec: int = 120
 ):
     key_file = os.path.expanduser("~/.ssh/id_rsa")
@@ -77,12 +82,20 @@ def execute_remote(
     stdout_text = stdout_bytes.decode("utf-8", errors="replace")
     stderr_text = stderr_bytes.decode("utf-8", errors="replace")
 
+    b_commit = binary_source_commit if binary_source_commit else "UNKNOWN"
+    corr = source_binary_correspondence if source_binary_correspondence else "NOT_ESTABLISHED"
+
+    manifest_lines = ""
+    if local_manifest_sha and remote_manifest_sha:
+        m_match = "true" if source_manifest_match else "false"
+        manifest_lines = f"LOCAL_SOURCE_MANIFEST_SHA256: {local_manifest_sha}\nREMOTE_SOURCE_MANIFEST_SHA256: {remote_manifest_sha}\nSOURCE_MANIFEST_MATCH: {m_match}\n"
+
     log_entry = f"""=======================================================================
 DEVICE: {device_name}
 COMMAND: {command.strip()}
 WORKTREE_HEAD_COMMIT: {source_commit}
-BINARY_SOURCE_COMMIT: UNKNOWN
-SOURCE_BINARY_CORRESPONDENCE: NOT_ESTABLISHED
+{manifest_lines}BINARY_SOURCE_COMMIT: {b_commit}
+SOURCE_BINARY_CORRESPONDENCE: {corr}
 BINARY_SHA256: {binary_sha256}
 MODEL_SHA256: {model_sha256}
 START_TIMESTAMP: {start_ts}

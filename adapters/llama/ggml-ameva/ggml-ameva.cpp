@@ -20,6 +20,12 @@ void ameva_increment_context_create_count(void);
 void ameva_increment_context_destroy_count(void);
 void ameva_increment_kernel_create_count(void);
 void ameva_increment_kernel_destroy_count(void);
+void ameva_increment_buffer_create_count(void);
+void ameva_increment_buffer_destroy_count(void);
+void ameva_increment_event_create_count(void);
+void ameva_increment_event_destroy_count(void);
+void ameva_increment_q5_0_staging_alloc_count(void);
+void ameva_increment_q5_0_staging_free_count(void);
 
 // =============================================================================
 // Standalone Minimal Q5_0 Decoder (Zero Upstream Private Symbol Dependency)
@@ -277,12 +283,28 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
         AcBuffer* temp_src0 = nullptr;
         AcBuffer* temp_src1 = nullptr;
         AcBuffer* temp_dst  = nullptr;
+        bool is_q5_0_staging = (src0->type == GGML_TYPE_Q5_0);
 
         // Cleanup lambda
         auto cleanup_temps = [&]() {
-            if (temp_src0) { ac_runtime_buffer_destroy(temp_src0); temp_src0 = nullptr; }
-            if (temp_src1) { ac_runtime_buffer_destroy(temp_src1); temp_src1 = nullptr; }
-            if (temp_dst)  { ac_runtime_buffer_destroy(temp_dst);  temp_dst = nullptr;  }
+            if (temp_src0) {
+                ac_runtime_buffer_destroy(temp_src0);
+                temp_src0 = nullptr;
+                ameva_increment_buffer_destroy_count();
+                if (is_q5_0_staging) {
+                    ameva_increment_q5_0_staging_free_count();
+                }
+            }
+            if (temp_src1) {
+                ac_runtime_buffer_destroy(temp_src1);
+                temp_src1 = nullptr;
+                ameva_increment_buffer_destroy_count();
+            }
+            if (temp_dst) {
+                ac_runtime_buffer_destroy(temp_dst);
+                temp_dst = nullptr;
+                ameva_increment_buffer_destroy_count();
+            }
         };
 
         // 1. Resolve SRC0
@@ -300,6 +322,8 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
             if (ac_runtime_buffer_create(ctx, &bdesc, &temp_src0) != AC_SUCCESS) {
                 return GGML_STATUS_FAILED;
             }
+            ameva_increment_buffer_create_count();
+            ameva_increment_q5_0_staging_alloc_count();
             void* map_ptr = nullptr;
             AcResult mres = ac_runtime_buffer_get_mapped_ptr(temp_src0, &map_ptr);
             if (mres != AC_SUCCESS || !map_ptr) {
@@ -348,6 +372,7 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
                 size_t nbytes = ggml_nbytes(src0);
                 AcBufferDesc bdesc = { AC_ABI_VERSION, sizeof(AcBufferDesc), (nbytes + 63) & ~63, AC_BUFFER_USAGE_STORAGE, 0 };
                 if (ac_runtime_buffer_create(ctx, &bdesc, &temp_src0) != AC_SUCCESS) return GGML_STATUS_FAILED;
+                ameva_increment_buffer_create_count();
                 void* map_ptr = nullptr;
                 if (ac_runtime_buffer_get_mapped_ptr(temp_src0, &map_ptr) != AC_SUCCESS || !map_ptr) {
                     cleanup_temps();
@@ -390,6 +415,7 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
                 cleanup_temps();
                 return GGML_STATUS_FAILED;
             }
+            ameva_increment_buffer_create_count();
             void* map_ptr = nullptr;
             if (ac_runtime_buffer_get_mapped_ptr(temp_src1, &map_ptr) != AC_SUCCESS || !map_ptr) {
                 cleanup_temps();
@@ -431,6 +457,7 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
                 cleanup_temps();
                 return GGML_STATUS_FAILED;
             }
+            ameva_increment_buffer_create_count();
             void* map_ptr = nullptr;
             if (ac_runtime_buffer_get_mapped_ptr(temp_dst, &map_ptr) != AC_SUCCESS || !map_ptr) {
                 cleanup_temps();
@@ -503,11 +530,15 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
             cleanup_temps();
             return GGML_STATUS_FAILED;
         }
+        if (ev) {
+            ameva_increment_event_create_count();
+        }
 
         // Failure Injection: WAIT_TIMEOUT
         uint64_t wait_timeout_ns = (fi == AMEVA_FAIL_WAIT_TIMEOUT) ? 1ULL : 5000000000ULL;
         AcResult wres = ac_runtime_event_wait(ev, wait_timeout_ns);
         ac_runtime_event_destroy(ev);
+        ameva_increment_event_destroy_count();
 
         if (wres != AC_SUCCESS) {
             fprintf(stderr, "ggml-ameva: event wait failed with code %d (FAIL-FAST)\n", wres);

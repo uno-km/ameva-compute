@@ -18,7 +18,21 @@ static std::atomic<int64_t> g_ameva_context_create_count{0};
 static std::atomic<int64_t> g_ameva_context_destroy_count{0};
 static std::atomic<int64_t> g_ameva_kernel_create_count{0};
 static std::atomic<int64_t> g_ameva_kernel_destroy_count{0};
+static std::atomic<int64_t> g_ameva_buffer_create_count{0};
+static std::atomic<int64_t> g_ameva_buffer_destroy_count{0};
+static std::atomic<int64_t> g_ameva_event_create_count{0};
+static std::atomic<int64_t> g_ameva_event_destroy_count{0};
+static std::atomic<int64_t> g_ameva_q5_0_staging_alloc_count{0};
+static std::atomic<int64_t> g_ameva_q5_0_staging_free_count{0};
 static std::atomic<int>     g_ameva_failure_injection{0};
+
+#ifndef GGML_AMEVA_BUILD_COMMIT
+#define GGML_AMEVA_BUILD_COMMIT "bcbf3d1a7a47179e279f1085702dcbd1908b877d"
+#endif
+
+const char* ggml_backend_ameva_get_build_commit(void) {
+    return GGML_AMEVA_BUILD_COMMIT;
+}
 
 int64_t ggml_backend_ameva_get_supports_query_count(void) {
     return g_ameva_supports_query_count.load();
@@ -56,12 +70,42 @@ int64_t ggml_backend_ameva_get_kernel_destroy_count(void) {
     return g_ameva_kernel_destroy_count.load();
 }
 
+int64_t ggml_backend_ameva_get_buffer_create_count(void) {
+    return g_ameva_buffer_create_count.load();
+}
+
+int64_t ggml_backend_ameva_get_buffer_destroy_count(void) {
+    return g_ameva_buffer_destroy_count.load();
+}
+
+int64_t ggml_backend_ameva_get_event_create_count(void) {
+    return g_ameva_event_create_count.load();
+}
+
+int64_t ggml_backend_ameva_get_event_destroy_count(void) {
+    return g_ameva_event_destroy_count.load();
+}
+
+int64_t ggml_backend_ameva_get_q5_0_staging_alloc_count(void) {
+    return g_ameva_q5_0_staging_alloc_count.load();
+}
+
+int64_t ggml_backend_ameva_get_q5_0_staging_free_count(void) {
+    return g_ameva_q5_0_staging_free_count.load();
+}
+
 void ggml_backend_ameva_reset_counters(void) {
     g_ameva_supports_query_count.store(0);
     g_ameva_supported_op_count.store(0);
     g_ameva_gpu_op_count.store(0);
     g_ameva_q5_0_cpu_dequant_count.store(0);
     g_ameva_f32_gpu_sgemm_dispatch_count.store(0);
+    g_ameva_buffer_create_count.store(0);
+    g_ameva_buffer_destroy_count.store(0);
+    g_ameva_event_create_count.store(0);
+    g_ameva_event_destroy_count.store(0);
+    g_ameva_q5_0_staging_alloc_count.store(0);
+    g_ameva_q5_0_staging_free_count.store(0);
 }
 
 void ameva_increment_gpu_op_count(void) {
@@ -90,6 +134,30 @@ void ameva_increment_kernel_create_count(void) {
 
 void ameva_increment_kernel_destroy_count(void) {
     g_ameva_kernel_destroy_count.fetch_add(1);
+}
+
+void ameva_increment_buffer_create_count(void) {
+    g_ameva_buffer_create_count.fetch_add(1);
+}
+
+void ameva_increment_buffer_destroy_count(void) {
+    g_ameva_buffer_destroy_count.fetch_add(1);
+}
+
+void ameva_increment_event_create_count(void) {
+    g_ameva_event_create_count.fetch_add(1);
+}
+
+void ameva_increment_event_destroy_count(void) {
+    g_ameva_event_destroy_count.fetch_add(1);
+}
+
+void ameva_increment_q5_0_staging_alloc_count(void) {
+    g_ameva_q5_0_staging_alloc_count.fetch_add(1);
+}
+
+void ameva_increment_q5_0_staging_free_count(void) {
+    g_ameva_q5_0_staging_free_count.fetch_add(1);
 }
 
 void ggml_backend_ameva_set_failure_injection(AmevaFailureInjectionPoint point) {

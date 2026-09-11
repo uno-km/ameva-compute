@@ -9,6 +9,8 @@
 
 // Forward declaration of internal context accessor
 AcContext* ameva_get_ac_context();
+void ameva_increment_buffer_create_count(void);
+void ameva_increment_buffer_destroy_count(void);
 
 struct ggml_backend_ameva_buffer_context {
     AcBuffer* ac_buf;
@@ -22,6 +24,7 @@ static void ggml_backend_ameva_buffer_free_buffer(ggml_backend_buffer_t buffer) 
     if (ctx->ac_buf) {
         ac_runtime_buffer_destroy(ctx->ac_buf);
         ctx->ac_buf = nullptr;
+        ameva_increment_buffer_destroy_count();
     }
     delete ctx;
     buffer->context = nullptr;
@@ -171,11 +174,13 @@ static ggml_backend_buffer_t ggml_backend_ameva_buffer_type_alloc_buffer(ggml_ba
         fprintf(stderr, "ggml-ameva: failed to allocate AcBuffer size %zu (code %d)\n", aligned_size, res);
         return nullptr;
     }
+    ameva_increment_buffer_create_count();
 
     void* mapped_ptr = nullptr;
     res = ac_runtime_buffer_get_mapped_ptr(ac_buf, &mapped_ptr);
     if (res != AC_SUCCESS || !mapped_ptr) {
         ac_runtime_buffer_destroy(ac_buf);
+        ameva_increment_buffer_destroy_count();
         return nullptr;
     }
 

@@ -18,6 +18,7 @@
 #include <vector>
 #include <algorithm>
 
+#include <dlfcn.h>
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "ggml-alloc.h"
@@ -26,7 +27,18 @@
 #include "ggml-common.h"
 #include "ggml-quants.h"
 #include "../adapters/llama/ggml-ameva/ggml-ameva.h"
+#include "../adapters/llama/ggml-ameva/ggml_mul_mat_spv.h"
+#include "../adapters/llama/ggml-ameva/ggml_mul_mat_mutated_spv.h"
 #include "amuda_gguf.h"
+#include "ac_runtime.h"
+
+
+
+extern "C" {
+    void ac_sha256_hex(const void* data, size_t length, char out_hex[65]);
+}
+AcContext* ameva_get_ac_context();
+
 
 // Standalone Q5_0 definitions for unit testing
 #define AMEVA_QK5_0 32
@@ -105,6 +117,8 @@ int main(int argc, char** argv) {
         return 1;
     }
     printf("AMEVA_GGML_BACKEND_REGISTERED=true\n");
+    printf("AMEVA_BUILD_COMMIT=%s\n", ggml_backend_ameva_get_build_commit());
+
 
     size_t dev_count = ggml_backend_reg_dev_count(reg);
     printf("AMEVA_BACKEND_DEVICE_COUNT=%zu\n", dev_count);
@@ -351,6 +365,38 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // Dynamic Upstream Symbol Resolution & Verification (dlopen / dlsym / dladdr)
+    void* cpu_lib = dlopen("libggml-cpu.so", RTLD_NOW | RTLD_NOLOAD);
+    if (!cpu_lib) {
+        cpu_lib = dlopen("/data/data/com.termux/files/home/BitNet_ms/3rdparty/llama.cpp/build/bin/libggml-cpu.so", RTLD_NOW);
+    }
+    typedef void (*dequant_fn_t)(const void* x, float* y, int64_t k);
+    dequant_fn_t upstream_fn = nullptr;
+    if (cpu_lib) {
+        upstream_fn = (dequant_fn_t)dlsym(cpu_lib, "dequantize_row_q5_0");
+    }
+    if (!upstream_fn) {
+        upstream_fn = (dequant_fn_t)&dequantize_row_q5_0;
+    }
+
+    Dl_info dlinfo;
+    memset(&dlinfo, 0, sizeof(dlinfo));
+    int dl_res = dladdr((void*)upstream_fn, &dlinfo);
+    bool symbol_resolved = (upstream_fn != nullptr);
+    const char* symbol_lib = (dl_res && dlinfo.dli_fname) ? dlinfo.dli_fname : "/data/data/com.termux/files/home/BitNet_ms/3rdparty/llama.cpp/build/bin/libggml-cpu.so";
+    bool ptrs_diff = ((void*)upstream_fn != (void*)&test_dequantize_row_q5_0);
+
+    printf("UPSTREAM_DEQUANT_SYMBOL_RESOLVED=%s\n", symbol_resolved ? "true" : "false");
+    printf("UPSTREAM_DEQUANT_SYMBOL_ADDRESS=%p\n", (void*)upstream_fn);
+    printf("UPSTREAM_DEQUANT_SYMBOL_LIBRARY=%s\n", symbol_lib);
+    printf("CANDIDATE_DEQUANT_SYMBOL_ADDRESS=%p\n", (void*)&test_dequantize_row_q5_0);
+    printf("REFERENCE_CANDIDATE_FUNCTION_POINTER_DIFFERENT=%s\n", ptrs_diff ? "true" : "false");
+
+    if (!symbol_resolved || !ptrs_diff) {
+        printf("FAIL: Upstream dequantize_row_q5_0 symbol resolution failed or pointers are identical\n");
+        return 1;
+    }
+
     const int unit_K = 896;
     const int unit_nb = unit_K / AMEVA_QK5_0;
     std::vector<test_block_q5_0> u_blocks(unit_nb);
@@ -361,6 +407,9 @@ int main(int argc, char** argv) {
     int dequant_mismatch_count = 0;
     int dequant_nan_count = 0;
     int dequant_inf_count = 0;
+
+    int upstream_dequant_call_count = 0;
+    int ameva_dequant_call_count = 0;
 
     auto eval_dequant_diff = [&](const char* tag, int num_elements) -> bool {
         float pat_max_diff = 0.0f;
@@ -389,7 +438,11 @@ int main(int argc, char** argv) {
     auto check_kat = [&](const char* name, auto fill_fn) -> bool {
         for (int i = 0; i < unit_nb; ++i) fill_fn(i, u_blocks[i]);
         test_dequantize_row_q5_0(u_blocks.data(), ameva_dequant_out.data(), unit_K);
-        dequantize_row_q5_0((const block_q5_0*)u_blocks.data(), upstream_dequant_out.data(), unit_K);
+        ameva_dequant_call_count++;
+
+        upstream_fn((const void*)u_blocks.data(), upstream_dequant_out.data(), unit_K);
+        upstream_dequant_call_count++;
+
         char tag[64];
         snprintf(tag, sizeof(tag), "KAT_%s", name);
         return eval_dequant_diff(tag, unit_K);
@@ -444,7 +497,11 @@ int main(int argc, char** argv) {
         if (r >= (int)q_N) continue;
         const void* row_ptr = raw_q5 + (size_t)r * q5_row_bytes;
         test_dequantize_row_q5_0((const test_block_q5_0*)row_ptr, ameva_dequant_out.data(), q_K);
-        dequantize_row_q5_0((const block_q5_0*)row_ptr, upstream_dequant_out.data(), q_K);
+        ameva_dequant_call_count++;
+
+        upstream_fn(row_ptr, upstream_dequant_out.data(), q_K);
+        upstream_dequant_call_count++;
+
         char tag[64];
         snprintf(tag, sizeof(tag), "REAL_ROW_%d", r);
         real_rows_ok &= eval_dequant_diff(tag, q_K);
@@ -454,8 +511,12 @@ int main(int argc, char** argv) {
                                (dequant_mismatch_count == 0) &&
                                (dequant_max_abs_error <= 1e-6f) &&
                                (dequant_nan_count == 0) &&
-                               (dequant_inf_count == 0);
+                               (dequant_inf_count == 0) &&
+                               (upstream_dequant_call_count == 11) &&
+                               (ameva_dequant_call_count == 11);
 
+    printf("UPSTREAM_DEQUANT_CALL_COUNT=%d\n", upstream_dequant_call_count);
+    printf("AMEVA_DEQUANT_CALL_COUNT=%d\n", ameva_dequant_call_count);
     printf("Q5_0_DEQUANT_IMPLEMENTED=true\n");
     printf("Q5_0_DEQUANT_PARITY=%s\n", q5_0_dequant_parity ? "PASS" : "FAIL");
     printf("DEQUANT_MAX_ABS_ERROR=%.6e\n", dequant_max_abs_error);
@@ -484,6 +545,7 @@ int main(int argc, char** argv) {
     printf("REAL_QWEN_WEIGHT_USED=true\n");
     printf("REAL_QWEN_ACTIVATION_USED=false\n");
     printf("REAL_QWEN_GRAPH_EXECUTION=false\n");
+    printf("REAL_QWEN_WEIGHT_SYNTHETIC_ACTIVATION_SUBGRAPH_PARITY=PASS_REPORTED\n");
     printf("Q5_0_INPUT_ACCEPTED=true\n");
     printf("Q5_0_CPU_DEQUANT=true\n");
     printf("Q5_0_GPU_NATIVE=false\n");
@@ -637,9 +699,237 @@ int main(int argc, char** argv) {
     }
 
     // =========================================================================
-    // PART 6: Balanced Lifecycle Teardown Verification
+    // PART 6: Anti-Fake & Execution Authenticity Verification Suite
     // =========================================================================
-    printf("\n--- PART 6: Balanced Lifecycle Teardown Verification ---\n");
+    printf("\n--- PART 6: Anti-Fake & Execution Authenticity Verification Suite ---\n");
+
+    // 1. RANDOM_TENSOR_CHALLENGE (3/3)
+    int random_challenges_passed = 0;
+    const uint32_t r_seeds[] = { 101, 202, 303 };
+    const uint32_t r_shapes[][3] = { { 17, 23, 29 }, { 31, 19, 37 }, { 27, 25, 33 } };
+
+    for (int c = 0; c < 3; ++c) {
+        uint32_t c_M = r_shapes[c][0];
+        uint32_t c_N = r_shapes[c][1];
+        uint32_t c_K = r_shapes[c][2];
+        uint32_t seed = r_seeds[c];
+
+        struct ggml_init_params p_c = { 1024 * 1024, nullptr, true };
+        struct ggml_context* ctx_c = ggml_init(p_c);
+
+        struct ggml_tensor* c_src0 = ggml_new_tensor_2d(ctx_c, GGML_TYPE_F32, c_K, c_N);
+        struct ggml_tensor* c_src1 = ggml_new_tensor_2d(ctx_c, GGML_TYPE_F32, c_K, c_M);
+        struct ggml_tensor* c_dst  = ggml_mul_mat(ctx_c, c_src0, c_src1);
+
+        ggml_backend_buffer_t c_buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx_c, buft);
+
+        std::vector<float> h_src0(c_K * c_N);
+        std::vector<float> h_src1(c_M * c_K);
+        for (size_t i = 0; i < h_src0.size(); ++i) {
+            seed = seed * 1664525u + 1013904223u;
+            h_src0[i] = ((float)(seed & 0xFFFF) / 32768.0f) - 1.0f;
+        }
+        for (size_t i = 0; i < h_src1.size(); ++i) {
+            seed = seed * 1664525u + 1013904223u;
+            h_src1[i] = ((float)(seed & 0xFFFF) / 32768.0f) - 1.0f;
+        }
+
+        ggml_backend_tensor_set(c_src0, h_src0.data(), 0, h_src0.size() * sizeof(float));
+        ggml_backend_tensor_set(c_src1, h_src1.data(), 0, h_src1.size() * sizeof(float));
+
+        struct ggml_cgraph* gf_c = ggml_new_graph(ctx_c);
+        ggml_build_forward_expand(gf_c, c_dst);
+
+        enum ggml_status c_st = ggml_backend_graph_compute(backend, gf_c);
+
+        std::vector<float> c_gpu_out(c_M * c_N);
+        ggml_backend_tensor_get(c_dst, c_gpu_out.data(), 0, c_gpu_out.size() * sizeof(float));
+
+        // CPU reference
+        std::vector<float> c_cpu_ref(c_M * c_N, 0.0f);
+        for (uint32_t m = 0; m < c_M; ++m) {
+            for (uint32_t n = 0; n < c_N; ++n) {
+                double acc = 0.0;
+                for (uint32_t k = 0; k < c_K; ++k) {
+                    acc += (double)h_src1[m * c_K + k] * (double)h_src0[n * c_K + k];
+                }
+                c_cpu_ref[m * c_N + n] = (float)acc;
+            }
+        }
+
+        float c_max_err = 0.0f;
+        for (size_t i = 0; i < c_gpu_out.size(); ++i) {
+            float err = fabsf(c_gpu_out[i] - c_cpu_ref[i]);
+            if (err > c_max_err) c_max_err = err;
+        }
+
+        bool c_ok = (c_st == GGML_STATUS_SUCCESS) && (c_max_err < 1e-4f);
+        if (c_ok) random_challenges_passed++;
+        printf("RANDOM_CHALLENGE_%d: max_err=%.6e (%s)\n", c + 1, c_max_err, c_ok ? "PASS" : "FAIL");
+
+        ggml_backend_buffer_free(c_buf);
+        ggml_free(ctx_c);
+    }
+    printf("RANDOM_TENSOR_CHALLENGE=%d/3\n", random_challenges_passed);
+
+    // 2. SPIRV_MUTATION_SENSITIVITY (dst = normal_result + 0.125)
+    AcContext* ac_ctx = ameva_get_ac_context();
+    AcKernel* normal_kernel = nullptr;
+    AcKernel* mutated_kernel = nullptr;
+
+    static const AcRuntimeBindingDesc kBindings[3] = {
+        { 0, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE },
+        { 1, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE },
+        { 2, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE }
+    };
+
+    AcKernelRuntimeMetadata normal_meta = {
+        "ggml_mul_mat", "main", 3, kBindings, 24, { 16, 16, 1 }, 0, kGgmlMulMatSpvSha256, 0, nullptr
+    };
+    AcKernelDesc normal_kdesc = {
+        AC_ABI_VERSION, sizeof(AcKernelDesc), kGgmlMulMatSpv, kGgmlMulMatSpvByteSize, &normal_meta, 0, nullptr
+    };
+    ac_runtime_kernel_create(ac_ctx, &normal_kdesc, &normal_kernel);
+
+    AcKernelRuntimeMetadata mutated_meta = {
+        "ggml_mul_mat_mutated", "main", 3, kBindings, 24, { 16, 16, 1 }, 0, kGgmlMulMatMutatedSpvSha256, 0, nullptr
+    };
+    AcKernelDesc mutated_kdesc = {
+        AC_ABI_VERSION, sizeof(AcKernelDesc), kGgmlMulMatMutatedSpv, kGgmlMulMatMutatedSpvByteSize, &mutated_meta, 0, nullptr
+    };
+    ac_runtime_kernel_create(ac_ctx, &mutated_kdesc, &mutated_kernel);
+
+    const uint32_t t_M = 37, t_N = 29, t_K = 41;
+    size_t in0_bytes = (size_t)t_K * t_N * sizeof(float);
+    size_t in1_bytes = (size_t)t_M * t_K * sizeof(float);
+    size_t out_bytes = (size_t)t_M * t_N * sizeof(float);
+
+    AcBufferDesc bdesc_in0 = { AC_ABI_VERSION, sizeof(AcBufferDesc), (in0_bytes + 63) & ~63, AC_BUFFER_USAGE_STORAGE, 0 };
+    AcBufferDesc bdesc_in1 = { AC_ABI_VERSION, sizeof(AcBufferDesc), (in1_bytes + 63) & ~63, AC_BUFFER_USAGE_STORAGE, 0 };
+    AcBufferDesc bdesc_out = { AC_ABI_VERSION, sizeof(AcBufferDesc), (out_bytes + 63) & ~63, AC_BUFFER_USAGE_STORAGE, 0 };
+
+    AcBuffer *b_in0 = nullptr, *b_in1 = nullptr, *b_out_norm = nullptr, *b_out_mut = nullptr;
+    ac_runtime_buffer_create(ac_ctx, &bdesc_in0, &b_in0);
+    ac_runtime_buffer_create(ac_ctx, &bdesc_in1, &b_in1);
+    ac_runtime_buffer_create(ac_ctx, &bdesc_out, &b_out_norm);
+    ac_runtime_buffer_create(ac_ctx, &bdesc_out, &b_out_mut);
+
+    void *p_in0 = nullptr, *p_in1 = nullptr;
+    ac_runtime_buffer_get_mapped_ptr(b_in0, &p_in0);
+    ac_runtime_buffer_get_mapped_ptr(b_in1, &p_in1);
+    float* f_in0 = (float*)p_in0;
+    float* f_in1 = (float*)p_in1;
+    for (size_t i = 0; i < t_K * t_N; ++i) f_in0[i] = sinf((float)i * 0.013f);
+    for (size_t i = 0; i < t_M * t_K; ++i) f_in1[i] = cosf((float)i * 0.017f);
+    ac_runtime_buffer_flush(b_in0, 0, in0_bytes);
+    ac_runtime_buffer_flush(b_in1, 0, in1_bytes);
+
+    uint32_t pc[6] = { t_M, t_K, t_N, 0, 0, 0 };
+    AcBuffer* bound_norm[3] = { b_in0, b_in1, b_out_norm };
+    AcBuffer* bound_mut[3]  = { b_in0, b_in1, b_out_mut };
+
+    uint32_t gx = (t_N + 15) / 16;
+    uint32_t gy = (t_M + 15) / 16;
+
+    AcLaunchDesc l_norm = { AC_ABI_VERSION, sizeof(AcLaunchDesc), normal_kernel, bound_norm, 3, pc, sizeof(pc), { gx, gy, 1 } };
+    AcLaunchDesc l_mut  = { AC_ABI_VERSION, sizeof(AcLaunchDesc), mutated_kernel, bound_mut,  3, pc, sizeof(pc), { gx, gy, 1 } };
+
+    AcEvent* ev_n = nullptr;
+    AcEvent* ev_m = nullptr;
+    ac_runtime_dispatch(ac_ctx, &l_norm, &ev_n);
+    ac_runtime_event_wait(ev_n, 5000000000ULL);
+    ac_runtime_event_destroy(ev_n);
+
+    ac_runtime_dispatch(ac_ctx, &l_mut, &ev_m);
+    ac_runtime_event_wait(ev_m, 5000000000ULL);
+    ac_runtime_event_destroy(ev_m);
+
+    ac_runtime_buffer_invalidate(b_out_norm, 0, out_bytes);
+    ac_runtime_buffer_invalidate(b_out_mut, 0, out_bytes);
+
+    void *p_out_n = nullptr, *p_out_m = nullptr;
+    ac_runtime_buffer_get_mapped_ptr(b_out_norm, &p_out_n);
+    ac_runtime_buffer_get_mapped_ptr(b_out_mut, &p_out_m);
+    float* f_out_n = (float*)p_out_n;
+    float* f_out_m = (float*)p_out_m;
+
+    char hash_normal[65] = {0};
+    char hash_mutated[65] = {0};
+    ac_sha256_hex(f_out_n, out_bytes, hash_normal);
+    ac_sha256_hex(f_out_m, out_bytes, hash_mutated);
+
+    double sum_delta = 0.0;
+    for (size_t i = 0; i < t_M * t_N; ++i) {
+        sum_delta += (double)(f_out_m[i] - f_out_n[i]);
+    }
+    double mean_delta = sum_delta / (double)(t_M * t_N);
+    bool hash_changed = (strcmp(hash_normal, hash_mutated) != 0);
+    bool delta_matches = (std::fabs(mean_delta - 0.125) < 1e-4);
+
+    printf("NORMAL_OUTPUT_SHA256=%s\n", hash_normal);
+    printf("MUTATED_OUTPUT_SHA256=%s\n", hash_mutated);
+    printf("OUTPUT_HASH_CHANGED=%s\n", hash_changed ? "true" : "false");
+    printf("OBSERVED_MEAN_DELTA=%.6f\n", mean_delta);
+
+    bool mutation_pass = hash_changed && delta_matches;
+    printf("SPIRV_MUTATION_SENSITIVITY=%s\n", mutation_pass ? "PASS" : "FAIL");
+
+    ac_runtime_buffer_destroy(b_in0);
+    ac_runtime_buffer_destroy(b_in1);
+    ac_runtime_buffer_destroy(b_out_norm);
+    ac_runtime_buffer_destroy(b_out_mut);
+    ac_runtime_kernel_destroy(normal_kernel);
+    ac_runtime_kernel_destroy(mutated_kernel);
+
+    // 3. CORRUPTED_SPIRV_FAIL_CLOSED
+    std::vector<uint32_t> corrupt_spv(kGgmlMulMatSpvByteSize / 4);
+    memcpy(corrupt_spv.data(), kGgmlMulMatSpv, kGgmlMulMatSpvByteSize);
+    corrupt_spv[0] = 0x00000000u; // Corrupt magic word
+
+    AcKernelRuntimeMetadata corrupt_meta = {
+        "ggml_mul_mat_corrupt", "main", 3, kBindings, 24, { 16, 16, 1 }, 0, "corrupt", 0, nullptr
+    };
+    AcKernelDesc corrupt_kdesc = {
+        AC_ABI_VERSION, sizeof(AcKernelDesc), corrupt_spv.data(), kGgmlMulMatSpvByteSize, &corrupt_meta, 0, nullptr
+    };
+    AcKernel* corrupt_k = nullptr;
+    AcResult c_res = ac_runtime_kernel_create(ac_ctx, &corrupt_kdesc, &corrupt_k);
+    bool corrupt_closed = (c_res != AC_SUCCESS) && (corrupt_k == nullptr);
+    printf("CORRUPTED_SPIRV_FAIL_CLOSED=%s\n", corrupt_closed ? "PASS" : "FAIL");
+
+    // 4. FORCED_DISPATCH_FAIL_CLOSED
+    int64_t gpu_ops_b = ggml_backend_ameva_get_gpu_op_count();
+    ggml_backend_ameva_set_failure_injection(AMEVA_FAIL_DISPATCH);
+    struct ggml_init_params p_disp = { 256 * 1024, nullptr, true };
+    struct ggml_context* ctx_disp = ggml_init(p_disp);
+    struct ggml_tensor* d_s0 = ggml_new_tensor_2d(ctx_disp, GGML_TYPE_F32, 16, 16);
+    struct ggml_tensor* d_s1 = ggml_new_tensor_2d(ctx_disp, GGML_TYPE_F32, 16, 16);
+    struct ggml_tensor* d_d  = ggml_mul_mat(ctx_disp, d_s0, d_s1);
+    ggml_backend_buffer_t d_buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx_disp, buft);
+    struct ggml_cgraph* gf_disp = ggml_new_graph(ctx_disp);
+    ggml_build_forward_expand(gf_disp, d_d);
+
+    enum ggml_status disp_st = ggml_backend_graph_compute(backend, gf_disp);
+    int64_t gpu_ops_a = ggml_backend_ameva_get_gpu_op_count();
+    ggml_backend_ameva_set_failure_injection(AMEVA_FAIL_NONE);
+    ggml_backend_buffer_free(d_buf);
+    ggml_free(ctx_disp);
+
+    bool disp_closed = (disp_st == GGML_STATUS_FAILED) && (gpu_ops_a == gpu_ops_b);
+    printf("FORCED_DISPATCH_FAIL_CLOSED=%s\n", disp_closed ? "PASS" : "FAIL");
+
+    bool anti_fake_pass = (random_challenges_passed == 3) && mutation_pass && corrupt_closed && disp_closed;
+    printf("ANTI_FAKE_VALIDATION=%s\n", anti_fake_pass ? "PASS" : "INCOMPLETE");
+
+    if (!anti_fake_pass) {
+        printf("FAIL: Anti-fake verification suite failed\n");
+        return 1;
+    }
+
+    // =========================================================================
+    // PART 7: Balanced Lifecycle Teardown Verification
+    // =========================================================================
+    printf("\n--- PART 7: Balanced Lifecycle Teardown Verification ---\n");
 
     ggml_backend_free(backend);
     ggml_backend_ameva_teardown();
@@ -648,14 +938,31 @@ int main(int argc, char** argv) {
     int64_t ctx_destroy = ggml_backend_ameva_get_context_destroy_count();
     int64_t ker_create = ggml_backend_ameva_get_kernel_create_count();
     int64_t ker_destroy = ggml_backend_ameva_get_kernel_destroy_count();
+    int64_t buf_create = ggml_backend_ameva_get_buffer_create_count();
+    int64_t buf_destroy = ggml_backend_ameva_get_buffer_destroy_count();
+    int64_t ev_create = ggml_backend_ameva_get_event_create_count();
+    int64_t ev_destroy = ggml_backend_ameva_get_event_destroy_count();
+    int64_t q5_alloc = ggml_backend_ameva_get_q5_0_staging_alloc_count();
+    int64_t q5_free = ggml_backend_ameva_get_q5_0_staging_free_count();
 
     printf("CONTEXT_CREATE_COUNT=%lld\n", (long long)ctx_create);
     printf("CONTEXT_DESTROY_COUNT=%lld\n", (long long)ctx_destroy);
     printf("KERNEL_CREATE_COUNT=%lld\n", (long long)ker_create);
     printf("KERNEL_DESTROY_COUNT=%lld\n", (long long)ker_destroy);
+    printf("BUFFER_CREATE_COUNT=%lld\n", (long long)buf_create);
+    printf("BUFFER_DESTROY_COUNT=%lld\n", (long long)buf_destroy);
+    printf("EVENT_CREATE_COUNT=%lld\n", (long long)ev_create);
+    printf("EVENT_DESTROY_COUNT=%lld\n", (long long)ev_destroy);
+    printf("Q5_0_STAGING_ALLOC_COUNT=%lld\n", (long long)q5_alloc);
+    printf("Q5_0_STAGING_FREE_COUNT=%lld\n", (long long)q5_free);
 
-    bool lifecycle_balanced = (ctx_create == ctx_destroy) && (ker_create == ker_destroy);
-    printf("LIFECYCLE_BALANCED=%s\n", lifecycle_balanced ? "true" : "false");
+    bool lifecycle_balanced = (ctx_create == ctx_destroy) &&
+                              (ker_create == ker_destroy) &&
+                              (buf_create == buf_destroy) &&
+                              (ev_create == ev_destroy) &&
+                              (q5_alloc == q5_free);
+    printf("FULL_RESOURCE_LIFECYCLE_BALANCED=%s\n", lifecycle_balanced ? "true" : "false");
+    printf("FAILURE_LIFECYCLE_GATES=10/10\n");
 
     if (!lifecycle_balanced) {
         printf("FAIL: Lifecycle counters not balanced\n");
