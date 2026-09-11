@@ -33,6 +33,10 @@ void ameva_mark_real_activation_captured(void);
 void ameva_increment_qwen_dispatch_count(void);
 void ameva_increment_dispatch_attempt_count(void);
 void ameva_increment_dispatch_success_count(void);
+void ameva_increment_prompt_phase_dispatch_count(void);
+void ameva_increment_generation_phase_dispatch_count(void);
+void ameva_increment_q5_0_execution_count(void);
+void ameva_increment_non_q5_0_execution_count(void);
 
 // =============================================================================
 // Standalone Minimal Q5_0 Decoder (Zero Upstream Private Symbol Dependency)
@@ -285,8 +289,8 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
         const char* fail_stage = getenv("AMEVA_FAIL_STAGE");
         if (fail_stage && strcmp(fail_stage, "dispatch") == 0) {
             ameva_increment_dispatch_attempt_count();
-            fprintf(stderr, "ggml-ameva [FAIL_FAST]: AMEVA_FAIL_STAGE=dispatch triggered, terminating with fail-fast exit code 1\n");
-            std::exit(1);
+            fprintf(stderr, "ggml-ameva [FAIL_FAST]: AMEVA_FAIL_STAGE=dispatch triggered, returning GGML_STATUS_FAILED\n");
+            return GGML_STATUS_FAILED;
         }
 
         // Failure Injection: TENSOR_RANGE_OOB
@@ -608,6 +612,16 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
         ameva_increment_f32_gpu_sgemm_dispatch_count();
         ameva_increment_qwen_dispatch_count();
         ameva_increment_gpu_op_count();
+        if (M > 1) {
+            ameva_increment_prompt_phase_dispatch_count();
+        } else {
+            ameva_increment_generation_phase_dispatch_count();
+        }
+        if (src0->type == GGML_TYPE_Q5_0) {
+            ameva_increment_q5_0_execution_count();
+        } else {
+            ameva_increment_non_q5_0_execution_count();
+        }
     }
 
     return GGML_STATUS_SUCCESS;

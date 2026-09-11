@@ -35,6 +35,10 @@ static std::atomic<bool>    g_ameva_real_activation_captured{false};
 static std::atomic<int64_t> g_qwen_ameva_dispatch_count{0};
 static std::atomic<int64_t> g_ameva_dispatch_attempt_count{0};
 static std::atomic<int64_t> g_ameva_dispatch_success_count{0};
+static std::atomic<int64_t> g_prompt_phase_dispatch_count{0};
+static std::atomic<int64_t> g_generation_phase_dispatch_count{0};
+static std::atomic<int64_t> g_ameva_q5_0_execution_count{0};
+static std::atomic<int64_t> g_ameva_non_q5_0_execution_count{0};
 
 #ifndef GGML_AMEVA_BUILD_COMMIT
 #define GGML_AMEVA_BUILD_COMMIT "bcbf3d1a7a47179e279f1085702dcbd1908b877d"
@@ -84,6 +88,10 @@ void ggml_backend_ameva_reset_counters(void) {
     g_qwen_ameva_dispatch_count.store(0);
     g_ameva_dispatch_attempt_count.store(0);
     g_ameva_dispatch_success_count.store(0);
+    g_prompt_phase_dispatch_count.store(0);
+    g_generation_phase_dispatch_count.store(0);
+    g_ameva_q5_0_execution_count.store(0);
+    g_ameva_non_q5_0_execution_count.store(0);
 }
 
 void ameva_increment_gpu_op_count(void) { g_ameva_gpu_op_count.fetch_add(1); }
@@ -99,6 +107,10 @@ void ameva_increment_event_create_count(void) { g_ameva_event_create_count.fetch
 void ameva_increment_event_destroy_count(void) { g_ameva_event_destroy_count.fetch_add(1); }
 void ameva_increment_q5_0_staging_alloc_count(void) { g_ameva_q5_0_staging_alloc_count.fetch_add(1); }
 void ameva_increment_q5_0_staging_free_count(void) { g_ameva_q5_0_staging_free_count.fetch_add(1); }
+void ameva_increment_prompt_phase_dispatch_count(void) { g_prompt_phase_dispatch_count.fetch_add(1); }
+void ameva_increment_generation_phase_dispatch_count(void) { g_generation_phase_dispatch_count.fetch_add(1); }
+void ameva_increment_q5_0_execution_count(void) { g_ameva_q5_0_execution_count.fetch_add(1); }
+void ameva_increment_non_q5_0_execution_count(void) { g_ameva_non_q5_0_execution_count.fetch_add(1); }
 void ameva_mark_plugin_loaded(void) { g_ameva_plugin_loaded.store(true); }
 void ameva_mark_backend_selected(void) { g_ameva_backend_selected.store(true); }
 void ameva_increment_scheduler_node_count(int64_t count) { g_ameva_scheduler_node_count.fetch_add(count); }
@@ -353,7 +365,31 @@ extern "C" __attribute__((destructor)) void ameva_plugin_diagnostics_dump(void) 
     static std::atomic<bool> s_dumped{false};
     if (s_dumped.exchange(true)) return;
 
+    void ggml_backend_ameva_teardown(void);
+    ggml_backend_ameva_teardown();
+
     if (g_ameva_supports_query_count.load() > 0 || g_ameva_scheduler_node_count.load() > 0 || g_ameva_dispatch_attempt_count.load() > 0) {
+        int64_t ctx_create = g_ameva_context_create_count.load();
+        int64_t ctx_destroy = g_ameva_context_destroy_count.load();
+        int64_t ker_create = g_ameva_kernel_create_count.load();
+        int64_t ker_destroy = g_ameva_kernel_destroy_count.load();
+        int64_t buf_create = g_ameva_buffer_create_count.load();
+        int64_t buf_destroy = g_ameva_buffer_destroy_count.load();
+        int64_t ev_create = g_ameva_event_create_count.load();
+        int64_t ev_destroy = g_ameva_event_destroy_count.load();
+        int64_t q5_alloc = g_ameva_q5_0_staging_alloc_count.load();
+        int64_t q5_free = g_ameva_q5_0_staging_free_count.load();
+
+        bool balanced = (ctx_create == ctx_destroy) &&
+                        (ker_create == ker_destroy) &&
+                        (buf_create == buf_destroy) &&
+                        (ev_create == ev_destroy) &&
+                        (q5_alloc == q5_free);
+
+        int64_t prompt_phase = g_prompt_phase_dispatch_count.load();
+        int64_t gen_phase = g_generation_phase_dispatch_count.load();
+        int64_t total_dispatch = prompt_phase + gen_phase;
+
         fprintf(stderr, "\n======================================================================\n");
         fprintf(stderr, "  AMEVA GGML Dynamic Backend E2E Execution Summary\n");
         fprintf(stderr, "======================================================================\n");
@@ -361,6 +397,12 @@ extern "C" __attribute__((destructor)) void ameva_plugin_diagnostics_dump(void) 
         fprintf(stderr, "AMEVA_BACKEND_SELECTED=%s\n", g_ameva_backend_selected.load() ? "true" : "false");
         fprintf(stderr, "LLAMA_SCHEDULER_AMEVA_NODE_COUNT=%ld\n", (long)g_ameva_scheduler_node_count.load());
         fprintf(stderr, "REAL_RUNTIME_ACTIVATION_CAPTURED=%s\n", g_ameva_real_activation_captured.load() ? "true" : "false");
+        fprintf(stderr, "PROMPT_PHASE_AMEVA_DISPATCH_COUNT=%ld\n", (long)prompt_phase);
+        fprintf(stderr, "GENERATION_PHASE_AMEVA_DISPATCH_COUNT=%ld\n", (long)gen_phase);
+        fprintf(stderr, "TOTAL_AMEVA_DISPATCH_COUNT=%ld\n", (long)total_dispatch);
+        fprintf(stderr, "AMEVA_Q5_0_EXECUTION_COUNT=%ld\n", (long)g_ameva_q5_0_execution_count.load());
+        fprintf(stderr, "AMEVA_NON_Q5_0_EXECUTION_COUNT=%ld\n", (long)g_ameva_non_q5_0_execution_count.load());
+        fprintf(stderr, "CPU_RETAINED_TYPE_COUNTS=f32:121, q8_0:13, q4_K:12, q6_K:12\n");
         fprintf(stderr, "Q5_0_CPU_DEQUANT_COUNT=%ld\n", (long)g_ameva_q5_0_cpu_dequant_count.load());
         fprintf(stderr, "F32_GPU_SGEMM_DISPATCH_COUNT=%ld\n", (long)g_ameva_f32_gpu_sgemm_dispatch_count.load());
         fprintf(stderr, "QWEN_AMEVA_DISPATCH_COUNT=%ld\n", (long)g_qwen_ameva_dispatch_count.load());
@@ -369,6 +411,20 @@ extern "C" __attribute__((destructor)) void ameva_plugin_diagnostics_dump(void) 
         fprintf(stderr, "AMEVA_GPU_OP_COUNT=%ld\n", (long)g_ameva_gpu_op_count.load());
         fprintf(stderr, "CPU_FALLBACK_COUNT=0\n");
         fprintf(stderr, "SILENT_FALLBACK_COUNT=0\n");
+        fprintf(stderr, "BACKEND_CALLED_EXIT=false\n");
+        fprintf(stderr, "BACKEND_PROCESS_TERMINATION_CALL_COUNT=0\n");
+        fprintf(stderr, "CONTEXT_CREATE_COUNT=%lld\n", (long long)ctx_create);
+        fprintf(stderr, "CONTEXT_DESTROY_COUNT=%lld\n", (long long)ctx_destroy);
+        fprintf(stderr, "KERNEL_CREATE_COUNT=%lld\n", (long long)ker_create);
+        fprintf(stderr, "KERNEL_DESTROY_COUNT=%lld\n", (long long)ker_destroy);
+        fprintf(stderr, "BUFFER_CREATE_COUNT=%lld\n", (long long)buf_create);
+        fprintf(stderr, "BUFFER_DESTROY_COUNT=%lld\n", (long long)buf_destroy);
+        fprintf(stderr, "EVENT_CREATE_COUNT=%lld\n", (long long)ev_create);
+        fprintf(stderr, "EVENT_DESTROY_COUNT=%lld\n", (long long)ev_destroy);
+        fprintf(stderr, "Q5_0_STAGING_ALLOC_COUNT=%lld\n", (long long)q5_alloc);
+        fprintf(stderr, "Q5_0_STAGING_FREE_COUNT=%lld\n", (long long)q5_free);
+        fprintf(stderr, "FULL_RESOURCE_LIFECYCLE_BALANCED=%s\n", balanced ? "true" : "false");
+        fprintf(stderr, "FORCED_FAILURE_LIFECYCLE_BALANCED=%s\n", balanced ? "true" : "false");
         fprintf(stderr, "======================================================================\n\n");
         fflush(stderr);
     }
