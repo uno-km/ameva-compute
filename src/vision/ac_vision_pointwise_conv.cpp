@@ -193,7 +193,16 @@ AcResult ac_vision_pointwise_conv_with_kernel_f32(
     size_t w_req_bytes = (size_t)w_elems * sizeof(float);
     size_t out_req_bytes = (size_t)out_elems * sizeof(float);
 
-    /* 10. Buffer size validation */
+    /* 10. Dispatch budget checks */
+    uint32_t grid_x = (params->output_channels + 15) / 16;
+    uint32_t grid_y = ((uint32_t)M64 + 15) / 16;
+    if (grid_x == 0 || grid_y == 0 ||
+        grid_x > 1048576u || grid_y > 1048576u ||
+        ((uint64_t)grid_x * (uint64_t)grid_y > 16777216ull)) {
+        return AC_ERR_INVALID_WORK_GROUP_SIZE;
+    }
+
+    /* 11. Buffer size validation */
     size_t in_buf_size = 0, w_buf_size = 0, out_buf_size = 0;
     if (ac_runtime_buffer_get_size(in_buf, &in_buf_size) != AC_SUCCESS || in_buf_size < in_req_bytes) {
         return AC_ERR_INVALID_ARGUMENT;
@@ -212,7 +221,7 @@ AcResult ac_vision_pointwise_conv_with_kernel_f32(
         }
     }
 
-    /* 11. Contiguous layout validation */
+    /* 12. Contiguous layout validation */
     if (in_desc->row_stride_bytes != 0 &&
         in_desc->row_stride_bytes != (size_t)in_desc->w * in_desc->c * sizeof(float)) {
         return AC_ERR_INVALID_ARGUMENT;
@@ -220,15 +229,6 @@ AcResult ac_vision_pointwise_conv_with_kernel_f32(
     if (out_desc->row_stride_bytes != 0 &&
         out_desc->row_stride_bytes != (size_t)out_desc->w * out_desc->c * sizeof(float)) {
         return AC_ERR_INVALID_ARGUMENT;
-    }
-
-    /* 12. Dispatch budget checks */
-    uint32_t grid_x = (params->output_channels + 15) / 16;
-    uint32_t grid_y = ((uint32_t)M64 + 15) / 16;
-    if (grid_x == 0 || grid_y == 0 ||
-        grid_x > 1048576u || grid_y > 1048576u ||
-        ((uint64_t)grid_x * (uint64_t)grid_y > 16777216ull)) {
-        return AC_ERR_INVALID_WORK_GROUP_SIZE;
     }
 
     /* 13. Forced failure injection point */

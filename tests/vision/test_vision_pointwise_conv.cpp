@@ -456,7 +456,8 @@ int main(void) {
     printf("MUTATED_NUMERICAL_PARITY=FAIL_EXPECTED\n");
     printf("SPIRV_DATAFLOW_SENSITIVITY=%s\n\n", (hash_changed && delta_match) ? "PASS" : "FAIL");
 
-    track_kernel_destroy(mutated_kernel);
+    AcResult mut_dres = track_kernel_destroy(mutated_kernel);
+    printf("DEBUG: mutated_kernel destroy res=%d, total_destroyed=%u\n\n", mut_dres, g_life.kernel_destroyed);
 
     // -------------------------------------------------------------------------
     // Gate 5: Corrupted SPIR-V & Forced Failure
@@ -624,10 +625,12 @@ int main(void) {
     AcVisionPointwiseConvParams bad_budget = params;
     bad_budget.output_channels = 20000000u; // (20M + 15)/16 > 1,048,576
     bad_budget.input_channels = C_IN;
-    AcVisionTensorDesc bad_budget_desc = weight_desc;
-    bad_budget_desc.n = bad_budget.output_channels;
+    AcVisionTensorDesc bad_budget_w_desc = weight_desc;
+    bad_budget_w_desc.n = bad_budget.output_channels;
+    AcVisionTensorDesc bad_budget_out_desc = out_desc;
+    bad_budget_out_desc.c = bad_budget.output_channels;
     test_gate("DISPATCH_BUDGET", AC_ERR_INVALID_WORK_GROUP_SIZE,
-        ac_vision_pointwise_conv_with_kernel_f32(ctx, normal_kernel, &bad_budget, buf_in, &in_desc, buf_w, &bad_budget_desc, buf_b, buf_out, &out_desc, &g_ev), g_ev);
+        ac_vision_pointwise_conv_with_kernel_f32(ctx, normal_kernel, &bad_budget, buf_in, &in_desc, buf_w, &bad_budget_w_desc, buf_b, buf_out, &bad_budget_out_desc, &g_ev), g_ev);
 
     printf("VISION_VALIDATION_GATES=%d/%d\n\n", gates_passed, total_validation_gates);
 
@@ -647,7 +650,8 @@ int main(void) {
         ac_vision_pointwise_conv_kernel_create(rb_ctx, kPointwiseConvSpv, kPointwiseConvSpvByteSize, nullptr, &rb_k);
         g_life.kernel_created++;
         // FAIL_AFTER_KERNEL_CREATE rollback
-        track_kernel_destroy(rb_k);
+        AcResult rb_res = track_kernel_destroy(rb_k);
+        printf("DEBUG: rb_k destroy res=%d, total_destroyed=%u\n", rb_res, g_life.kernel_destroyed);
         track_context_destroy(rb_ctx);
     }
 
@@ -656,7 +660,8 @@ int main(void) {
     track_buffer_destroy(buf_w);
     track_buffer_destroy(buf_b);
     track_buffer_destroy(buf_out);
-    track_kernel_destroy(normal_kernel);
+    AcResult nk_res = track_kernel_destroy(normal_kernel);
+    printf("DEBUG: normal_kernel destroy res=%d, total_destroyed=%u\n", nk_res, g_life.kernel_destroyed);
     track_context_destroy(ctx);
 
     bool lifecycle_balanced = g_life.is_balanced();
