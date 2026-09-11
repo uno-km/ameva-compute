@@ -1,0 +1,107 @@
+From fea3c77b26affbe19346c0adbe3aca140ab72c29 Mon Sep 17 00:00:00 2001
+From: UnoKim <82789634+uno-km@users.noreply.github.com>
+Date: Fri, 11 Sep 2026 11:39:34 +0900
+Subject: [PATCH] feat(stt): integrate AMEVA Vulkan hook in whisper
+
+---
+ src/CMakeLists.txt | 20 ++++++++++++++++++++
+ src/whisper.cpp    | 32 +++++++++++++++++++++++++++++++-
+ 2 files changed, 51 insertions(+), 1 deletion(-)
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 095a279..f4c4d03 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -129,6 +129,26 @@ endif()
+ find_package(Threads REQUIRED)
+ target_link_libraries(whisper PUBLIC ggml Threads::Threads)
+ 
++# AMEVA Vulkan STT Hardware Backend
++set(AMEVA_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
++if (EXISTS ${AMEVA_ROOT}/adapters/whisper/ggml-ameva/ggml-ameva.cpp)
++    message(STATUS "Integrating AMEVA Vulkan STT Backend into whisper")
++    target_sources(whisper PRIVATE
++        ${AMEVA_ROOT}/adapters/whisper/ggml-ameva/ggml-ameva.cpp
++        ${AMEVA_ROOT}/src/backend/vulkan/ac_vk_context.cpp
++        ${AMEVA_ROOT}/src/backend/vulkan/ac_vk_buffer.cpp
++        ${AMEVA_ROOT}/src/backend/vulkan/ac_vk_pipeline.cpp
++        ${AMEVA_ROOT}/src/backend/vulkan/ac_vk_dispatch.cpp
++        ${AMEVA_ROOT}/src/backend/vulkan/ac_vk_event.cpp
++        ${AMEVA_ROOT}/src/backend/vulkan/ac_vk_loader.cpp
++    )
++    target_include_directories(whisper PRIVATE
++        ${AMEVA_ROOT}/include
++        ${AMEVA_ROOT}/adapters/whisper/ggml-ameva
++    )
++    target_link_libraries(whisper PRIVATE vulkan)
++endif()
++
+ if (WHISPER_COREML)
+     target_link_libraries(whisper PRIVATE whisper.coreml)
+ endif()
+diff --git a/src/whisper.cpp b/src/whisper.cpp
+index 5ffc70a..f65bdf5 100644
+--- a/src/whisper.cpp
++++ b/src/whisper.cpp
+@@ -14,6 +14,8 @@
+ #include "openvino/whisper-openvino-encoder.h"
+ #endif
+ 
++#include "ggml-ameva.h"
++
+ #include <atomic>
+ #include <algorithm>
+ #include <cassert>
+@@ -2421,6 +2423,22 @@ static bool whisper_encode_internal(
+     if (!whisper_encode_external(wstate)) {
+         auto & sched = wstate.sched_encode.sched;
+ 
++        if (getenv("AMEVA_OFFLOAD_ENCODER")) {
++            static bool ameva_inited = false;
++            if (!ameva_inited) {
++                if (!ameva_stt_vulkan_init("/data/data/com.termux/files/home/matmul_f16_f32.spv")) {
++                    fprintf(stderr, "[AMEVA_STT] FATAL: ameva_stt_vulkan_init failed\n");
++                    exit(101);
++                }
++                ameva_inited = true;
++            }
++
++            ggml_backend_sched_set_eval_callback(sched, [](struct ggml_tensor * t, bool ask, void * user_data) -> bool {
++                (void)user_data;
++                return ameva_stt_vulkan_eval_hook(t, ask);
++            }, nullptr);
++        }
++
+         ggml_cgraph * gf = whisper_build_graph_encoder(wctx, wstate);
+ 
+         if (!ggml_backend_sched_alloc_graph(sched, gf)) {
+@@ -4282,13 +4300,25 @@ void whisper_print_timings(struct whisper_context * ctx) {
+         const int32_t n_batchd = std::max(1, ctx->state->n_batchd);
+         const int32_t n_prompt = std::max(1, ctx->state->n_prompt);
+ 
+-        WHISPER_LOG_INFO("%s:     fallbacks = %3d p / %3d h\n", __func__, ctx->state->n_fail_p, ctx->state->n_fail_h);
++        WHISPER_LOG_INFO("%s: WHISPER_PROMPT_FALLBACK_COUNT = %3d\n", __func__, ctx->state->n_fail_p);
++        WHISPER_LOG_INFO("%s: WHISPER_HALLUCINATION_FALLBACK_COUNT = %3d\n", __func__, ctx->state->n_fail_h);
+         WHISPER_LOG_INFO("%s:      mel time = %8.2f ms\n", __func__, ctx->state->t_mel_us / 1000.0f);
+         WHISPER_LOG_INFO("%s:   sample time = %8.2f ms / %5d runs ( %8.2f ms per run)\n", __func__, 1e-3f * ctx->state->t_sample_us, n_sample, 1e-3f * ctx->state->t_sample_us / n_sample);
+         WHISPER_LOG_INFO("%s:   encode time = %8.2f ms / %5d runs ( %8.2f ms per run)\n", __func__, 1e-3f * ctx->state->t_encode_us, n_encode, 1e-3f * ctx->state->t_encode_us / n_encode);
+         WHISPER_LOG_INFO("%s:   decode time = %8.2f ms / %5d runs ( %8.2f ms per run)\n", __func__, 1e-3f * ctx->state->t_decode_us, n_decode, 1e-3f * ctx->state->t_decode_us / n_decode);
+         WHISPER_LOG_INFO("%s:   batchd time = %8.2f ms / %5d runs ( %8.2f ms per run)\n", __func__, 1e-3f * ctx->state->t_batchd_us, n_batchd, 1e-3f * ctx->state->t_batchd_us / n_batchd);
+         WHISPER_LOG_INFO("%s:   prompt time = %8.2f ms / %5d runs ( %8.2f ms per run)\n", __func__, 1e-3f * ctx->state->t_prompt_us, n_prompt, 1e-3f * ctx->state->t_prompt_us / n_prompt);
++        if (getenv("AMEVA_OFFLOAD_ENCODER")) {
++            AmevaSttStats stats = {};
++            ameva_stt_vulkan_get_stats(&stats);
++            WHISPER_LOG_INFO("%s: AMEVA_GPU_OP_COUNT = %llu\n", __func__, (unsigned long long)stats.intercept_success_count);
++            WHISPER_LOG_INFO("%s: AMEVA_INTERCEPT_ATTEMPT_COUNT = %llu\n", __func__, (unsigned long long)stats.intercept_attempt_count);
++            WHISPER_LOG_INFO("%s: AMEVA_INTERCEPT_SUCCESS_COUNT = %llu\n", __func__, (unsigned long long)stats.intercept_success_count);
++            WHISPER_LOG_INFO("%s: AMEVA_INTERCEPT_FAILURE_COUNT = %llu\n", __func__, (unsigned long long)stats.intercept_failure_count);
++            WHISPER_LOG_INFO("%s: AMEVA_CPU_FALLBACK_COUNT = %llu\n", __func__, (unsigned long long)stats.cpu_fallback_count);
++            WHISPER_LOG_INFO("%s: AMEVA_SILENT_FALLBACK_COUNT = %llu\n", __func__, (unsigned long long)stats.silent_fallback_count);
++            WHISPER_LOG_INFO("%s: GRAPH_MUTATION_LEAK_COUNT = %llu\n", __func__, (unsigned long long)stats.graph_mutation_leak_count);
++        }
+     }
+     WHISPER_LOG_INFO("%s:    total time = %8.2f ms\n", __func__, (t_end_us - ctx->t_start_us)/1000.0f);
+ }
+-- 
+2.54.0.windows.1
+

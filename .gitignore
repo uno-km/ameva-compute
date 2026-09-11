@@ -14,8 +14,9 @@ models/*.bin
 tests/fixtures/stt/*.wav
 *.wav
 
-# Third-party submodules or clones
-third_party/
+# Third-party dependencies
+third_party/*
+!third_party/whisper.cpp
 
 # Local cache & temporary files
 .cache/
