@@ -14,5 +14,6 @@ session*transcript*.jsonl
 scratch/
 __pycache__/
 *.pyc
+docs/evidence/vision/vision_source_code_snapshot.md
 
 

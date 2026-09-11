@@ -349,6 +349,24 @@ AcResult ac_vision_concat2_device_f32(
  * ============================================================================= */
 
 typedef struct {
+    uint32_t in_h;
+    uint32_t in_w;
+    uint32_t channels;
+    uint32_t out_h;
+    uint32_t out_w;
+    uint32_t stride_h;
+    uint32_t stride_w;
+    uint32_t kernel_h;
+    uint32_t kernel_w;
+    uint32_t pad_top;
+    uint32_t pad_left;
+} AcVisionMaxPoolPushConstants;
+
+#if defined(__cplusplus)
+static_assert(sizeof(AcVisionMaxPoolPushConstants) == 44, "AcVisionMaxPoolPushConstants must be exactly 44 bytes");
+#endif
+
+typedef struct {
     uint32_t abi_version;
     uint32_t struct_size;
     uint32_t in_h;
@@ -356,9 +374,14 @@ typedef struct {
     uint32_t channels;
     uint32_t out_h;
     uint32_t out_w;
-    uint32_t stride;
-    uint32_t kernel_size;
-    uint32_t pad;
+    uint32_t stride_h;
+    uint32_t stride_w;
+    uint32_t kernel_h;
+    uint32_t kernel_w;
+    uint32_t pad_top;
+    uint32_t pad_left;
+    uint32_t pad_bottom;
+    uint32_t pad_right;
 } AcVisionMaxPool2dParams;
 
 AcResult ac_vision_maxpool2d_kernel_create(

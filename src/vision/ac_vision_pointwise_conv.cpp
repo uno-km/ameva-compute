@@ -41,7 +41,7 @@ static const AcKernelRuntimeMetadata kDefaultMaxPool2dMetadata = {
     "main",
     2,
     kMaxPool2dBindings,
-    sizeof(uint32_t) * 8, /* push_constant_size: in_h, in_w, channels, out_h, out_w, stride, kernel_size, pad */
+    sizeof(AcVisionMaxPoolPushConstants), /* push_constant_size: 44 bytes */
     { 8, 8, 4 },
     0,
     kMaxPool3NhwcSpvSha256,
@@ -1088,6 +1088,30 @@ AcResult ac_vision_maxpool2d_kernel_destroy(AcKernel* kernel) {
     return ac_runtime_kernel_destroy(kernel);
 }
 
+static bool checked_pool_output_size(
+    uint32_t input,
+    uint32_t pad_before,
+    uint32_t pad_after,
+    uint32_t kernel,
+    uint32_t stride,
+    uint32_t* output)
+{
+    if (!output || kernel == 0 || stride == 0) {
+        return false;
+    }
+    uint64_t padded = (uint64_t)input + pad_before + pad_after;
+    if (padded < kernel) {
+        return false;
+    }
+    uint64_t numer = padded - kernel;
+    uint64_t out_val = (numer + stride - 1) / stride + 1;
+    if (out_val > UINT32_MAX) {
+        return false;
+    }
+    *output = (uint32_t)out_val;
+    return true;
+}
+
 AcResult ac_vision_maxpool2d_device_f32(
     AcContext* ctx,
     AcKernel* kernel,
@@ -1105,13 +1129,40 @@ AcResult ac_vision_maxpool2d_device_f32(
     if (params->abi_version != AC_VISION_ABI_VERSION || params->struct_size != sizeof(AcVisionMaxPool2dParams)) {
         return AC_ERR_INVALID_ARGUMENT;
     }
+    if (params->kernel_h == 0 || params->kernel_w == 0 || params->stride_h == 0 || params->stride_w == 0) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
     if (params->in_h == 0 || params->in_w == 0 || params->channels == 0 ||
-        params->out_h == 0 || params->out_w == 0 || params->stride == 0 || params->kernel_size == 0) {
+        params->out_h == 0 || params->out_w == 0) {
         return AC_ERR_INVALID_ARGUMENT;
     }
 
-    size_t in_req = (size_t)params->in_h * params->in_w * params->channels * sizeof(float);
-    size_t out_req = (size_t)params->out_h * params->out_w * params->channels * sizeof(float);
+    uint32_t exp_out_h = 0;
+    uint32_t exp_out_w = 0;
+    if (!checked_pool_output_size(params->in_h, params->pad_top, params->pad_bottom,
+                                  params->kernel_h, params->stride_h, &exp_out_h) ||
+        !checked_pool_output_size(params->in_w, params->pad_left, params->pad_right,
+                                  params->kernel_w, params->stride_w, &exp_out_w)) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (params->out_h != exp_out_h || params->out_w != exp_out_w) {
+        return AC_ERR_INVALID_SHAPE;
+    }
+
+    uint64_t in_hw = (uint64_t)params->in_h * (uint64_t)params->in_w;
+    if (params->in_w != 0 && in_hw / params->in_w != params->in_h) return AC_ERR_INVALID_ARGUMENT;
+    uint64_t in_elems = in_hw * (uint64_t)params->channels;
+    if (params->channels != 0 && in_elems / params->channels != in_hw) return AC_ERR_INVALID_ARGUMENT;
+    if (in_elems > (UINT32_MAX / sizeof(float))) return AC_ERR_INVALID_ARGUMENT;
+
+    uint64_t out_hw = (uint64_t)params->out_h * (uint64_t)params->out_w;
+    if (params->out_w != 0 && out_hw / params->out_w != params->out_h) return AC_ERR_INVALID_ARGUMENT;
+    uint64_t out_elems = out_hw * (uint64_t)params->channels;
+    if (params->channels != 0 && out_elems / params->channels != out_hw) return AC_ERR_INVALID_ARGUMENT;
+    if (out_elems > (UINT32_MAX / sizeof(float))) return AC_ERR_INVALID_ARGUMENT;
+
+    size_t in_req = (size_t)in_elems * sizeof(float);
+    size_t out_req = (size_t)out_elems * sizeof(float);
     size_t in_sz = 0, out_sz = 0;
     if (ac_runtime_buffer_get_size(in_buf, &in_sz) != AC_SUCCESS || in_sz < in_req) return AC_ERR_INVALID_ARGUMENT;
     if (ac_runtime_buffer_get_size(out_buf, &out_sz) != AC_SUCCESS || out_sz < out_req) return AC_ERR_INVALID_ARGUMENT;
@@ -1120,16 +1171,27 @@ AcResult ac_vision_maxpool2d_device_f32(
     uint32_t grid_y = (params->out_h + 7) / 8;
     uint32_t grid_z = (params->channels + 3) / 4;
 
+    uint64_t grid_xy = (uint64_t)grid_x * (uint64_t)grid_y;
+    if (grid_y != 0 && grid_xy / grid_y != grid_x) return AC_ERR_INVALID_WORK_GROUP_SIZE;
+    uint64_t total_groups = grid_xy * (uint64_t)grid_z;
+    if (grid_z != 0 && total_groups / grid_z != grid_xy) return AC_ERR_INVALID_WORK_GROUP_SIZE;
+    if (grid_x > 65535 || grid_y > 65535 || grid_z > 65535 || total_groups > UINT32_MAX) {
+        return AC_ERR_INVALID_WORK_GROUP_SIZE;
+    }
+
     AcBuffer* bound_buffers[2] = { in_buf, out_buf };
-    uint32_t push_constants[8] = {
+    AcVisionMaxPoolPushConstants pc = {
         params->in_h,
         params->in_w,
         params->channels,
         params->out_h,
         params->out_w,
-        params->stride,
-        params->kernel_size,
-        params->pad
+        params->stride_h,
+        params->stride_w,
+        params->kernel_h,
+        params->kernel_w,
+        params->pad_top,
+        params->pad_left
     };
 
     AcLaunchDesc ldesc = {};
@@ -1138,8 +1200,8 @@ AcResult ac_vision_maxpool2d_device_f32(
     ldesc.kernel = kernel;
     ldesc.buffer_count = 2;
     ldesc.buffers = bound_buffers;
-    ldesc.push_constants = push_constants;
-    ldesc.push_constants_size = sizeof(push_constants);
+    ldesc.push_constants = &pc;
+    ldesc.push_constants_size = sizeof(pc);
     ldesc.grid_dim = (AcDim3){ grid_x, grid_y, grid_z };
 
     return ac_runtime_dispatch(ctx, &ldesc, out_event);
