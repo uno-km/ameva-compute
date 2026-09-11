@@ -1,0 +1,372 @@
+================================================================================
+AMEVA COMPUTE - STT A53 FAILURE INJECTION RAW EVIDENCE LOG
+================================================================================
+SOURCE_COMMIT: fea3c77b26affbe19346c0adbe3aca140ab72c29 (third_party/whisper.cpp hook) + 837e4540436232b9c7f631499bfc09c0217e0fea (adapters/whisper/ggml-ameva)
+BINARY_SHA256: a0b97472ffcb8a14d5cbaece189a84a451672d27fd14b26a6a8e6598aaa48016
+MODEL_SHA256: be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21
+TOTAL_STAGES: 6
+
+--- [STAGE 1/6: CONTEXT] ---
+COMMAND: AMEVA_OFFLOAD_ENCODER=1 AMEVA_FAIL_STAGE=context /data/data/com.termux/files/home/ameva-compute-stt/build-whisper-cpu/bin/whisper-cli -m /data/data/com.termux/files/home/ameva-models/stt/ggml-tiny.bin -f /data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav -l ko -t 4
+SOURCE_COMMIT: fea3c77b26affbe19346c0adbe3aca140ab72c29 (third_party/whisper.cpp hook) + 837e4540436232b9c7f631499bfc09c0217e0fea (adapters/whisper/ggml-ameva)
+BINARY_SHA256: a0b97472ffcb8a14d5cbaece189a84a451672d27fd14b26a6a8e6598aaa48016
+MODEL_SHA256: be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21
+START_TIMESTAMP: 2026-09-11T04:16:57.616638+00:00
+END_TIMESTAMP: 2026-09-11T04:16:58.404660+00:00
+PROCESS_EXIT_CODE: 42
+[STDOUT]
+(empty)
+[STDERR]
+whisper_init_from_file_with_params_no_state: loading model from '/data/data/com.termux/files/home/ameva-models/stt/ggml-tiny.bin'
+whisper_init_with_params_no_state: use gpu    = 1
+whisper_init_with_params_no_state: flash attn = 1
+whisper_init_with_params_no_state: gpu_device = 0
+whisper_init_with_params_no_state: dtw        = 0
+whisper_init_with_params_no_state: devices    = 1
+whisper_init_with_params_no_state: backends   = 1
+whisper_model_load: loading model
+whisper_model_load: n_vocab       = 51865
+whisper_model_load: n_audio_ctx   = 1500
+whisper_model_load: n_audio_state = 384
+whisper_model_load: n_audio_head  = 6
+whisper_model_load: n_audio_layer = 4
+whisper_model_load: n_text_ctx    = 448
+whisper_model_load: n_text_state  = 384
+whisper_model_load: n_text_head   = 6
+whisper_model_load: n_text_layer  = 4
+whisper_model_load: n_mels        = 80
+whisper_model_load: ftype         = 1
+whisper_model_load: qntvr         = 0
+whisper_model_load: type          = 1 (tiny)
+whisper_model_load: adding 1608 extra tokens
+whisper_model_load: n_langs       = 99
+whisper_model_load:          CPU total size =    77.11 MB
+whisper_model_load: model size    =   77.11 MB
+whisper_backend_init_gpu: device 0: CPU (type: 0)
+whisper_backend_init_gpu: no GPU found
+whisper_init_state: kv self size  =    3.15 MB
+whisper_init_state: kv cross size =    9.44 MB
+whisper_init_state: kv pad  size  =    2.36 MB
+whisper_init_state: compute buffer (conv)   =   13.21 MB
+whisper_init_state: compute buffer (encode) =   17.72 MB
+whisper_init_state: compute buffer (cross)  =    3.89 MB
+whisper_init_state: compute buffer (decode) =   95.91 MB
+read_audio_data: reading audio data from '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' ...
+read_audio_data: trying to decode with miniaudio
+
+system_info: n_threads = 4 / 8 | WHISPER : COREML = 0 | OPENVINO = 0 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | DOTPROD = 1 | OPENMP = 1 | REPACK = 1 | 
+
+main: processing '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' (112000 samples, 7.0 sec), 4 threads, 1 processors, 5 beams + best of 5, lang = ko, task = transcribe, timestamps = 1 ...
+
+[AMEVA_FAIL_INJECTION] Injected simulated failure at stage: context
+PROCESS_EXIT_CODE=42
+ORIGINAL_OP_RESTORED=true
+AMEVA_SILENT_FALLBACK_COUNT=0
+GRAPH_MUTATION_LEAK_COUNT=0
+
+--- [STAGE 2/6: KERNEL] ---
+COMMAND: AMEVA_OFFLOAD_ENCODER=1 AMEVA_FAIL_STAGE=kernel /data/data/com.termux/files/home/ameva-compute-stt/build-whisper-cpu/bin/whisper-cli -m /data/data/com.termux/files/home/ameva-models/stt/ggml-tiny.bin -f /data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav -l ko -t 4
+SOURCE_COMMIT: fea3c77b26affbe19346c0adbe3aca140ab72c29 (third_party/whisper.cpp hook) + 837e4540436232b9c7f631499bfc09c0217e0fea (adapters/whisper/ggml-ameva)
+BINARY_SHA256: a0b97472ffcb8a14d5cbaece189a84a451672d27fd14b26a6a8e6598aaa48016
+MODEL_SHA256: be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21
+START_TIMESTAMP: 2026-09-11T04:16:58.405032+00:00
+END_TIMESTAMP: 2026-09-11T04:16:59.278991+00:00
+PROCESS_EXIT_CODE: 42
+[STDOUT]
+(empty)
+[STDERR]
+whisper_init_from_file_with_params_no_state: loading model from '/data/data/com.termux/files/home/ameva-models/stt/ggml-tiny.bin'
+whisper_init_with_params_no_state: use gpu    = 1
+whisper_init_with_params_no_state: flash attn = 1
+whisper_init_with_params_no_state: gpu_device = 0
+whisper_init_with_params_no_state: dtw        = 0
+whisper_init_with_params_no_state: devices    = 1
+whisper_init_with_params_no_state: backends   = 1
+whisper_model_load: loading model
+whisper_model_load: n_vocab       = 51865
+whisper_model_load: n_audio_ctx   = 1500
+whisper_model_load: n_audio_state = 384
+whisper_model_load: n_audio_head  = 6
+whisper_model_load: n_audio_layer = 4
+whisper_model_load: n_text_ctx    = 448
+whisper_model_load: n_text_state  = 384
+whisper_model_load: n_text_head   = 6
+whisper_model_load: n_text_layer  = 4
+whisper_model_load: n_mels        = 80
+whisper_model_load: ftype         = 1
+whisper_model_load: qntvr         = 0
+whisper_model_load: type          = 1 (tiny)
+whisper_model_load: adding 1608 extra tokens
+whisper_model_load: n_langs       = 99
+whisper_model_load:          CPU total size =    77.11 MB
+whisper_model_load: model size    =   77.11 MB
+whisper_backend_init_gpu: device 0: CPU (type: 0)
+whisper_backend_init_gpu: no GPU found
+whisper_init_state: kv self size  =    3.15 MB
+whisper_init_state: kv cross size =    9.44 MB
+whisper_init_state: kv pad  size  =    2.36 MB
+whisper_init_state: compute buffer (conv)   =   13.21 MB
+whisper_init_state: compute buffer (encode) =   17.72 MB
+whisper_init_state: compute buffer (cross)  =    3.89 MB
+whisper_init_state: compute buffer (decode) =   95.91 MB
+read_audio_data: reading audio data from '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' ...
+read_audio_data: trying to decode with miniaudio
+
+system_info: n_threads = 4 / 8 | WHISPER : COREML = 0 | OPENVINO = 0 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | DOTPROD = 1 | OPENMP = 1 | REPACK = 1 | 
+
+main: processing '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' (112000 samples, 7.0 sec), 4 threads, 1 processors, 5 beams + best of 5, lang = ko, task = transcribe, timestamps = 1 ...
+
+[AMEVA_STT] Initializing AMEVA Vulkan hardware backend...
+[AMEVA_STT] Physical Device: Mali-G68 (Driver: 0x08001000)
+[AMEVA_FAIL_INJECTION] Injected simulated failure at stage: kernel
+PROCESS_EXIT_CODE=42
+ORIGINAL_OP_RESTORED=true
+AMEVA_SILENT_FALLBACK_COUNT=0
+GRAPH_MUTATION_LEAK_COUNT=0
+
+--- [STAGE 3/6: BUFFER] ---
+COMMAND: AMEVA_OFFLOAD_ENCODER=1 AMEVA_FAIL_STAGE=buffer /data/data/com.termux/files/home/ameva-compute-stt/build-whisper-cpu/bin/whisper-cli -m /data/data/com.termux/files/home/ameva-models/stt/ggml-tiny.bin -f /data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav -l ko -t 4
+SOURCE_COMMIT: fea3c77b26affbe19346c0adbe3aca140ab72c29 (third_party/whisper.cpp hook) + 837e4540436232b9c7f631499bfc09c0217e0fea (adapters/whisper/ggml-ameva)
+BINARY_SHA256: a0b97472ffcb8a14d5cbaece189a84a451672d27fd14b26a6a8e6598aaa48016
+MODEL_SHA256: be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21
+START_TIMESTAMP: 2026-09-11T04:16:59.279404+00:00
+END_TIMESTAMP: 2026-09-11T04:17:00.214027+00:00
+PROCESS_EXIT_CODE: 42
+[STDOUT]
+(empty)
+[STDERR]
+whisper_init_from_file_with_params_no_state: loading model from '/data/data/com.termux/files/home/ameva-models/stt/ggml-tiny.bin'
+whisper_init_with_params_no_state: use gpu    = 1
+whisper_init_with_params_no_state: flash attn = 1
+whisper_init_with_params_no_state: gpu_device = 0
+whisper_init_with_params_no_state: dtw        = 0
+whisper_init_with_params_no_state: devices    = 1
+whisper_init_with_params_no_state: backends   = 1
+whisper_model_load: loading model
+whisper_model_load: n_vocab       = 51865
+whisper_model_load: n_audio_ctx   = 1500
+whisper_model_load: n_audio_state = 384
+whisper_model_load: n_audio_head  = 6
+whisper_model_load: n_audio_layer = 4
+whisper_model_load: n_text_ctx    = 448
+whisper_model_load: n_text_state  = 384
+whisper_model_load: n_text_head   = 6
+whisper_model_load: n_text_layer  = 4
+whisper_model_load: n_mels        = 80
+whisper_model_load: ftype         = 1
+whisper_model_load: qntvr         = 0
+whisper_model_load: type          = 1 (tiny)
+whisper_model_load: adding 1608 extra tokens
+whisper_model_load: n_langs       = 99
+whisper_model_load:          CPU total size =    77.11 MB
+whisper_model_load: model size    =   77.11 MB
+whisper_backend_init_gpu: device 0: CPU (type: 0)
+whisper_backend_init_gpu: no GPU found
+whisper_init_state: kv self size  =    3.15 MB
+whisper_init_state: kv cross size =    9.44 MB
+whisper_init_state: kv pad  size  =    2.36 MB
+whisper_init_state: compute buffer (conv)   =   13.21 MB
+whisper_init_state: compute buffer (encode) =   17.72 MB
+whisper_init_state: compute buffer (cross)  =    3.89 MB
+whisper_init_state: compute buffer (decode) =   95.91 MB
+read_audio_data: reading audio data from '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' ...
+read_audio_data: trying to decode with miniaudio
+
+system_info: n_threads = 4 / 8 | WHISPER : COREML = 0 | OPENVINO = 0 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | DOTPROD = 1 | OPENMP = 1 | REPACK = 1 | 
+
+main: processing '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' (112000 samples, 7.0 sec), 4 threads, 1 processors, 5 beams + best of 5, lang = ko, task = transcribe, timestamps = 1 ...
+
+[AMEVA_STT] Initializing AMEVA Vulkan hardware backend...
+[AMEVA_STT] Physical Device: Mali-G68 (Driver: 0x08001000)
+[AMEVA_FAIL_INJECTION] Injected simulated failure at stage: buffer
+PROCESS_EXIT_CODE=42
+ORIGINAL_OP_RESTORED=true
+AMEVA_SILENT_FALLBACK_COUNT=0
+GRAPH_MUTATION_LEAK_COUNT=0
+
+--- [STAGE 4/6: DISPATCH] ---
+COMMAND: AMEVA_OFFLOAD_ENCODER=1 AMEVA_FAIL_STAGE=dispatch /data/data/com.termux/files/home/ameva-compute-stt/build-whisper-cpu/bin/whisper-cli -m /data/data/com.termux/files/home/ameva-models/stt/ggml-tiny.bin -f /data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav -l ko -t 4
+SOURCE_COMMIT: fea3c77b26affbe19346c0adbe3aca140ab72c29 (third_party/whisper.cpp hook) + 837e4540436232b9c7f631499bfc09c0217e0fea (adapters/whisper/ggml-ameva)
+BINARY_SHA256: a0b97472ffcb8a14d5cbaece189a84a451672d27fd14b26a6a8e6598aaa48016
+MODEL_SHA256: be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21
+START_TIMESTAMP: 2026-09-11T04:17:00.214918+00:00
+END_TIMESTAMP: 2026-09-11T04:17:01.157898+00:00
+PROCESS_EXIT_CODE: 42
+[STDOUT]
+(empty)
+[STDERR]
+whisper_init_from_file_with_params_no_state: loading model from '/data/data/com.termux/files/home/ameva-models/stt/ggml-tiny.bin'
+whisper_init_with_params_no_state: use gpu    = 1
+whisper_init_with_params_no_state: flash attn = 1
+whisper_init_with_params_no_state: gpu_device = 0
+whisper_init_with_params_no_state: dtw        = 0
+whisper_init_with_params_no_state: devices    = 1
+whisper_init_with_params_no_state: backends   = 1
+whisper_model_load: loading model
+whisper_model_load: n_vocab       = 51865
+whisper_model_load: n_audio_ctx   = 1500
+whisper_model_load: n_audio_state = 384
+whisper_model_load: n_audio_head  = 6
+whisper_model_load: n_audio_layer = 4
+whisper_model_load: n_text_ctx    = 448
+whisper_model_load: n_text_state  = 384
+whisper_model_load: n_text_head   = 6
+whisper_model_load: n_text_layer  = 4
+whisper_model_load: n_mels        = 80
+whisper_model_load: ftype         = 1
+whisper_model_load: qntvr         = 0
+whisper_model_load: type          = 1 (tiny)
+whisper_model_load: adding 1608 extra tokens
+whisper_model_load: n_langs       = 99
+whisper_model_load:          CPU total size =    77.11 MB
+whisper_model_load: model size    =   77.11 MB
+whisper_backend_init_gpu: device 0: CPU (type: 0)
+whisper_backend_init_gpu: no GPU found
+whisper_init_state: kv self size  =    3.15 MB
+whisper_init_state: kv cross size =    9.44 MB
+whisper_init_state: kv pad  size  =    2.36 MB
+whisper_init_state: compute buffer (conv)   =   13.21 MB
+whisper_init_state: compute buffer (encode) =   17.72 MB
+whisper_init_state: compute buffer (cross)  =    3.89 MB
+whisper_init_state: compute buffer (decode) =   95.91 MB
+read_audio_data: reading audio data from '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' ...
+read_audio_data: trying to decode with miniaudio
+
+system_info: n_threads = 4 / 8 | WHISPER : COREML = 0 | OPENVINO = 0 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | DOTPROD = 1 | OPENMP = 1 | REPACK = 1 | 
+
+main: processing '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' (112000 samples, 7.0 sec), 4 threads, 1 processors, 5 beams + best of 5, lang = ko, task = transcribe, timestamps = 1 ...
+
+[AMEVA_STT] Initializing AMEVA Vulkan hardware backend...
+[AMEVA_STT] Physical Device: Mali-G68 (Driver: 0x08001000)
+[AMEVA_STT] AMEVA Vulkan hardware pipeline initialized successfully.
+[AMEVA_FAIL_INJECTION] Injected simulated failure at stage: dispatch
+PROCESS_EXIT_CODE=42
+ORIGINAL_OP_RESTORED=true
+AMEVA_SILENT_FALLBACK_COUNT=0
+GRAPH_MUTATION_LEAK_COUNT=0
+
+--- [STAGE 5/6: WAIT] ---
+COMMAND: AMEVA_OFFLOAD_ENCODER=1 AMEVA_FAIL_STAGE=wait /data/data/com.termux/files/home/ameva-compute-stt/build-whisper-cpu/bin/whisper-cli -m /data/data/com.termux/files/home/ameva-models/stt/ggml-tiny.bin -f /data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav -l ko -t 4
+SOURCE_COMMIT: fea3c77b26affbe19346c0adbe3aca140ab72c29 (third_party/whisper.cpp hook) + 837e4540436232b9c7f631499bfc09c0217e0fea (adapters/whisper/ggml-ameva)
+BINARY_SHA256: a0b97472ffcb8a14d5cbaece189a84a451672d27fd14b26a6a8e6598aaa48016
+MODEL_SHA256: be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21
+START_TIMESTAMP: 2026-09-11T04:17:01.158250+00:00
+END_TIMESTAMP: 2026-09-11T04:17:02.303264+00:00
+PROCESS_EXIT_CODE: 42
+[STDOUT]
+(empty)
+[STDERR]
+whisper_init_from_file_with_params_no_state: loading model from '/data/data/com.termux/files/home/ameva-models/stt/ggml-tiny.bin'
+whisper_init_with_params_no_state: use gpu    = 1
+whisper_init_with_params_no_state: flash attn = 1
+whisper_init_with_params_no_state: gpu_device = 0
+whisper_init_with_params_no_state: dtw        = 0
+whisper_init_with_params_no_state: devices    = 1
+whisper_init_with_params_no_state: backends   = 1
+whisper_model_load: loading model
+whisper_model_load: n_vocab       = 51865
+whisper_model_load: n_audio_ctx   = 1500
+whisper_model_load: n_audio_state = 384
+whisper_model_load: n_audio_head  = 6
+whisper_model_load: n_audio_layer = 4
+whisper_model_load: n_text_ctx    = 448
+whisper_model_load: n_text_state  = 384
+whisper_model_load: n_text_head   = 6
+whisper_model_load: n_text_layer  = 4
+whisper_model_load: n_mels        = 80
+whisper_model_load: ftype         = 1
+whisper_model_load: qntvr         = 0
+whisper_model_load: type          = 1 (tiny)
+whisper_model_load: adding 1608 extra tokens
+whisper_model_load: n_langs       = 99
+whisper_model_load:          CPU total size =    77.11 MB
+whisper_model_load: model size    =   77.11 MB
+whisper_backend_init_gpu: device 0: CPU (type: 0)
+whisper_backend_init_gpu: no GPU found
+whisper_init_state: kv self size  =    3.15 MB
+whisper_init_state: kv cross size =    9.44 MB
+whisper_init_state: kv pad  size  =    2.36 MB
+whisper_init_state: compute buffer (conv)   =   13.21 MB
+whisper_init_state: compute buffer (encode) =   17.72 MB
+whisper_init_state: compute buffer (cross)  =    3.89 MB
+whisper_init_state: compute buffer (decode) =   95.91 MB
+read_audio_data: reading audio data from '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' ...
+read_audio_data: trying to decode with miniaudio
+
+system_info: n_threads = 4 / 8 | WHISPER : COREML = 0 | OPENVINO = 0 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | DOTPROD = 1 | OPENMP = 1 | REPACK = 1 | 
+
+main: processing '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' (112000 samples, 7.0 sec), 4 threads, 1 processors, 5 beams + best of 5, lang = ko, task = transcribe, timestamps = 1 ...
+
+[AMEVA_STT] Initializing AMEVA Vulkan hardware backend...
+[AMEVA_STT] Physical Device: Mali-G68 (Driver: 0x08001000)
+[AMEVA_STT] AMEVA Vulkan hardware pipeline initialized successfully.
+[AMEVA_FAIL_INJECTION] Injected simulated failure at stage: wait
+PROCESS_EXIT_CODE=42
+ORIGINAL_OP_RESTORED=true
+AMEVA_SILENT_FALLBACK_COUNT=0
+GRAPH_MUTATION_LEAK_COUNT=0
+
+--- [STAGE 6/6: READBACK] ---
+COMMAND: AMEVA_OFFLOAD_ENCODER=1 AMEVA_FAIL_STAGE=readback /data/data/com.termux/files/home/ameva-compute-stt/build-whisper-cpu/bin/whisper-cli -m /data/data/com.termux/files/home/ameva-models/stt/ggml-tiny.bin -f /data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav -l ko -t 4
+SOURCE_COMMIT: fea3c77b26affbe19346c0adbe3aca140ab72c29 (third_party/whisper.cpp hook) + 837e4540436232b9c7f631499bfc09c0217e0fea (adapters/whisper/ggml-ameva)
+BINARY_SHA256: a0b97472ffcb8a14d5cbaece189a84a451672d27fd14b26a6a8e6598aaa48016
+MODEL_SHA256: be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21
+START_TIMESTAMP: 2026-09-11T04:17:02.303681+00:00
+END_TIMESTAMP: 2026-09-11T04:17:03.437038+00:00
+PROCESS_EXIT_CODE: 42
+[STDOUT]
+(empty)
+[STDERR]
+whisper_init_from_file_with_params_no_state: loading model from '/data/data/com.termux/files/home/ameva-models/stt/ggml-tiny.bin'
+whisper_init_with_params_no_state: use gpu    = 1
+whisper_init_with_params_no_state: flash attn = 1
+whisper_init_with_params_no_state: gpu_device = 0
+whisper_init_with_params_no_state: dtw        = 0
+whisper_init_with_params_no_state: devices    = 1
+whisper_init_with_params_no_state: backends   = 1
+whisper_model_load: loading model
+whisper_model_load: n_vocab       = 51865
+whisper_model_load: n_audio_ctx   = 1500
+whisper_model_load: n_audio_state = 384
+whisper_model_load: n_audio_head  = 6
+whisper_model_load: n_audio_layer = 4
+whisper_model_load: n_text_ctx    = 448
+whisper_model_load: n_text_state  = 384
+whisper_model_load: n_text_head   = 6
+whisper_model_load: n_text_layer  = 4
+whisper_model_load: n_mels        = 80
+whisper_model_load: ftype         = 1
+whisper_model_load: qntvr         = 0
+whisper_model_load: type          = 1 (tiny)
+whisper_model_load: adding 1608 extra tokens
+whisper_model_load: n_langs       = 99
+whisper_model_load:          CPU total size =    77.11 MB
+whisper_model_load: model size    =   77.11 MB
+whisper_backend_init_gpu: device 0: CPU (type: 0)
+whisper_backend_init_gpu: no GPU found
+whisper_init_state: kv self size  =    3.15 MB
+whisper_init_state: kv cross size =    9.44 MB
+whisper_init_state: kv pad  size  =    2.36 MB
+whisper_init_state: compute buffer (conv)   =   13.21 MB
+whisper_init_state: compute buffer (encode) =   17.72 MB
+whisper_init_state: compute buffer (cross)  =    3.89 MB
+whisper_init_state: compute buffer (decode) =   95.91 MB
+read_audio_data: reading audio data from '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' ...
+read_audio_data: trying to decode with miniaudio
+
+system_info: n_threads = 4 / 8 | WHISPER : COREML = 0 | OPENVINO = 0 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | DOTPROD = 1 | OPENMP = 1 | REPACK = 1 | 
+
+main: processing '/data/data/com.termux/files/home/ameva-compute-stt/tests/fixtures/stt/stt-ko-16k.wav' (112000 samples, 7.0 sec), 4 threads, 1 processors, 5 beams + best of 5, lang = ko, task = transcribe, timestamps = 1 ...
+
+[AMEVA_STT] Initializing AMEVA Vulkan hardware backend...
+[AMEVA_STT] Physical Device: Mali-G68 (Driver: 0x08001000)
+[AMEVA_STT] AMEVA Vulkan hardware pipeline initialized successfully.
+[AMEVA_FAIL_INJECTION] Injected simulated failure at stage: readback
+PROCESS_EXIT_CODE=42
+ORIGINAL_OP_RESTORED=true
+AMEVA_SILENT_FALLBACK_COUNT=0
+GRAPH_MUTATION_LEAK_COUNT=0
+
+================================================================================
+FAILURE_INJECTION_SUMMARY: PASS (6/6 exit code 42 with atomic op restoration)
+================================================================================
