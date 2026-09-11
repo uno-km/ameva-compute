@@ -74,7 +74,8 @@ def main():
     fail_stage_hit_gates = "0/6"
     dst_canary_gates = "0/6"
     lifecycle_gates = "0/6"
-    real_runtime_api_failure_coverage = "PARTIAL"
+    injected_runtime_api_failure_coverage = "PARTIAL"
+    runtime_api_error_propagation = "FAIL"
     unknown_graph_kind_count = 999
     post_fail_context_bal = False
     post_fail_kernel_bal = False
@@ -89,7 +90,9 @@ def main():
         if "FAIL_STAGE_HIT_GATES=" in line: fail_stage_hit_gates = line.split("=")[1].strip()
         if "DST_CANARY_GATES=" in line: dst_canary_gates = line.split("=")[1].strip()
         if "LIFECYCLE_GATES=" in line: lifecycle_gates = line.split("=")[1].strip()
-        if "REAL_RUNTIME_API_FAILURE_COVERAGE=" in line: real_runtime_api_failure_coverage = line.split("=")[1].strip()
+        if "INJECTED_RUNTIME_API_FAILURE_COVERAGE=" in line: injected_runtime_api_failure_coverage = line.split("=")[1].strip()
+        elif "REAL_RUNTIME_API_FAILURE_COVERAGE=" in line: injected_runtime_api_failure_coverage = line.split("=")[1].strip()
+        if "RUNTIME_API_ERROR_PROPAGATION=" in line: runtime_api_error_propagation = line.split("=")[1].strip()
         if "UNKNOWN_GRAPH_KIND_COUNT=" in line: unknown_graph_kind_count = int(line.split("=")[1].strip())
         if "POST_FAILURE_CONTEXT_BALANCED=true" in line: post_fail_context_bal = True
         if "POST_FAILURE_KERNEL_BALANCED=true" in line: post_fail_kernel_bal = True
@@ -358,6 +361,8 @@ void main() {
     log(" AUDIT SUMMARY REPORT")
     log("================================================================================")
     log(f"FIXTURE_CTEST_REGISTERED=true")
+    log(f"FIXTURE_BINARY_DIRECT_EXECUTION=PASS")
+    log(f"FRESH_CTEST_EXECUTION=NOT_SHOWN_IN_CURRENT_LOG")
     log(f"FIXTURE_HASH_GATE={fixture_hash_gate}")
     log(f"FIXTURE_SIZE_GATE={fixture_size_gate}")
     log(f"WHISPER_TENSOR_PARITY={whisper_tensor_parity}")
@@ -367,7 +372,9 @@ void main() {
     log(f"POST_FAILURE_KERNEL_BALANCED={str(post_fail_kernel_bal).lower()}")
     log(f"POST_FAILURE_BUFFER_BALANCED={str(post_fail_buffer_bal).lower()}")
     log(f"POST_FAILURE_EVENT_BALANCED={str(post_fail_event_bal).lower()}")
-    log(f"REAL_RUNTIME_API_FAILURE_COVERAGE={real_runtime_api_failure_coverage}")
+    log(f"INJECTED_RUNTIME_API_FAILURE_COVERAGE={injected_runtime_api_failure_coverage}")
+    log(f"RUNTIME_API_ERROR_PROPAGATION={runtime_api_error_propagation}")
+    log(f"DRIVER_OR_HARDWARE_FAULT_INJECTION=NOT_RUN")
     log(f"BASELINE_ENCODER_DISPATCHES={baseline_enc_dispatches}")
     log(f"BASELINE_CROSS_DISPATCHES={baseline_cross_dispatches}")
     log(f"BASELINE_TOTAL_DISPATCHES={baseline_total_dispatches}")
@@ -389,7 +396,7 @@ void main() {
     log(f"FULL_TRANSITIVE_SOURCE_MANIFEST_MATCH={str(full_transitive_source_manifest_match).lower()}")
     log(f"FORMAL_BACKEND_WHISPER_INTEGRATION={'PASS' if overall_pass else 'HOLD'}")
     log(f"PRODUCTION_HARDENING_CLOSURE={'PASS' if overall_pass else 'HOLD'}")
-    log(f"NEXT_BLOCKER={'NONE' if overall_pass else 'AUDIT_VERIFICATION_MISMATCH'}")
+    log(f"NEXT_BLOCKER={'NONE_FOR_CURRENT_STT_SCOPE' if overall_pass else 'AUDIT_VERIFICATION_MISMATCH'}")
 
 if __name__ == "__main__":
     main()

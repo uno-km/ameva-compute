@@ -423,7 +423,9 @@ int main() {
 
     printf("FAIL_STAGE_HIT_GATES=%d/6\n", fail_stage_passed);
     printf("DST_CANARY_GATES=%d/6\n", dst_canary_passed);
-    printf("REAL_RUNTIME_API_FAILURE_COVERAGE=%s\n", (fail_stage_passed == 6) ? "PASS" : "PARTIAL");
+    printf("INJECTED_RUNTIME_API_FAILURE_COVERAGE=%s\n", (fail_stage_passed == 6) ? "PASS" : "PARTIAL");
+    printf("RUNTIME_API_ERROR_PROPAGATION=%s\n", (fail_stage_passed == 6) ? "PASS" : "FAIL");
+    printf("DRIVER_OR_HARDWARE_FAULT_INJECTION=NOT_RUN\n");
 
     // 9. Teardown and Lifecycle Symmetry Gates (6/6)
     ggml_backend_free(backend);
