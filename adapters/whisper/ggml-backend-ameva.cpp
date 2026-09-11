@@ -61,11 +61,13 @@ static bool init_hardware_pipeline() {
         fprintf(stderr, "[AMEVA_BACKEND] FATAL: ac_vk_context_create failed with code %d\n", res);
         return false;
     }
+    g_counters.context_create_count++;
 
     if (s_vk_ctx->device_properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) {
         fprintf(stderr, "[AMEVA_BACKEND] FATAL: Vulkan context bound to CPU fallback! Rejected.\n");
         ac_vk_context_destroy(s_vk_ctx);
         s_vk_ctx = nullptr;
+        g_counters.context_destroy_count++;
         return false;
     }
 
@@ -76,6 +78,7 @@ static bool init_hardware_pipeline() {
         fprintf(stderr, "[AMEVA_BACKEND] FATAL: Cannot open SPIR-V binary %s\n", spv_path);
         ac_vk_context_destroy(s_vk_ctx);
         s_vk_ctx = nullptr;
+        g_counters.context_destroy_count++;
         return false;
     }
     size_t spv_size = spv_file.tellg();
@@ -99,21 +102,45 @@ static bool init_hardware_pipeline() {
         fprintf(stderr, "[AMEVA_BACKEND] FATAL: ac_vk_kernel_create_with_metadata failed with code %d\n", res);
         ac_vk_context_destroy(s_vk_ctx);
         s_vk_ctx = nullptr;
+        g_counters.context_destroy_count++;
         return false;
     }
+    g_counters.kernel_create_count++;
 
     res = ac_vk_buffer_create(s_vk_ctx, WEIGHT_BYTES, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &s_buf_w);
     if (res != AC_SUCCESS) return false;
+    g_counters.buffer_create_count++;
+
     res = ac_vk_buffer_create(s_vk_ctx, ACT_BYTES, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &s_buf_a);
     if (res != AC_SUCCESS) return false;
+    g_counters.buffer_create_count++;
+
     res = ac_vk_buffer_create(s_vk_ctx, OUT_BYTES, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &s_buf_o);
     if (res != AC_SUCCESS) return false;
+    g_counters.buffer_create_count++;
 
     return true;
 }
 
+void ameva_backend_teardown_hardware(void) {
+    std::lock_guard<std::mutex> lock(s_hw_mutex);
+    if (s_buf_w) { ac_vk_buffer_destroy(s_buf_w); s_buf_w = nullptr; g_counters.buffer_destroy_count++; }
+    if (s_buf_a) { ac_vk_buffer_destroy(s_buf_a); s_buf_a = nullptr; g_counters.buffer_destroy_count++; }
+    if (s_buf_o) { ac_vk_buffer_destroy(s_buf_o); s_buf_o = nullptr; g_counters.buffer_destroy_count++; }
+    if (s_vk_kernel) { ac_vk_kernel_destroy(s_vk_kernel); s_vk_kernel = nullptr; g_counters.kernel_destroy_count++; }
+    if (s_vk_ctx) { ac_vk_context_destroy(s_vk_ctx); s_vk_ctx = nullptr; g_counters.context_destroy_count++; }
+}
+
 static bool execute_vulkan_matmul(struct ggml_tensor * t) {
     if (!t || !s_vk_ctx || !s_vk_kernel || !s_buf_w || !s_buf_a || !s_buf_o) {
+        return false;
+    }
+
+    const char * fail_stage = getenv("AMEVA_BACKEND_FAIL_STAGE");
+
+    // Failure Injection: Map Stage
+    if (fail_stage && strcmp(fail_stage, "map") == 0) {
+        fprintf(stderr, "[AMEVA_BACKEND_FAIL_INJECTION] Simulated failure at stage: map\n");
         return false;
     }
 
@@ -134,6 +161,18 @@ static bool execute_vulkan_matmul(struct ggml_tensor * t) {
         return false;
     }
 
+    // Failure Injection: Flush Stage
+    if (fail_stage && strcmp(fail_stage, "flush") == 0) {
+        fprintf(stderr, "[AMEVA_BACKEND_FAIL_INJECTION] Simulated failure at stage: flush\n");
+        return false;
+    }
+
+    // Failure Injection: Dispatch Stage
+    if (fail_stage && strcmp(fail_stage, "dispatch") == 0) {
+        fprintf(stderr, "[AMEVA_BACKEND_FAIL_INJECTION] Simulated failure at stage: dispatch\n");
+        return false;
+    }
+
     // 2. Dispatch Vulkan compute pipeline
     MatMulPushConstants pc = { TARGET_M, TARGET_N, TARGET_K };
     AcVkBuffer * bufs[3] = { s_buf_w, s_buf_a, s_buf_o };
@@ -146,11 +185,33 @@ static bool execute_vulkan_matmul(struct ggml_tensor * t) {
     if (res != AC_SUCCESS || !event) {
         return false;
     }
+    g_counters.event_create_count++;
+
+    // Failure Injection: Wait Stage
+    if (fail_stage && strcmp(fail_stage, "wait") == 0) {
+        ac_vk_event_destroy(event);
+        g_counters.event_destroy_count++;
+        fprintf(stderr, "[AMEVA_BACKEND_FAIL_INJECTION] Simulated failure at stage: wait\n");
+        return false;
+    }
 
     // 3. Wait on GPU event
     res = ac_vk_event_wait(event, 5000000000ULL);
     ac_vk_event_destroy(event);
+    g_counters.event_destroy_count++;
     if (res != AC_SUCCESS) {
+        return false;
+    }
+
+    // Failure Injection: Invalidate Stage
+    if (fail_stage && strcmp(fail_stage, "invalidate") == 0) {
+        fprintf(stderr, "[AMEVA_BACKEND_FAIL_INJECTION] Simulated failure at stage: invalidate\n");
+        return false;
+    }
+
+    // Failure Injection: Readback Stage
+    if (fail_stage && strcmp(fail_stage, "readback") == 0) {
+        fprintf(stderr, "[AMEVA_BACKEND_FAIL_INJECTION] Simulated failure at stage: readback\n");
         return false;
     }
 
@@ -518,7 +579,6 @@ static bool ameva_device_supports_op(ggml_backend_dev_t dev, const struct ggml_t
 
 static bool ameva_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
     UNUSED(dev);
-    // Strict ownership: only allow genuine AMEVA buffer type
     return buft == ggml_backend_ameva_buffer_type();
 }
 
@@ -598,7 +658,13 @@ void ameva_backend_get_counters(AmevaBackendCounters * out_counters) {
 }
 
 void ameva_backend_reset_counters(void) {
-    g_counters = {};
+    g_counters.supports_op_query_count = 0;
+    g_counters.supported_pattern_match_count = 0;
+    g_counters.graph_compute_call_count = 0;
+    g_counters.ameva_dispatch_attempt_count = 0;
+    g_counters.ameva_dispatch_success_count = 0;
+    g_counters.ameva_gpu_op_count = 0;
+    g_counters.ameva_dispatch_failure_count = 0;
     s_bounds_violation = false;
 }
 

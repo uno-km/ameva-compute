@@ -28,6 +28,16 @@ typedef struct {
     uint64_t buffer_alloc_count;
     uint64_t buffer_free_count;
     uint64_t sync_count;
+
+    // Symmetric Lifecycle counters
+    uint64_t context_create_count;
+    uint64_t context_destroy_count;
+    uint64_t kernel_create_count;
+    uint64_t kernel_destroy_count;
+    uint64_t buffer_create_count;
+    uint64_t buffer_destroy_count;
+    uint64_t event_create_count;
+    uint64_t event_destroy_count;
 } AmevaBackendCounters;
 
 GGML_API ggml_backend_reg_t ggml_backend_ameva_reg(void);
@@ -36,6 +46,7 @@ GGML_API ggml_backend_buffer_type_t ggml_backend_ameva_buffer_type(void);
 GGML_API ggml_backend_t ggml_backend_ameva_init(const char * params);
 GGML_API void ameva_backend_get_counters(AmevaBackendCounters * out_counters);
 GGML_API void ameva_backend_reset_counters(void);
+GGML_API void ameva_backend_teardown_hardware(void);
 GGML_API void ameva_backend_register(void);
 
 #ifdef __cplusplus
