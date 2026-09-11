@@ -83,6 +83,7 @@ typedef enum {
     AC_ERR_CONTEXT_MISMATCH             = -107,
     AC_ERR_FEATURE_NOT_SUPPORTED        = -108,
     AC_ERR_INVALID_SHAPE                = -109,
+    AC_ERR_ABI_MISMATCH                 = -110,
     
     /* Memory Management Errors (200-299) */
     AC_ERR_OUT_OF_HOST_MEMORY           = -201,

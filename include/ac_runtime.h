@@ -313,6 +313,18 @@ AcResult ac_runtime_kernel_get_effective_local_size(
     AcDim3* out_local_size
 );
 
+/**
+ * @brief Retrieve push constant size of a compiled kernel.
+ *
+ * @param kernel Kernel handle.
+ * @param out_size Output pointer for push constant size in bytes.
+ * @return AC_SUCCESS on success, error code on failure.
+ */
+AcResult ac_runtime_kernel_get_push_constant_size(
+    const AcKernel* kernel,
+    size_t* out_size
+);
+
 /* ========================================================================= */
 /* Execution & Synchronization APIs                                          */
 /* ========================================================================= */

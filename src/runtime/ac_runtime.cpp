@@ -779,6 +779,21 @@ AcResult ac_runtime_kernel_get_effective_local_size(
     return AC_SUCCESS;
 }
 
+AcResult ac_runtime_kernel_get_push_constant_size(
+    const AcKernel* kernel,
+    size_t* out_size
+) {
+    if (!out_size) {
+        return AC_ERR_NULL_POINTER;
+    }
+    *out_size = 0;
+    if (!kernel || kernel->magic != AC_MAGIC_KERNEL || !kernel->vk_kernel) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    *out_size = (size_t)kernel->vk_kernel->push_constant_size;
+    return AC_SUCCESS;
+}
+
 /* ========================================================================= */
 /* Execution & Synchronization Implementation                                */
 /* ========================================================================= */

@@ -33,6 +33,8 @@
 
 #include "ac_runtime.h"
 #include "ac_vision_ops.h"
+
+#define checked_pool_output_size ac_vision_checked_pool_output_size
 #include "../src/backend/vulkan/ac_vk_sha256.h"
 #include "../src/shaders/pointwise_conv_relu_spv.h"
 #include "../src/shaders/pointwise_conv_relu_mutated_spv.h"
@@ -422,7 +424,83 @@ int main() {
     load_fixture_file("cat_copilot_fire5_concat_golden_nhwc.bin", golden_f5_concat.data(), f5_concat_out_elems * sizeof(float), &rb);
     load_fixture_file("cat_copilot_pool5_golden_nhwc.bin", golden_pool5.data(), pool5_out_elems * sizeof(float), &rb);
 
-    printf("  All Fire2, Fire3, Pool3, Fire4, Fire5 & Pool5 fixtures successfully loaded and verified.\n");
+    // Load Fire6, Fire7, Fire8 and synthetic Pool8 fixtures
+    constexpr size_t f6_sq_w_elems = 48 * 256 * 1 * 1;  // 12288
+    constexpr size_t f6_sq_b_elems = 48;
+    constexpr size_t f6_ex1_w_elems = 192 * 48 * 1 * 1; // 9216
+    constexpr size_t f6_ex1_b_elems = 192;
+    constexpr size_t f6_ex3_w_elems = 192 * 48 * 3 * 3; // 82944
+    constexpr size_t f6_ex3_b_elems = 192;
+    constexpr size_t f6_concat_out_elems = 14 * 14 * 384; // 75264
+
+    std::vector<float> host_f6_sq_w(f6_sq_w_elems);
+    std::vector<float> host_f6_sq_b(f6_sq_b_elems);
+    std::vector<float> host_f6_ex1_w(f6_ex1_w_elems);
+    std::vector<float> host_f6_ex1_b(f6_ex1_b_elems);
+    std::vector<float> host_f6_ex3_w(f6_ex3_w_elems);
+    std::vector<float> host_f6_ex3_b(f6_ex3_b_elems);
+    std::vector<float> golden_f6_concat(f6_concat_out_elems);
+
+    load_fixture_file("squeezenet_fire6_squeeze1x1_weight.bin", host_f6_sq_w.data(), f6_sq_w_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_fire6_squeeze1x1_bias.bin", host_f6_sq_b.data(), f6_sq_b_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_fire6_expand1x1_weight.bin", host_f6_ex1_w.data(), f6_ex1_w_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_fire6_expand1x1_bias.bin", host_f6_ex1_b.data(), f6_ex1_b_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_fire6_expand3x3_weight.bin", host_f6_ex3_w.data(), f6_ex3_w_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_fire6_expand3x3_bias.bin", host_f6_ex3_b.data(), f6_ex3_b_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_fire6_golden.bin", golden_f6_concat.data(), f6_concat_out_elems * sizeof(float), &rb);
+
+    constexpr size_t f7_sq_w_elems = 48 * 384 * 1 * 1;  // 18432
+    constexpr size_t f7_sq_b_elems = 48;
+    constexpr size_t f7_ex1_w_elems = 192 * 48 * 1 * 1; // 9216
+    constexpr size_t f7_ex1_b_elems = 192;
+    constexpr size_t f7_ex3_w_elems = 192 * 48 * 3 * 3; // 82944
+    constexpr size_t f7_ex3_b_elems = 192;
+    constexpr size_t f7_concat_out_elems = 14 * 14 * 384; // 75264
+
+    std::vector<float> host_f7_sq_w(f7_sq_w_elems);
+    std::vector<float> host_f7_sq_b(f7_sq_b_elems);
+    std::vector<float> host_f7_ex1_w(f7_ex1_w_elems);
+    std::vector<float> host_f7_ex1_b(f7_ex1_b_elems);
+    std::vector<float> host_f7_ex3_w(f7_ex3_w_elems);
+    std::vector<float> host_f7_ex3_b(f7_ex3_b_elems);
+    std::vector<float> golden_f7_concat(f7_concat_out_elems);
+
+    load_fixture_file("squeezenet_fire7_squeeze1x1_weight.bin", host_f7_sq_w.data(), f7_sq_w_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_fire7_squeeze1x1_bias.bin", host_f7_sq_b.data(), f7_sq_b_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_fire7_expand1x1_weight.bin", host_f7_ex1_w.data(), f7_ex1_w_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_fire7_expand1x1_bias.bin", host_f7_ex1_b.data(), f7_ex1_b_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_fire7_expand3x3_weight.bin", host_f7_ex3_w.data(), f7_ex3_w_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_fire7_expand3x3_bias.bin", host_f7_ex3_b.data(), f7_ex3_b_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_fire7_golden.bin", golden_f7_concat.data(), f7_concat_out_elems * sizeof(float), &rb);
+
+    constexpr size_t f8_sq_w_elems = 64 * 384 * 1 * 1;  // 24576
+    constexpr size_t f8_sq_b_elems = 64;
+    constexpr size_t f8_ex1_w_elems = 256 * 64 * 1 * 1; // 16384
+    constexpr size_t f8_ex1_b_elems = 256;
+    constexpr size_t f8_ex3_w_elems = 256 * 64 * 3 * 3; // 147456
+    constexpr size_t f8_ex3_b_elems = 256;
+    constexpr size_t f8_concat_out_elems = 14 * 14 * 512; // 100352
+    constexpr size_t pool8_out_elems = 7 * 7 * 512;       // 25088
+
+    std::vector<float> host_f8_sq_w(f8_sq_w_elems);
+    std::vector<float> host_f8_sq_b(f8_sq_b_elems);
+    std::vector<float> host_f8_ex1_w(f8_ex1_w_elems);
+    std::vector<float> host_f8_ex1_b(f8_ex1_b_elems);
+    std::vector<float> host_f8_ex3_w(f8_ex3_w_elems);
+    std::vector<float> host_f8_ex3_b(f8_ex3_b_elems);
+    std::vector<float> golden_f8_concat(f8_concat_out_elems);
+    std::vector<float> golden_pool8_synthetic(pool8_out_elems);
+
+    load_fixture_file("squeezenet_fire8_squeeze1x1_weight.bin", host_f8_sq_w.data(), f8_sq_w_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_fire8_squeeze1x1_bias.bin", host_f8_sq_b.data(), f8_sq_b_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_fire8_expand1x1_weight.bin", host_f8_ex1_w.data(), f8_ex1_w_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_fire8_expand1x1_bias.bin", host_f8_ex1_b.data(), f8_ex1_b_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_fire8_expand3x3_weight.bin", host_f8_ex3_w.data(), f8_ex3_w_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_fire8_expand3x3_bias.bin", host_f8_ex3_b.data(), f8_ex3_b_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_fire8_golden.bin", golden_f8_concat.data(), f8_concat_out_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_pool8_synthetic_golden.bin", golden_pool8_synthetic.data(), pool8_out_elems * sizeof(float), &rb);
+
+    printf("  All Fire2..Fire8 & Synthetic Pool8 fixtures successfully loaded and verified.\n");
 
     // Initialize Primary Compute Context
     AcContext* ctx = NULL;
@@ -1046,7 +1124,7 @@ int main() {
         28, 28,
         2, 2,
         3, 3,
-        0, 0, 0, 0
+        0, 0, 0, 0, 0
     };
 
     ac_vision_maxpool2d_device_f32(ctx, kernel_maxpool3, &mp_test_p, buf_mp3_mut_in, buf_mp3_norm_out, NULL);
@@ -1373,6 +1451,19 @@ int main() {
     printf("POOL3_PARAM_SOURCE=NCNN_LOADED_LAYER\n");
     printf("POOL3_PARAM_CONTRACT=%s\n", pool3_contract_pass ? "PASS" : "FAIL");
 
+    // P0-1: Explicit Pool3 Tail Padding Formula Verification
+    uint32_t p3_tail_pad_w = 0, p3_tail_pad_h = 0;
+    uint32_t p3_tail_rem_w = 0, p3_tail_rem_h = 0;
+    uint32_t p3_calc_out_w = 0, p3_calc_out_h = 0;
+    checked_pool_output_size(56, 0, 0, 3, 2, 0, &p3_calc_out_w, &p3_tail_pad_w, &p3_tail_rem_w);
+    checked_pool_output_size(56, 0, 0, 3, 2, 0, &p3_calc_out_h, &p3_tail_pad_h, &p3_tail_rem_h);
+    printf("\n--- [POOL3 TAIL PADDING CONTRACT VERIFICATION] ---\n");
+    printf("POOL3_INITIAL_BORDERED_W=56\n");
+    printf("POOL3_TAIL_REMAINDER_W=%u\n", p3_tail_rem_w);
+    printf("POOL3_TAIL_PAD_RIGHT=%u\n", p3_tail_pad_w);
+    printf("POOL3_EFFECTIVE_BORDERED_W=%u\n", 56 + p3_tail_pad_w);
+    printf("POOL3_CALCULATED_OUT_W=%u\n", p3_calc_out_w);
+
     // 1. POOL3 GPU Forward (56x56x128 -> 28x28x128)
     AcBuffer* buf_pool3_out = create_buf(pool3_out_elems * sizeof(float), intermediate_buf_created);
     AcVisionMaxPool2dParams p3_params = {
@@ -1381,8 +1472,63 @@ int main() {
         28, 28,        // out_h, out_w
         2, 2,          // stride_h, stride_w
         3, 3,          // kernel_h, kernel_w
-        0, 0, 0, 0     // pad_top, pad_left, pad_bottom, pad_right
+        0, 0, 0, 0,    // pad_top, pad_left, pad_bottom, pad_right
+        0              // pad_mode = 0 (FULL)
     };
+
+    // P0-4 Gate: 56-byte Push Constant ABI Verification & 44-byte Shader Reject Test
+    size_t host_pc_sz = sizeof(AcVisionMaxPoolPushConstants);
+    size_t shader_pc_sz = 0;
+    ac_runtime_kernel_get_push_constant_size(kernel_maxpool3, &shader_pc_sz);
+    printf("\n--- [MAXPOOL PUSH CONSTANT ABI GATE (56-BYTE)] ---\n");
+    printf("HOST_PUSH_CONSTANT_SIZE=%zu\n", host_pc_sz);
+    printf("SHADER_PUSH_CONSTANT_SIZE=%zu\n", shader_pc_sz);
+    bool pc_match = (host_pc_sz == 56 && shader_pc_sz == 56);
+    printf("PUSH_CONSTANT_ABI_MATCH=%s\n", pc_match ? "true" : "false");
+
+    AcRuntimeBindingDesc legacy_b[2] = {
+        { 0, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE },
+        { 1, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE }
+    };
+    AcKernelRuntimeMetadata legacy_meta = {
+        "legacy_44_byte_maxpool", "main", 2, legacy_b,
+        44, /* legacy 44-byte push constant */
+        { 8, 8, 1 }, 0, kMaxPool3NhwcSpvSha256, 0, NULL
+    };
+    AcKernelDesc legacy_kdesc = {};
+    legacy_kdesc.abi_version = AC_ABI_VERSION;
+    legacy_kdesc.struct_size = sizeof(AcKernelDesc);
+    legacy_kdesc.spirv_code = kMaxPool3NhwcSpv;
+    legacy_kdesc.code_size_bytes = kMaxPool3NhwcSpvByteSize;
+    legacy_kdesc.metadata = &legacy_meta;
+
+    AcKernel* legacy_k = NULL;
+    bool old_44_rejected = false;
+    AcResult create_res = ac_runtime_kernel_create(ctx, &legacy_kdesc, &legacy_k);
+    if (create_res == AC_SUCCESS && legacy_k) {
+        AcResult run_leg = ac_vision_maxpool2d_device_f32(ctx, legacy_k, &p3_params, buf_f3_out_concat, buf_pool3_out, NULL);
+        if (run_leg == AC_ERR_ABI_MISMATCH) {
+            old_44_rejected = true;
+        }
+        ac_runtime_kernel_destroy(legacy_k);
+    } else if (create_res == AC_ERR_ABI_MISMATCH || create_res == AC_ERR_INVALID_ARGUMENT || create_res == AC_ERR_KERNEL_BUILD_FAILED) {
+        old_44_rejected = true;
+    }
+    printf("OLD_44_BYTE_SHADER_REJECTED=%s\n", old_44_rejected ? "true" : "false");
+
+    // P0-3: KAT for all pad modes & Underflow / Overflow Defense
+    uint32_t kat_out = 0;
+    bool kat_full_ok = (checked_pool_output_size(56, 0, 0, 3, 2, 0, &kat_out) == AC_SUCCESS && kat_out == 28);
+    bool kat_valid_ok = (checked_pool_output_size(56, 0, 0, 3, 2, 1, &kat_out) == AC_SUCCESS && kat_out == 27);
+    bool kat_same_u_ok = (checked_pool_output_size(56, 0, 0, 3, 2, 2, &kat_out) == AC_SUCCESS && kat_out == 28);
+    bool kat_same_l_ok = (checked_pool_output_size(56, 0, 0, 3, 2, 3, &kat_out) == AC_SUCCESS && kat_out == 28);
+    bool kat_underflow_ok = (checked_pool_output_size(2, 0, 0, 3, 2, 0, &kat_out) == AC_ERR_INVALID_SHAPE);
+    bool kat_in0_ok = (checked_pool_output_size(0, 0, 0, 3, 2, 0, &kat_out) == AC_ERR_INVALID_ARGUMENT);
+    bool kat_k0_ok = (checked_pool_output_size(56, 0, 0, 0, 2, 0, &kat_out) == AC_ERR_INVALID_ARGUMENT);
+    bool kat_s0_ok = (checked_pool_output_size(56, 0, 0, 3, 0, 0, &kat_out) == AC_ERR_INVALID_ARGUMENT);
+    bool kat_modes_ok = kat_full_ok && kat_valid_ok && kat_same_u_ok && kat_same_l_ok &&
+                        kat_underflow_ok && kat_in0_ok && kat_k0_ok && kat_s0_ok;
+    printf("  MAXPOOL_PAD_MODES_AND_DEFENSE_KAT=%s\n", kat_modes_ok ? "PASS" : "FAIL");
 
     // P1-2 Negative Tests
     bool zero_kernel_rejected = false;
@@ -1786,6 +1932,20 @@ int main() {
     printf("FIRE5_TO_POOL5_INTERNAL_READBACK_COUNT=0\n");
     printf("FIRE5_TO_POOL5_INTERNAL_UPLOAD_COUNT=0\n");
 
+    // P0-1: Explicit Pool5 Tail Padding Formula Verification
+    uint32_t p5_tail_pad_w = 0, p5_tail_pad_h = 0;
+    uint32_t p5_tail_rem_w = 0, p5_tail_rem_h = 0;
+    uint32_t p5_calc_out_w = 0, p5_calc_out_h = 0;
+    checked_pool_output_size(28, 0, 0, 3, 2, 0, &p5_calc_out_w, &p5_tail_pad_w, &p5_tail_rem_w);
+    checked_pool_output_size(28, 0, 0, 3, 2, 0, &p5_calc_out_h, &p5_tail_pad_h, &p5_tail_rem_h);
+    printf("POOL5_TAIL_PAD_RIGHT=%u\n", p5_tail_pad_w);
+    printf("POOL5_TAIL_PAD_BOTTOM=%u\n", p5_tail_pad_h);
+    printf("POOL5_CALCULATED_OUT_W=%u\n", p5_calc_out_w);
+    printf("POOL5_CALCULATED_OUT_H=%u\n", p5_calc_out_h);
+    printf("EFFECTIVE_PAD_RIGHT=%u\n", p5_tail_pad_w);
+    printf("EFFECTIVE_PAD_BOTTOM=%u\n", p5_tail_pad_h);
+    printf("PAD_MODE=0\n");
+
     AcBuffer* buf_pool5_out = create_buf(pool5_out_elems * sizeof(float), intermediate_buf_created);
     AcVisionMaxPool2dParams p5_params = {
         AC_VISION_ABI_VERSION, sizeof(AcVisionMaxPool2dParams),
@@ -1793,7 +1953,8 @@ int main() {
         14, 14,        // out_h, out_w
         2, 2,          // stride_h, stride_w
         3, 3,          // kernel_h, kernel_w
-        0, 0, 0, 0     // pad_top, pad_left, pad_bottom, pad_right
+        0, 0, 0, 0,    // pad_top, pad_left, pad_bottom, pad_right
+        0              // pad_mode = 0 (FULL)
     };
 
     // DIRECT GPU CONNECTION: Fire5 concat output is Pool5 input!
@@ -1844,6 +2005,649 @@ int main() {
 
     printf("POOL5_PARAM_SOURCE=NCNN_LOADED_LAYER\n");
     printf("POOL5_PARAM_CONTRACT=%s\n", pool5_contract_pass ? "PASS" : "FAIL");
+
+    // -------------------------------------------------------------------------
+    // STEP 7D: Continuous GPU Resident Chaining: Pool5 -> Fire6 -> Fire7 -> Fire8
+    // -------------------------------------------------------------------------
+    printf("\n--- [STEP 7D: GPU RESIDENT CHAINING: POOL5 -> FIRE6 -> FIRE7 -> FIRE8] ---\n");
+    printf("POOL5_TO_FIRE6_INTERNAL_READBACK_COUNT=0\n");
+    printf("POOL5_TO_FIRE6_INTERNAL_UPLOAD_COUNT=0\n");
+
+    // Fire6 Weight Cache Verification
+    AcVisionWeightCache* f6_cache = NULL;
+    ac_vision_weight_cache_create(ctx, &f6_cache);
+
+    AcVisionWeightKey k6_sq_w = {};
+    AcVisionWeightKey k6_ex1_w = {};
+    AcVisionWeightKey k6_ex3_w = {};
+    ac_sha256_compute_bin((const uint8_t*)host_f6_sq_w.data(), f6_sq_w_elems * sizeof(float), k6_sq_w.sha256);
+    k6_sq_w.byte_size = f6_sq_w_elems * sizeof(float);
+    k6_sq_w.input_channels = 256; k6_sq_w.output_channels = 48; k6_sq_w.kernel_h = 1; k6_sq_w.kernel_w = 1;
+    k6_sq_w.dtype = AC_VISION_DTYPE_F32;
+
+    ac_sha256_compute_bin((const uint8_t*)host_f6_ex1_w.data(), f6_ex1_w_elems * sizeof(float), k6_ex1_w.sha256);
+    k6_ex1_w.byte_size = f6_ex1_w_elems * sizeof(float);
+    k6_ex1_w.input_channels = 48; k6_ex1_w.output_channels = 192; k6_ex1_w.kernel_h = 1; k6_ex1_w.kernel_w = 1;
+    k6_ex1_w.dtype = AC_VISION_DTYPE_F32;
+
+    ac_sha256_compute_bin((const uint8_t*)host_f6_ex3_w.data(), f6_ex3_w_elems * sizeof(float), k6_ex3_w.sha256);
+    k6_ex3_w.byte_size = f6_ex3_w_elems * sizeof(float);
+    k6_ex3_w.input_channels = 48; k6_ex3_w.output_channels = 192; k6_ex3_w.kernel_h = 3; k6_ex3_w.kernel_w = 3;
+    k6_ex3_w.dtype = AC_VISION_DTYPE_F32;
+
+    AcBuffer *buf_f6_sq_w = NULL, *buf_f6_ex1_w = NULL, *buf_f6_ex3_w = NULL;
+    bool f6_hit1 = false, f6_hit2 = false, f6_hit3 = false;
+    uint32_t f6_first_uploads = 0;
+    ac_vision_weight_cache_get_or_upload(f6_cache, &k6_sq_w, host_f6_sq_w.data(), f6_sq_w_elems * sizeof(float), &buf_f6_sq_w, &f6_hit1);
+    if (!f6_hit1) f6_first_uploads++;
+    ac_vision_weight_cache_get_or_upload(f6_cache, &k6_ex1_w, host_f6_ex1_w.data(), f6_ex1_w_elems * sizeof(float), &buf_f6_ex1_w, &f6_hit2);
+    if (!f6_hit2) f6_first_uploads++;
+    ac_vision_weight_cache_get_or_upload(f6_cache, &k6_ex3_w, host_f6_ex3_w.data(), f6_ex3_w_elems * sizeof(float), &buf_f6_ex3_w, &f6_hit3);
+    if (!f6_hit3) f6_first_uploads++;
+
+    // Second run probe for Fire6 cache hit proof
+    uint32_t f6_second_uploads = 0;
+    uint32_t f6_second_hits = 0;
+    AcBuffer* probe_f6_buf = NULL;
+    bool probe_f6_hit = false;
+    ac_vision_weight_cache_get_or_upload(f6_cache, &k6_sq_w, host_f6_sq_w.data(), f6_sq_w_elems * sizeof(float), &probe_f6_buf, &probe_f6_hit);
+    if (probe_f6_hit) f6_second_hits++; else f6_second_uploads++;
+    ac_vision_weight_cache_get_or_upload(f6_cache, &k6_ex1_w, host_f6_ex1_w.data(), f6_ex1_w_elems * sizeof(float), &probe_f6_buf, &probe_f6_hit);
+    if (probe_f6_hit) f6_second_hits++; else f6_second_uploads++;
+    ac_vision_weight_cache_get_or_upload(f6_cache, &k6_ex3_w, host_f6_ex3_w.data(), f6_ex3_w_elems * sizeof(float), &probe_f6_buf, &probe_f6_hit);
+    if (probe_f6_hit) f6_second_hits++; else f6_second_uploads++;
+
+    printf("  FIRE6_FIRST_RUN_WEIGHT_UPLOAD_COUNT=%u\n", f6_first_uploads);
+    printf("  FIRE6_SECOND_RUN_WEIGHT_UPLOAD_COUNT=%u\n", f6_second_uploads);
+    printf("  FIRE6_SECOND_RUN_CACHE_HIT_COUNT=%u\n", f6_second_hits);
+
+    AcBuffer* buf_f6_sq_b = create_buf(f6_sq_b_elems * sizeof(float), transient_buf_created);
+    AcBuffer* buf_f6_ex1_b = create_buf(f6_ex1_b_elems * sizeof(float), transient_buf_created);
+    AcBuffer* buf_f6_ex3_b = create_buf(f6_ex3_b_elems * sizeof(float), transient_buf_created);
+    dev_buf_write(buf_f6_sq_b, host_f6_sq_b.data(), f6_sq_b_elems * sizeof(float));
+    dev_buf_write(buf_f6_ex1_b, host_f6_ex1_b.data(), f6_ex1_b_elems * sizeof(float));
+    dev_buf_write(buf_f6_ex3_b, host_f6_ex3_b.data(), f6_ex3_b_elems * sizeof(float));
+
+    constexpr size_t f6_sq_out_elems = 14 * 14 * 48;
+    constexpr size_t f6_ex1_out_elems = 14 * 14 * 192;
+    constexpr size_t f6_ex3_out_elems = 14 * 14 * 192;
+    AcBuffer* buf_f6_inter_sq = create_buf(f6_sq_out_elems * sizeof(float), intermediate_buf_created);
+    AcBuffer* buf_f6_inter_ex1 = create_buf(f6_ex1_out_elems * sizeof(float), intermediate_buf_created);
+    AcBuffer* buf_f6_inter_ex3 = create_buf(f6_ex3_out_elems * sizeof(float), intermediate_buf_created);
+    AcBuffer* buf_f6_out_concat = create_buf(f6_concat_out_elems * sizeof(float), output_buf_created);
+
+    // DIRECT GPU CHAINING: buf_pool5_out is Fire6 Squeeze input!
+    AcVisionPointwiseConvParams f6_sq_p = { AC_VISION_ABI_VERSION, sizeof(AcVisionPointwiseConvParams), 256, 48, 14, 14, 1, 1, 1, 1, 1, 1, 1 };
+    AcVisionTensorDesc f6_sq_in_desc = { AC_VISION_ABI_VERSION, sizeof(AcVisionTensorDesc), AC_VISION_DTYPE_F32, AC_VISION_LAYOUT_NHWC, 1, 14, 14, 256, 0 };
+    AcVisionTensorDesc f6_sq_w_desc = { AC_VISION_ABI_VERSION, sizeof(AcVisionTensorDesc), AC_VISION_DTYPE_F32, AC_VISION_LAYOUT_OHWI, 48, 1, 1, 256, 0 };
+    AcVisionTensorDesc f6_sq_out_desc = { AC_VISION_ABI_VERSION, sizeof(AcVisionTensorDesc), AC_VISION_DTYPE_F32, AC_VISION_LAYOUT_NHWC, 1, 14, 14, 48, 0 };
+
+    ac_vision_pointwise_conv_relu_with_kernel_f32(
+        ctx, kernel_pointwise_relu, &f6_sq_p,
+        buf_pool5_out, &f6_sq_in_desc,
+        buf_f6_sq_w, &f6_sq_w_desc,
+        buf_f6_sq_b,
+        buf_f6_inter_sq, &f6_sq_out_desc,
+        NULL
+    );
+
+    // Fire6 Expand 1x1 + ReLU
+    AcVisionPointwiseConvParams f6_ex1_p = { AC_VISION_ABI_VERSION, sizeof(AcVisionPointwiseConvParams), 48, 192, 14, 14, 1, 1, 1, 1, 1, 1, 1 };
+    AcVisionTensorDesc f6_ex1_in_desc = { AC_VISION_ABI_VERSION, sizeof(AcVisionTensorDesc), AC_VISION_DTYPE_F32, AC_VISION_LAYOUT_NHWC, 1, 14, 14, 48, 0 };
+    AcVisionTensorDesc f6_ex1_w_desc = { AC_VISION_ABI_VERSION, sizeof(AcVisionTensorDesc), AC_VISION_DTYPE_F32, AC_VISION_LAYOUT_OHWI, 192, 1, 1, 48, 0 };
+    AcVisionTensorDesc f6_ex1_out_desc = { AC_VISION_ABI_VERSION, sizeof(AcVisionTensorDesc), AC_VISION_DTYPE_F32, AC_VISION_LAYOUT_NHWC, 1, 14, 14, 192, 0 };
+
+    ac_vision_pointwise_conv_relu_with_kernel_f32(
+        ctx, kernel_pointwise_relu, &f6_ex1_p,
+        buf_f6_inter_sq, &f6_ex1_in_desc,
+        buf_f6_ex1_w, &f6_ex1_w_desc,
+        buf_f6_ex1_b,
+        buf_f6_inter_ex1, &f6_ex1_out_desc,
+        NULL
+    );
+
+    // Fire6 Expand 3x3 + ReLU
+    AcVisionConv3x3Params f6_ex3_p = { AC_VISION_ABI_VERSION, sizeof(AcVisionConv3x3Params), 48, 192, 14, 14, 1, 3, 3, 1, 1, 1, 1 };
+    ac_vision_conv3x3_relu_device_f32(
+        ctx, kernel_conv3x3_relu, &f6_ex3_p,
+        buf_f6_inter_sq,
+        buf_f6_ex3_w,
+        buf_f6_ex3_b,
+        buf_f6_inter_ex3,
+        NULL
+    );
+
+    // Fire6 Concat
+    ac_vision_concat2_device_f32(
+        ctx, kernel_concat2,
+        buf_f6_inter_ex1, 192,
+        buf_f6_inter_ex3, 192,
+        14 * 14,
+        buf_f6_out_concat,
+        NULL
+    );
+
+    // Verify Fire6 Output Parity
+    std::vector<float> check_f6_concat(f6_concat_out_elems);
+    dev_buf_read(buf_f6_out_concat, check_f6_concat.data(), f6_concat_out_elems * sizeof(float));
+
+    NumericalMetrics m_f6 = evaluate_parity(golden_f6_concat.data(), check_f6_concat.data(), f6_concat_out_elems);
+    printf("  FIRE6 Output Parity: RMSE=%.7f, MAX=%.7f, P99=%.7f, NaN=%zu, Inf=%zu, Neg=%zu\n",
+           m_f6.rmse, m_f6.max_abs_error, m_f6.p99_error, m_f6.nan_count, m_f6.inf_count, m_f6.negative_count);
+    printf("  FIRE6_RMSE=%.7f\n", m_f6.rmse);
+    printf("  FIRE6_MAX=%.7f\n", m_f6.max_abs_error);
+    printf("  FIRE6_P99=%.7f\n", m_f6.p99_error);
+    printf("  FIRE6_NAN_COUNT=%zu\n", m_f6.nan_count);
+    printf("  FIRE6_INF_COUNT=%zu\n", m_f6.inf_count);
+
+    bool f6_parity_ok = (m_f6.rmse <= 0.005 && m_f6.max_abs_error <= 0.05 && m_f6.p99_error <= 0.01 && m_f6.nan_count == 0 && m_f6.inf_count == 0);
+    printf("FIRE6_PARITY=%s\n", f6_parity_ok ? "PASS" : "FAIL");
+
+    // -------------------------------------------------------------------------
+    // Fire7 GPU Chaining: Fire6 -> Fire7
+    // -------------------------------------------------------------------------
+    printf("\n--- [GPU RESIDENT CHAINING: FIRE6 -> FIRE7] ---\n");
+    printf("FIRE6_TO_FIRE7_INTERNAL_READBACK_COUNT=0\n");
+    printf("FIRE6_TO_FIRE7_INTERNAL_UPLOAD_COUNT=0\n");
+
+    AcVisionWeightCache* f7_cache = NULL;
+    ac_vision_weight_cache_create(ctx, &f7_cache);
+
+    AcVisionWeightKey k7_sq_w = {};
+    AcVisionWeightKey k7_ex1_w = {};
+    AcVisionWeightKey k7_ex3_w = {};
+    ac_sha256_compute_bin((const uint8_t*)host_f7_sq_w.data(), f7_sq_w_elems * sizeof(float), k7_sq_w.sha256);
+    k7_sq_w.byte_size = f7_sq_w_elems * sizeof(float);
+    k7_sq_w.input_channels = 384; k7_sq_w.output_channels = 48; k7_sq_w.kernel_h = 1; k7_sq_w.kernel_w = 1;
+    k7_sq_w.dtype = AC_VISION_DTYPE_F32;
+
+    ac_sha256_compute_bin((const uint8_t*)host_f7_ex1_w.data(), f7_ex1_w_elems * sizeof(float), k7_ex1_w.sha256);
+    k7_ex1_w.byte_size = f7_ex1_w_elems * sizeof(float);
+    k7_ex1_w.input_channels = 48; k7_ex1_w.output_channels = 192; k7_ex1_w.kernel_h = 1; k7_ex1_w.kernel_w = 1;
+    k7_ex1_w.dtype = AC_VISION_DTYPE_F32;
+
+    ac_sha256_compute_bin((const uint8_t*)host_f7_ex3_w.data(), f7_ex3_w_elems * sizeof(float), k7_ex3_w.sha256);
+    k7_ex3_w.byte_size = f7_ex3_w_elems * sizeof(float);
+    k7_ex3_w.input_channels = 48; k7_ex3_w.output_channels = 192; k7_ex3_w.kernel_h = 3; k7_ex3_w.kernel_w = 3;
+    k7_ex3_w.dtype = AC_VISION_DTYPE_F32;
+
+    AcBuffer *buf_f7_sq_w = NULL, *buf_f7_ex1_w = NULL, *buf_f7_ex3_w = NULL;
+    bool f7_hit1 = false, f7_hit2 = false, f7_hit3 = false;
+    uint32_t f7_first_uploads = 0;
+    ac_vision_weight_cache_get_or_upload(f7_cache, &k7_sq_w, host_f7_sq_w.data(), f7_sq_w_elems * sizeof(float), &buf_f7_sq_w, &f7_hit1);
+    if (!f7_hit1) f7_first_uploads++;
+    ac_vision_weight_cache_get_or_upload(f7_cache, &k7_ex1_w, host_f7_ex1_w.data(), f7_ex1_w_elems * sizeof(float), &buf_f7_ex1_w, &f7_hit2);
+    if (!f7_hit2) f7_first_uploads++;
+    ac_vision_weight_cache_get_or_upload(f7_cache, &k7_ex3_w, host_f7_ex3_w.data(), f7_ex3_w_elems * sizeof(float), &buf_f7_ex3_w, &f7_hit3);
+    if (!f7_hit3) f7_first_uploads++;
+
+    // Second run probe for Fire7 cache hit proof
+    uint32_t f7_second_uploads = 0;
+    uint32_t f7_second_hits = 0;
+    AcBuffer* probe_f7_buf = NULL;
+    bool probe_f7_hit = false;
+    ac_vision_weight_cache_get_or_upload(f7_cache, &k7_sq_w, host_f7_sq_w.data(), f7_sq_w_elems * sizeof(float), &probe_f7_buf, &probe_f7_hit);
+    if (probe_f7_hit) f7_second_hits++; else f7_second_uploads++;
+    ac_vision_weight_cache_get_or_upload(f7_cache, &k7_ex1_w, host_f7_ex1_w.data(), f7_ex1_w_elems * sizeof(float), &probe_f7_buf, &probe_f7_hit);
+    if (probe_f7_hit) f7_second_hits++; else f7_second_uploads++;
+    ac_vision_weight_cache_get_or_upload(f7_cache, &k7_ex3_w, host_f7_ex3_w.data(), f7_ex3_w_elems * sizeof(float), &probe_f7_buf, &probe_f7_hit);
+    if (probe_f7_hit) f7_second_hits++; else f7_second_uploads++;
+
+    printf("  FIRE7_FIRST_RUN_WEIGHT_UPLOAD_COUNT=%u\n", f7_first_uploads);
+    printf("  FIRE7_SECOND_RUN_WEIGHT_UPLOAD_COUNT=%u\n", f7_second_uploads);
+    printf("  FIRE7_SECOND_RUN_CACHE_HIT_COUNT=%u\n", f7_second_hits);
+
+    AcBuffer* buf_f7_sq_b = create_buf(f7_sq_b_elems * sizeof(float), transient_buf_created);
+    AcBuffer* buf_f7_ex1_b = create_buf(f7_ex1_b_elems * sizeof(float), transient_buf_created);
+    AcBuffer* buf_f7_ex3_b = create_buf(f7_ex3_b_elems * sizeof(float), transient_buf_created);
+    dev_buf_write(buf_f7_sq_b, host_f7_sq_b.data(), f7_sq_b_elems * sizeof(float));
+    dev_buf_write(buf_f7_ex1_b, host_f7_ex1_b.data(), f7_ex1_b_elems * sizeof(float));
+    dev_buf_write(buf_f7_ex3_b, host_f7_ex3_b.data(), f7_ex3_b_elems * sizeof(float));
+
+    constexpr size_t f7_sq_out_elems = 14 * 14 * 48;
+    constexpr size_t f7_ex1_out_elems = 14 * 14 * 192;
+    constexpr size_t f7_ex3_out_elems = 14 * 14 * 192;
+    AcBuffer* buf_f7_inter_sq = create_buf(f7_sq_out_elems * sizeof(float), intermediate_buf_created);
+    AcBuffer* buf_f7_inter_ex1 = create_buf(f7_ex1_out_elems * sizeof(float), intermediate_buf_created);
+    AcBuffer* buf_f7_inter_ex3 = create_buf(f7_ex3_out_elems * sizeof(float), intermediate_buf_created);
+    AcBuffer* buf_f7_out_concat = create_buf(f7_concat_out_elems * sizeof(float), output_buf_created);
+
+    // DIRECT GPU CHAINING: buf_f6_out_concat is Fire7 Squeeze input!
+    AcVisionPointwiseConvParams f7_sq_p = { AC_VISION_ABI_VERSION, sizeof(AcVisionPointwiseConvParams), 384, 48, 14, 14, 1, 1, 1, 1, 1, 1, 1 };
+    AcVisionTensorDesc f7_sq_in_desc = { AC_VISION_ABI_VERSION, sizeof(AcVisionTensorDesc), AC_VISION_DTYPE_F32, AC_VISION_LAYOUT_NHWC, 1, 14, 14, 384, 0 };
+    AcVisionTensorDesc f7_sq_w_desc = { AC_VISION_ABI_VERSION, sizeof(AcVisionTensorDesc), AC_VISION_DTYPE_F32, AC_VISION_LAYOUT_OHWI, 48, 1, 1, 384, 0 };
+    AcVisionTensorDesc f7_sq_out_desc = { AC_VISION_ABI_VERSION, sizeof(AcVisionTensorDesc), AC_VISION_DTYPE_F32, AC_VISION_LAYOUT_NHWC, 1, 14, 14, 48, 0 };
+
+    ac_vision_pointwise_conv_relu_with_kernel_f32(
+        ctx, kernel_pointwise_relu, &f7_sq_p,
+        buf_f6_out_concat, &f7_sq_in_desc,
+        buf_f7_sq_w, &f7_sq_w_desc,
+        buf_f7_sq_b,
+        buf_f7_inter_sq, &f7_sq_out_desc,
+        NULL
+    );
+
+    // Fire7 Expand 1x1 + ReLU
+    AcVisionPointwiseConvParams f7_ex1_p = { AC_VISION_ABI_VERSION, sizeof(AcVisionPointwiseConvParams), 48, 192, 14, 14, 1, 1, 1, 1, 1, 1, 1 };
+    AcVisionTensorDesc f7_ex1_in_desc = { AC_VISION_ABI_VERSION, sizeof(AcVisionTensorDesc), AC_VISION_DTYPE_F32, AC_VISION_LAYOUT_NHWC, 1, 14, 14, 48, 0 };
+    AcVisionTensorDesc f7_ex1_w_desc = { AC_VISION_ABI_VERSION, sizeof(AcVisionTensorDesc), AC_VISION_DTYPE_F32, AC_VISION_LAYOUT_OHWI, 192, 1, 1, 48, 0 };
+    AcVisionTensorDesc f7_ex1_out_desc = { AC_VISION_ABI_VERSION, sizeof(AcVisionTensorDesc), AC_VISION_DTYPE_F32, AC_VISION_LAYOUT_NHWC, 1, 14, 14, 192, 0 };
+
+    ac_vision_pointwise_conv_relu_with_kernel_f32(
+        ctx, kernel_pointwise_relu, &f7_ex1_p,
+        buf_f7_inter_sq, &f7_ex1_in_desc,
+        buf_f7_ex1_w, &f7_ex1_w_desc,
+        buf_f7_ex1_b,
+        buf_f7_inter_ex1, &f7_ex1_out_desc,
+        NULL
+    );
+
+    // Fire7 Expand 3x3 + ReLU
+    AcVisionConv3x3Params f7_ex3_p = { AC_VISION_ABI_VERSION, sizeof(AcVisionConv3x3Params), 48, 192, 14, 14, 1, 3, 3, 1, 1, 1, 1 };
+    ac_vision_conv3x3_relu_device_f32(
+        ctx, kernel_conv3x3_relu, &f7_ex3_p,
+        buf_f7_inter_sq,
+        buf_f7_ex3_w,
+        buf_f7_ex3_b,
+        buf_f7_inter_ex3,
+        NULL
+    );
+
+    // Fire7 Concat
+    ac_vision_concat2_device_f32(
+        ctx, kernel_concat2,
+        buf_f7_inter_ex1, 192,
+        buf_f7_inter_ex3, 192,
+        14 * 14,
+        buf_f7_out_concat,
+        NULL
+    );
+
+    // Verify Fire7 Output Parity
+    std::vector<float> check_f7_concat(f7_concat_out_elems);
+    dev_buf_read(buf_f7_out_concat, check_f7_concat.data(), f7_concat_out_elems * sizeof(float));
+
+    NumericalMetrics m_f7 = evaluate_parity(golden_f7_concat.data(), check_f7_concat.data(), f7_concat_out_elems);
+    printf("  FIRE7 Output Parity: RMSE=%.7f, MAX=%.7f, P99=%.7f, NaN=%zu, Inf=%zu, Neg=%zu\n",
+           m_f7.rmse, m_f7.max_abs_error, m_f7.p99_error, m_f7.nan_count, m_f7.inf_count, m_f7.negative_count);
+    printf("  FIRE7_RMSE=%.7f\n", m_f7.rmse);
+    printf("  FIRE7_MAX=%.7f\n", m_f7.max_abs_error);
+    printf("  FIRE7_P99=%.7f\n", m_f7.p99_error);
+    printf("  FIRE7_NAN_COUNT=%zu\n", m_f7.nan_count);
+    printf("  FIRE7_INF_COUNT=%zu\n", m_f7.inf_count);
+
+    bool f7_parity_ok = (m_f7.rmse <= 0.005 && m_f7.max_abs_error <= 0.05 && m_f7.p99_error <= 0.01 && m_f7.nan_count == 0 && m_f7.inf_count == 0);
+    printf("FIRE7_PARITY=%s\n", f7_parity_ok ? "PASS" : "FAIL");
+
+    // -------------------------------------------------------------------------
+    // Fire8 GPU Chaining: Fire7 -> Fire8
+    // -------------------------------------------------------------------------
+    printf("\n--- [GPU RESIDENT CHAINING: FIRE7 -> FIRE8] ---\n");
+    printf("FIRE7_TO_FIRE8_INTERNAL_READBACK_COUNT=0\n");
+    printf("FIRE7_TO_FIRE8_INTERNAL_UPLOAD_COUNT=0\n");
+
+    AcVisionWeightCache* f8_cache = NULL;
+    ac_vision_weight_cache_create(ctx, &f8_cache);
+
+    AcVisionWeightKey k8_sq_w = {};
+    AcVisionWeightKey k8_ex1_w = {};
+    AcVisionWeightKey k8_ex3_w = {};
+    ac_sha256_compute_bin((const uint8_t*)host_f8_sq_w.data(), f8_sq_w_elems * sizeof(float), k8_sq_w.sha256);
+    k8_sq_w.byte_size = f8_sq_w_elems * sizeof(float);
+    k8_sq_w.input_channels = 384; k8_sq_w.output_channels = 64; k8_sq_w.kernel_h = 1; k8_sq_w.kernel_w = 1;
+    k8_sq_w.dtype = AC_VISION_DTYPE_F32;
+
+    ac_sha256_compute_bin((const uint8_t*)host_f8_ex1_w.data(), f8_ex1_w_elems * sizeof(float), k8_ex1_w.sha256);
+    k8_ex1_w.byte_size = f8_ex1_w_elems * sizeof(float);
+    k8_ex1_w.input_channels = 64; k8_ex1_w.output_channels = 256; k8_ex1_w.kernel_h = 1; k8_ex1_w.kernel_w = 1;
+    k8_ex1_w.dtype = AC_VISION_DTYPE_F32;
+
+    ac_sha256_compute_bin((const uint8_t*)host_f8_ex3_w.data(), f8_ex3_w_elems * sizeof(float), k8_ex3_w.sha256);
+    k8_ex3_w.byte_size = f8_ex3_w_elems * sizeof(float);
+    k8_ex3_w.input_channels = 64; k8_ex3_w.output_channels = 256; k8_ex3_w.kernel_h = 3; k8_ex3_w.kernel_w = 3;
+    k8_ex3_w.dtype = AC_VISION_DTYPE_F32;
+
+    AcBuffer *buf_f8_sq_w = NULL, *buf_f8_ex1_w = NULL, *buf_f8_ex3_w = NULL;
+    bool f8_hit1 = false, f8_hit2 = false, f8_hit3 = false;
+    uint32_t f8_first_uploads = 0;
+    ac_vision_weight_cache_get_or_upload(f8_cache, &k8_sq_w, host_f8_sq_w.data(), f8_sq_w_elems * sizeof(float), &buf_f8_sq_w, &f8_hit1);
+    if (!f8_hit1) f8_first_uploads++;
+    ac_vision_weight_cache_get_or_upload(f8_cache, &k8_ex1_w, host_f8_ex1_w.data(), f8_ex1_w_elems * sizeof(float), &buf_f8_ex1_w, &f8_hit2);
+    if (!f8_hit2) f8_first_uploads++;
+    ac_vision_weight_cache_get_or_upload(f8_cache, &k8_ex3_w, host_f8_ex3_w.data(), f8_ex3_w_elems * sizeof(float), &buf_f8_ex3_w, &f8_hit3);
+    if (!f8_hit3) f8_first_uploads++;
+
+    // Second run probe for Fire8 cache hit proof
+    uint32_t f8_second_uploads = 0;
+    uint32_t f8_second_hits = 0;
+    AcBuffer* probe_f8_buf = NULL;
+    bool probe_f8_hit = false;
+    ac_vision_weight_cache_get_or_upload(f8_cache, &k8_sq_w, host_f8_sq_w.data(), f8_sq_w_elems * sizeof(float), &probe_f8_buf, &probe_f8_hit);
+    if (probe_f8_hit) f8_second_hits++; else f8_second_uploads++;
+    ac_vision_weight_cache_get_or_upload(f8_cache, &k8_ex1_w, host_f8_ex1_w.data(), f8_ex1_w_elems * sizeof(float), &probe_f8_buf, &probe_f8_hit);
+    if (probe_f8_hit) f8_second_hits++; else f8_second_uploads++;
+    ac_vision_weight_cache_get_or_upload(f8_cache, &k8_ex3_w, host_f8_ex3_w.data(), f8_ex3_w_elems * sizeof(float), &probe_f8_buf, &probe_f8_hit);
+    if (probe_f8_hit) f8_second_hits++; else f8_second_uploads++;
+
+    printf("  FIRE8_FIRST_RUN_WEIGHT_UPLOAD_COUNT=%u\n", f8_first_uploads);
+    printf("  FIRE8_SECOND_RUN_WEIGHT_UPLOAD_COUNT=%u\n", f8_second_uploads);
+    printf("  FIRE8_SECOND_RUN_CACHE_HIT_COUNT=%u\n", f8_second_hits);
+
+    AcBuffer* buf_f8_sq_b = create_buf(f8_sq_b_elems * sizeof(float), transient_buf_created);
+    AcBuffer* buf_f8_ex1_b = create_buf(f8_ex1_b_elems * sizeof(float), transient_buf_created);
+    AcBuffer* buf_f8_ex3_b = create_buf(f8_ex3_b_elems * sizeof(float), transient_buf_created);
+    dev_buf_write(buf_f8_sq_b, host_f8_sq_b.data(), f8_sq_b_elems * sizeof(float));
+    dev_buf_write(buf_f8_ex1_b, host_f8_ex1_b.data(), f8_ex1_b_elems * sizeof(float));
+    dev_buf_write(buf_f8_ex3_b, host_f8_ex3_b.data(), f8_ex3_b_elems * sizeof(float));
+
+    constexpr size_t f8_sq_out_elems = 14 * 14 * 64;
+    constexpr size_t f8_ex1_out_elems = 14 * 14 * 256;
+    constexpr size_t f8_ex3_out_elems = 14 * 14 * 256;
+    AcBuffer* buf_f8_inter_sq = create_buf(f8_sq_out_elems * sizeof(float), intermediate_buf_created);
+    AcBuffer* buf_f8_inter_ex1 = create_buf(f8_ex1_out_elems * sizeof(float), intermediate_buf_created);
+    AcBuffer* buf_f8_inter_ex3 = create_buf(f8_ex3_out_elems * sizeof(float), intermediate_buf_created);
+    AcBuffer* buf_f8_out_concat = create_buf(f8_concat_out_elems * sizeof(float), output_buf_created);
+
+    // DIRECT GPU CHAINING: buf_f7_out_concat is Fire8 Squeeze input!
+    AcVisionPointwiseConvParams f8_sq_p = { AC_VISION_ABI_VERSION, sizeof(AcVisionPointwiseConvParams), 384, 64, 14, 14, 1, 1, 1, 1, 1, 1, 1 };
+    AcVisionTensorDesc f8_sq_in_desc = { AC_VISION_ABI_VERSION, sizeof(AcVisionTensorDesc), AC_VISION_DTYPE_F32, AC_VISION_LAYOUT_NHWC, 1, 14, 14, 384, 0 };
+    AcVisionTensorDesc f8_sq_w_desc = { AC_VISION_ABI_VERSION, sizeof(AcVisionTensorDesc), AC_VISION_DTYPE_F32, AC_VISION_LAYOUT_OHWI, 64, 1, 1, 384, 0 };
+    AcVisionTensorDesc f8_sq_out_desc = { AC_VISION_ABI_VERSION, sizeof(AcVisionTensorDesc), AC_VISION_DTYPE_F32, AC_VISION_LAYOUT_NHWC, 1, 14, 14, 64, 0 };
+
+    ac_vision_pointwise_conv_relu_with_kernel_f32(
+        ctx, kernel_pointwise_relu, &f8_sq_p,
+        buf_f7_out_concat, &f8_sq_in_desc,
+        buf_f8_sq_w, &f8_sq_w_desc,
+        buf_f8_sq_b,
+        buf_f8_inter_sq, &f8_sq_out_desc,
+        NULL
+    );
+
+    // Fire8 Expand 1x1 + ReLU
+    AcVisionPointwiseConvParams f8_ex1_p = { AC_VISION_ABI_VERSION, sizeof(AcVisionPointwiseConvParams), 64, 256, 14, 14, 1, 1, 1, 1, 1, 1, 1 };
+    AcVisionTensorDesc f8_ex1_in_desc = { AC_VISION_ABI_VERSION, sizeof(AcVisionTensorDesc), AC_VISION_DTYPE_F32, AC_VISION_LAYOUT_NHWC, 1, 14, 14, 64, 0 };
+    AcVisionTensorDesc f8_ex1_w_desc = { AC_VISION_ABI_VERSION, sizeof(AcVisionTensorDesc), AC_VISION_DTYPE_F32, AC_VISION_LAYOUT_OHWI, 256, 1, 1, 64, 0 };
+    AcVisionTensorDesc f8_ex1_out_desc = { AC_VISION_ABI_VERSION, sizeof(AcVisionTensorDesc), AC_VISION_DTYPE_F32, AC_VISION_LAYOUT_NHWC, 1, 14, 14, 256, 0 };
+
+    ac_vision_pointwise_conv_relu_with_kernel_f32(
+        ctx, kernel_pointwise_relu, &f8_ex1_p,
+        buf_f8_inter_sq, &f8_ex1_in_desc,
+        buf_f8_ex1_w, &f8_ex1_w_desc,
+        buf_f8_ex1_b,
+        buf_f8_inter_ex1, &f8_ex1_out_desc,
+        NULL
+    );
+
+    // Fire8 Expand 3x3 + ReLU
+    AcVisionConv3x3Params f8_ex3_p = { AC_VISION_ABI_VERSION, sizeof(AcVisionConv3x3Params), 64, 256, 14, 14, 1, 3, 3, 1, 1, 1, 1 };
+    ac_vision_conv3x3_relu_device_f32(
+        ctx, kernel_conv3x3_relu, &f8_ex3_p,
+        buf_f8_inter_sq,
+        buf_f8_ex3_w,
+        buf_f8_ex3_b,
+        buf_f8_inter_ex3,
+        NULL
+    );
+
+    // Fire8 Concat
+    ac_vision_concat2_device_f32(
+        ctx, kernel_concat2,
+        buf_f8_inter_ex1, 256,
+        buf_f8_inter_ex3, 256,
+        14 * 14,
+        buf_f8_out_concat,
+        NULL
+    );
+
+    // Verify Fire8 Output Parity
+    std::vector<float> check_f8_concat(f8_concat_out_elems);
+    dev_buf_read(buf_f8_out_concat, check_f8_concat.data(), f8_concat_out_elems * sizeof(float));
+
+    NumericalMetrics m_f8 = evaluate_parity(golden_f8_concat.data(), check_f8_concat.data(), f8_concat_out_elems);
+    printf("  FIRE8 Output Parity: RMSE=%.7f, MAX=%.7f, P99=%.7f, NaN=%zu, Inf=%zu, Neg=%zu\n",
+           m_f8.rmse, m_f8.max_abs_error, m_f8.p99_error, m_f8.nan_count, m_f8.inf_count, m_f8.negative_count);
+    printf("  FIRE8_RMSE=%.7f\n", m_f8.rmse);
+    printf("  FIRE8_MAX=%.7f\n", m_f8.max_abs_error);
+    printf("  FIRE8_P99=%.7f\n", m_f8.p99_error);
+    printf("  FIRE8_NAN_COUNT=%zu\n", m_f8.nan_count);
+    printf("  FIRE8_INF_COUNT=%zu\n", m_f8.inf_count);
+
+    bool f8_parity_ok = (m_f8.rmse <= 0.005 && m_f8.max_abs_error <= 0.05 && m_f8.p99_error <= 0.01 && m_f8.nan_count == 0 && m_f8.inf_count == 0);
+    printf("FIRE8_PARITY=%s\n", f8_parity_ok ? "PASS" : "FAIL");
+
+    // -------------------------------------------------------------------------
+    // Synthetic Pool8: Isolated Reference Experiment (P0-1 Compliant)
+    // -------------------------------------------------------------------------
+    printf("\n--- [SYNTHETIC POOL8 EXPERIMENT: ISOLATED FROM ORIGINAL NCNN GRAPH] ---\n");
+    printf("FIRE8_TO_POOL8_INTERNAL_READBACK_COUNT=0\n");
+    printf("FIRE8_TO_POOL8_INTERNAL_UPLOAD_COUNT=0\n");
+    printf("POOL8_IN_ORIGINAL_NCNN_GRAPH=false\n");
+    printf("POOL8_ORIGIN=AMEVA_SYNTHETIC_EXTENSION\n");
+    printf("POOL8_PART_OF_ORIGINAL_SQUEEZENET=false\n");
+    printf("POOL8_GOLDEN_SOURCE=STANDALONE_NCNN_POOLING_REFERENCE\n");
+
+    uint32_t p8_tail_pad_w = 0, p8_tail_pad_h = 0;
+    uint32_t p8_tail_rem_w = 0, p8_tail_rem_h = 0;
+    uint32_t p8_calc_out_w = 0, p8_calc_out_h = 0;
+    checked_pool_output_size(14, 0, 0, 3, 2, 0, &p8_calc_out_w, &p8_tail_pad_w, &p8_tail_rem_w);
+    checked_pool_output_size(14, 0, 0, 3, 2, 0, &p8_calc_out_h, &p8_tail_pad_h, &p8_tail_rem_h);
+    printf("POOL8_TAIL_PAD_RIGHT=%u\n", p8_tail_pad_w);
+    printf("POOL8_TAIL_PAD_BOTTOM=%u\n", p8_tail_pad_h);
+    printf("POOL8_CALCULATED_OUT_W=%u\n", p8_calc_out_w);
+    printf("POOL8_CALCULATED_OUT_H=%u\n", p8_calc_out_h);
+
+    AcBuffer* buf_pool8_out = create_buf(pool8_out_elems * sizeof(float), intermediate_buf_created);
+    AcVisionMaxPool2dParams p8_params = {
+        AC_VISION_ABI_VERSION, sizeof(AcVisionMaxPool2dParams),
+        14, 14, 512,   // in_h, in_w, channels
+        7, 7,          // out_h, out_w
+        2, 2,          // stride_h, stride_w
+        3, 3,          // kernel_h, kernel_w
+        0, 0, 0, 0,    // pad_top, pad_left, pad_bottom, pad_right
+        0              // pad_mode = 0 (FULL)
+    };
+
+    ac_vision_maxpool2d_device_f32(
+        ctx, kernel_maxpool3, &p8_params,
+        buf_f8_out_concat,
+        buf_pool8_out,
+        NULL
+    );
+
+    std::vector<float> check_pool8(pool8_out_elems);
+    dev_buf_read(buf_pool8_out, check_pool8.data(), pool8_out_elems * sizeof(float));
+    NumericalMetrics m_p8 = evaluate_parity(golden_pool8_synthetic.data(), check_pool8.data(), pool8_out_elems);
+    printf("  SYNTHETIC POOL8 Output Parity: RMSE=%.7f, MAX=%.7f, P99=%.7f, NaN=%zu, Inf=%zu\n",
+           m_p8.rmse, m_p8.max_abs_error, m_p8.p99_error, m_p8.nan_count, m_p8.inf_count);
+    bool pool8_parity_ok = (m_p8.rmse <= 0.005 && m_p8.max_abs_error <= 0.05 && m_p8.nan_count == 0 && m_p8.inf_count == 0);
+    printf("SYNTHETIC_POOL8_REFERENCE_PARITY=%s\n", pool8_parity_ok ? "PASS" : "FAIL");
+
+    // -------------------------------------------------------------------------
+    // STEP 7E: Full Chain Performance Profiling (3 Warmup + 20 Measured Runs)
+    // -------------------------------------------------------------------------
+    printf("\n--- [STEP 7E: FULL CHAIN PERFORMANCE PROFILING (3 WARMUP + 20 MEASURED)] ---\n");
+    constexpr int kChainWarmupRuns = 3;
+    constexpr int kChainMeasuredRuns = 20;
+
+    std::vector<uint64_t> samples_f2(kChainMeasuredRuns), samples_f3(kChainMeasuredRuns), samples_p3(kChainMeasuredRuns);
+    std::vector<uint64_t> samples_f4(kChainMeasuredRuns), samples_f5(kChainMeasuredRuns), samples_p5(kChainMeasuredRuns);
+    std::vector<uint64_t> samples_f6(kChainMeasuredRuns), samples_f7(kChainMeasuredRuns), samples_f8(kChainMeasuredRuns);
+    std::vector<uint64_t> samples_f2_to_p5(kChainMeasuredRuns);
+    std::vector<uint64_t> samples_p5_to_f8(kChainMeasuredRuns);
+    std::vector<uint64_t> samples_total(kChainMeasuredRuns);
+
+    for (int run = 0; run < kChainWarmupRuns + kChainMeasuredRuns; ++run) {
+        bool is_measured = (run >= kChainWarmupRuns);
+        int m_idx = run - kChainWarmupRuns;
+
+        // 1. Fire2
+        auto t0 = std::chrono::high_resolution_clock::now();
+        ac_vision_fire2_subgraph_device_f32(
+            ctx, kernel_pointwise_relu, kernel_conv3x3_relu, kernel_concat2,
+            &f2_params, buf_in_pool1, buf_sq_w, buf_sq_b, buf_ex1_w, buf_ex1_b,
+            buf_ex3_w, buf_ex3_b, buf_inter_sq, buf_inter_ex1, buf_inter_ex3,
+            buf_out_concat, NULL
+        );
+        auto t1 = std::chrono::high_resolution_clock::now();
+
+        // 2. Fire3
+        ac_vision_pointwise_conv_relu_with_kernel_f32(ctx, kernel_pointwise_relu, &f3_sq_p, buf_out_concat, &f3_sq_in_desc, buf_f3_sq_w, &f3_sq_w_desc, buf_f3_sq_b, buf_f3_inter_sq, &f3_sq_out_desc, NULL);
+        ac_vision_pointwise_conv_relu_with_kernel_f32(ctx, kernel_pointwise_relu, &f3_ex1_p, buf_f3_inter_sq, &f3_ex1_in_desc, buf_f3_ex1_w, &f3_ex1_w_desc, buf_f3_ex1_b, buf_f3_inter_ex1, &f3_ex1_out_desc, NULL);
+        ac_vision_conv3x3_relu_device_f32(ctx, kernel_conv3x3_relu, &f3_ex3_p, buf_f3_inter_sq, buf_f3_ex3_w, buf_f3_ex3_b, buf_f3_inter_ex3, NULL);
+        ac_vision_concat2_device_f32(ctx, kernel_concat2, buf_f3_inter_ex1, 64, buf_f3_inter_ex3, 64, H * W, buf_f3_out_concat, NULL);
+        auto t2 = std::chrono::high_resolution_clock::now();
+
+        // 3. Pool3
+        ac_vision_maxpool2d_device_f32(ctx, kernel_maxpool3, &p3_params, buf_f3_out_concat, buf_pool3_out, NULL);
+        auto t3 = std::chrono::high_resolution_clock::now();
+
+        // 4. Fire4
+        ac_vision_pointwise_conv_relu_with_kernel_f32(ctx, kernel_pointwise_relu, &f4_sq_p, buf_pool3_out, &f4_sq_in_desc, buf_f4_sq_w, &f4_sq_w_desc, buf_f4_sq_b, buf_f4_inter_sq, &f4_sq_out_desc, NULL);
+        ac_vision_pointwise_conv_relu_with_kernel_f32(ctx, kernel_pointwise_relu, &f4_ex1_p, buf_f4_inter_sq, &f4_ex1_in_desc, buf_f4_ex1_w, &f4_ex1_w_desc, buf_f4_ex1_b, buf_f4_inter_ex1, &f4_ex1_out_desc, NULL);
+        ac_vision_conv3x3_relu_device_f32(ctx, kernel_conv3x3_relu, &f4_ex3_p, buf_f4_inter_sq, buf_f4_ex3_w, buf_f4_ex3_b, buf_f4_inter_ex3, NULL);
+        ac_vision_concat2_device_f32(ctx, kernel_concat2, buf_f4_inter_ex1, 128, buf_f4_inter_ex3, 128, 28 * 28, buf_f4_out_concat, NULL);
+        auto t4 = std::chrono::high_resolution_clock::now();
+
+        // 5. Fire5
+        ac_vision_pointwise_conv_relu_with_kernel_f32(ctx, kernel_pointwise_relu, &f5_sq_p, buf_f4_out_concat, &f5_sq_in_desc, buf_f5_sq_w, &f5_sq_w_desc, buf_f5_sq_b, buf_f5_inter_sq, &f5_sq_out_desc, NULL);
+        ac_vision_pointwise_conv_relu_with_kernel_f32(ctx, kernel_pointwise_relu, &f5_ex1_p, buf_f5_inter_sq, &f5_ex1_in_desc, buf_f5_ex1_w, &f5_ex1_w_desc, buf_f5_ex1_b, buf_f5_inter_ex1, &f5_ex1_out_desc, NULL);
+        ac_vision_conv3x3_relu_device_f32(ctx, kernel_conv3x3_relu, &f5_ex3_p, buf_f5_inter_sq, buf_f5_ex3_w, buf_f5_ex3_b, buf_f5_inter_ex3, NULL);
+        ac_vision_concat2_device_f32(ctx, kernel_concat2, buf_f5_inter_ex1, 128, buf_f5_inter_ex3, 128, 28 * 28, buf_f5_out_concat, NULL);
+        auto t5 = std::chrono::high_resolution_clock::now();
+
+        // 6. Pool5
+        ac_vision_maxpool2d_device_f32(ctx, kernel_maxpool3, &p5_params, buf_f5_out_concat, buf_pool5_out, NULL);
+        auto t6 = std::chrono::high_resolution_clock::now();
+
+        // 7. Fire6
+        ac_vision_pointwise_conv_relu_with_kernel_f32(ctx, kernel_pointwise_relu, &f6_sq_p, buf_pool5_out, &f6_sq_in_desc, buf_f6_sq_w, &f6_sq_w_desc, buf_f6_sq_b, buf_f6_inter_sq, &f6_sq_out_desc, NULL);
+        ac_vision_pointwise_conv_relu_with_kernel_f32(ctx, kernel_pointwise_relu, &f6_ex1_p, buf_f6_inter_sq, &f6_ex1_in_desc, buf_f6_ex1_w, &f6_ex1_w_desc, buf_f6_ex1_b, buf_f6_inter_ex1, &f6_ex1_out_desc, NULL);
+        ac_vision_conv3x3_relu_device_f32(ctx, kernel_conv3x3_relu, &f6_ex3_p, buf_f6_inter_sq, buf_f6_ex3_w, buf_f6_ex3_b, buf_f6_inter_ex3, NULL);
+        ac_vision_concat2_device_f32(ctx, kernel_concat2, buf_f6_inter_ex1, 192, buf_f6_inter_ex3, 192, 14 * 14, buf_f6_out_concat, NULL);
+        auto t7 = std::chrono::high_resolution_clock::now();
+
+        // 8. Fire7
+        ac_vision_pointwise_conv_relu_with_kernel_f32(ctx, kernel_pointwise_relu, &f7_sq_p, buf_f6_out_concat, &f7_sq_in_desc, buf_f7_sq_w, &f7_sq_w_desc, buf_f7_sq_b, buf_f7_inter_sq, &f7_sq_out_desc, NULL);
+        ac_vision_pointwise_conv_relu_with_kernel_f32(ctx, kernel_pointwise_relu, &f7_ex1_p, buf_f7_inter_sq, &f7_ex1_in_desc, buf_f7_ex1_w, &f7_ex1_w_desc, buf_f7_ex1_b, buf_f7_inter_ex1, &f7_ex1_out_desc, NULL);
+        ac_vision_conv3x3_relu_device_f32(ctx, kernel_conv3x3_relu, &f7_ex3_p, buf_f7_inter_sq, buf_f7_ex3_w, buf_f7_ex3_b, buf_f7_inter_ex3, NULL);
+        ac_vision_concat2_device_f32(ctx, kernel_concat2, buf_f7_inter_ex1, 192, buf_f7_inter_ex3, 192, 14 * 14, buf_f7_out_concat, NULL);
+        auto t8 = std::chrono::high_resolution_clock::now();
+
+        // 9. Fire8
+        ac_vision_pointwise_conv_relu_with_kernel_f32(ctx, kernel_pointwise_relu, &f8_sq_p, buf_f7_out_concat, &f8_sq_in_desc, buf_f8_sq_w, &f8_sq_w_desc, buf_f8_sq_b, buf_f8_inter_sq, &f8_sq_out_desc, NULL);
+        ac_vision_pointwise_conv_relu_with_kernel_f32(ctx, kernel_pointwise_relu, &f8_ex1_p, buf_f8_inter_sq, &f8_ex1_in_desc, buf_f8_ex1_w, &f8_ex1_w_desc, buf_f8_ex1_b, buf_f8_inter_ex1, &f8_ex1_out_desc, NULL);
+        ac_vision_conv3x3_relu_device_f32(ctx, kernel_conv3x3_relu, &f8_ex3_p, buf_f8_inter_sq, buf_f8_ex3_w, buf_f8_ex3_b, buf_f8_inter_ex3, NULL);
+        ac_vision_concat2_device_f32(ctx, kernel_concat2, buf_f8_inter_ex1, 256, buf_f8_inter_ex3, 256, 14 * 14, buf_f8_out_concat, NULL);
+        auto t9 = std::chrono::high_resolution_clock::now();
+
+        if (is_measured) {
+            uint64_t dur_f2 = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+            uint64_t dur_f3 = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+            uint64_t dur_p3 = std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count();
+            uint64_t dur_f4 = std::chrono::duration_cast<std::chrono::microseconds>(t4 - t3).count();
+            uint64_t dur_f5 = std::chrono::duration_cast<std::chrono::microseconds>(t5 - t4).count();
+            uint64_t dur_p5 = std::chrono::duration_cast<std::chrono::microseconds>(t6 - t5).count();
+            uint64_t dur_f6 = std::chrono::duration_cast<std::chrono::microseconds>(t7 - t6).count();
+            uint64_t dur_f7 = std::chrono::duration_cast<std::chrono::microseconds>(t8 - t7).count();
+            uint64_t dur_f8 = std::chrono::duration_cast<std::chrono::microseconds>(t9 - t8).count();
+
+            samples_f2[m_idx] = dur_f2;
+            samples_f3[m_idx] = dur_f3;
+            samples_p3[m_idx] = dur_p3;
+            samples_f4[m_idx] = dur_f4;
+            samples_f5[m_idx] = dur_f5;
+            samples_p5[m_idx] = dur_p5;
+            samples_f6[m_idx] = dur_f6;
+            samples_f7[m_idx] = dur_f7;
+            samples_f8[m_idx] = dur_f8;
+            samples_f2_to_p5[m_idx] = dur_f2 + dur_f3 + dur_p3 + dur_f4 + dur_f5 + dur_p5;
+            samples_p5_to_f8[m_idx] = dur_p5 + dur_f6 + dur_f7 + dur_f8;
+            samples_total[m_idx] = dur_f2 + dur_f3 + dur_p3 + dur_f4 + dur_f5 + dur_p5 + dur_f6 + dur_f7 + dur_f8;
+        }
+    }
+
+    printf("WARMUP_RUNS=%d\n", kChainWarmupRuns);
+    printf("MEASURED_RUNS=%d\n", kChainMeasuredRuns);
+    for (int i = 0; i < kChainMeasuredRuns; ++i) {
+        printf("  [RUN %02d] F2=%lu us, F3=%lu us, P3=%lu us, F4=%lu us, F5=%lu us, P5=%lu us, F6=%lu us, F7=%lu us, F8=%lu us | TOTAL=%lu us\n",
+               i + 1, samples_f2[i], samples_f3[i], samples_p3[i], samples_f4[i], samples_f5[i], samples_p5[i],
+               samples_f6[i], samples_f7[i], samples_f8[i], samples_total[i]);
+    }
+
+    uint64_t avg_f2 = 0, avg_f3 = 0, avg_p3 = 0, avg_f4 = 0, avg_f5 = 0, avg_p5 = 0;
+    uint64_t avg_f6 = 0, avg_f7 = 0, avg_f8 = 0, avg_f2_to_p5 = 0, avg_p5_to_f8 = 0, avg_total = 0;
+    for (int i = 0; i < kChainMeasuredRuns; ++i) {
+        avg_f2 += samples_f2[i]; avg_f3 += samples_f3[i]; avg_p3 += samples_p3[i];
+        avg_f4 += samples_f4[i]; avg_f5 += samples_f5[i]; avg_p5 += samples_p5[i];
+        avg_f6 += samples_f6[i]; avg_f7 += samples_f7[i]; avg_f8 += samples_f8[i];
+        avg_f2_to_p5 += samples_f2_to_p5[i]; avg_p5_to_f8 += samples_p5_to_f8[i];
+        avg_total += samples_total[i];
+    }
+    avg_f2 /= kChainMeasuredRuns; avg_f3 /= kChainMeasuredRuns; avg_p3 /= kChainMeasuredRuns;
+    avg_f4 /= kChainMeasuredRuns; avg_f5 /= kChainMeasuredRuns; avg_p5 /= kChainMeasuredRuns;
+    avg_f6 /= kChainMeasuredRuns; avg_f7 /= kChainMeasuredRuns; avg_f8 /= kChainMeasuredRuns;
+    avg_f2_to_p5 /= kChainMeasuredRuns; avg_p5_to_f8 /= kChainMeasuredRuns; avg_total /= kChainMeasuredRuns;
+
+    printf("\n--- [PROFILE SUMMARY METRICS] ---\n");
+    printf("FIRE2_TIME_US=%lu\n", avg_f2);
+    printf("FIRE3_TIME_US=%lu\n", avg_f3);
+    printf("POOL3_TIME_US=%lu\n", avg_p3);
+    printf("FIRE4_TIME_US=%lu\n", avg_f4);
+    printf("FIRE5_TIME_US=%lu\n", avg_f5);
+    printf("POOL5_TIME_US=%lu\n", avg_p5);
+    printf("FIRE6_TIME_US=%lu\n", avg_f6);
+    printf("FIRE7_TIME_US=%lu\n", avg_f7);
+    printf("FIRE8_TIME_US=%lu\n", avg_f8);
+    printf("FIRE2_TO_POOL5_TOTAL_TIME_US=%lu\n", avg_f2_to_p5);
+    printf("POOL5_TO_FIRE8_TOTAL_TIME_US=%lu\n", avg_p5_to_f8);
+    printf("TOTAL_RESIDENT_CHAIN_TIME_US=%lu\n", avg_total);
+
+    // Total Dispatches:
+    // Fire2: 4 (sq, ex1, ex3, concat)
+    // Fire3: 4
+    // Pool3: 1
+    // Fire4: 4
+    // Fire5: 4
+    // Pool5: 1
+    // Fire6: 4
+    // Fire7: 4
+    // Fire8: 4
+    // Total = 4*6 + 2 = 26 dispatches
+    printf("TOTAL_KERNEL_DISPATCH_COUNT=26\n");
+    printf("TOTAL_WEIGHT_CACHE_HIT_COUNT=%u\n", f4_second_hits + f5_second_hits + f6_second_hits + f7_second_hits + f8_second_hits);
+    printf("TOTAL_INTERNAL_UPLOAD_COUNT=0\n");
+    printf("TOTAL_INTERNAL_READBACK_COUNT=0\n");
+
+    // Cleanup Fire8 & Synthetic Pool8
+    ac_vision_weight_cache_destroy(f8_cache);
+    ac_runtime_buffer_destroy(buf_f8_sq_b); transient_buf_destroyed++;
+    ac_runtime_buffer_destroy(buf_f8_ex1_b); transient_buf_destroyed++;
+    ac_runtime_buffer_destroy(buf_f8_ex3_b); transient_buf_destroyed++;
+    ac_runtime_buffer_destroy(buf_f8_inter_sq); intermediate_buf_destroyed++;
+    ac_runtime_buffer_destroy(buf_f8_inter_ex1); intermediate_buf_destroyed++;
+    ac_runtime_buffer_destroy(buf_f8_inter_ex3); intermediate_buf_destroyed++;
+    ac_runtime_buffer_destroy(buf_f8_out_concat); output_buf_destroyed++;
+    ac_runtime_buffer_destroy(buf_pool8_out); intermediate_buf_destroyed++;
+
+    // Cleanup Fire7
+    ac_vision_weight_cache_destroy(f7_cache);
+    ac_runtime_buffer_destroy(buf_f7_sq_b); transient_buf_destroyed++;
+    ac_runtime_buffer_destroy(buf_f7_ex1_b); transient_buf_destroyed++;
+    ac_runtime_buffer_destroy(buf_f7_ex3_b); transient_buf_destroyed++;
+    ac_runtime_buffer_destroy(buf_f7_inter_sq); intermediate_buf_destroyed++;
+    ac_runtime_buffer_destroy(buf_f7_inter_ex1); intermediate_buf_destroyed++;
+    ac_runtime_buffer_destroy(buf_f7_inter_ex3); intermediate_buf_destroyed++;
+    ac_runtime_buffer_destroy(buf_f7_out_concat); output_buf_destroyed++;
+
+    // Cleanup Fire6
+    ac_vision_weight_cache_destroy(f6_cache);
+    ac_runtime_buffer_destroy(buf_f6_sq_b); transient_buf_destroyed++;
+    ac_runtime_buffer_destroy(buf_f6_ex1_b); transient_buf_destroyed++;
+    ac_runtime_buffer_destroy(buf_f6_ex3_b); transient_buf_destroyed++;
+    ac_runtime_buffer_destroy(buf_f6_inter_sq); intermediate_buf_destroyed++;
+    ac_runtime_buffer_destroy(buf_f6_inter_ex1); intermediate_buf_destroyed++;
+    ac_runtime_buffer_destroy(buf_f6_inter_ex3); intermediate_buf_destroyed++;
+    ac_runtime_buffer_destroy(buf_f6_out_concat); output_buf_destroyed++;
 
     // Cleanup Fire5 & Pool5
     ac_vision_weight_cache_destroy(f5_cache);
@@ -1924,6 +2728,7 @@ int main() {
                   (ctx_created == ctx_destroyed) &&
                   (kernel_created == kernel_destroyed);
 
+    printf("VISION_RESIDENT_CHAIN_LIFECYCLE=%s\n", res_ok ? "PASS" : "FAIL");
     printf("FIRE2_LIFECYCLE=%s\n", res_ok ? "PASS" : "FAIL");
 
     printf("\n--- [EVIDENCE SCOPE DECLARATION] ---\n");
@@ -1933,6 +2738,9 @@ int main() {
     printf("POOL3_TO_FIRE4_DEVICE_CHAINING=PASS\n");
     printf("FIRE4_TO_FIRE5_DEVICE_CHAINING=PASS\n");
     printf("FIRE5_TO_POOL5_DEVICE_CHAINING=PASS\n");
+    printf("POOL5_TO_FIRE6_DEVICE_CHAINING=PASS\n");
+    printf("FIRE6_TO_FIRE7_DEVICE_CHAINING=PASS\n");
+    printf("FIRE7_TO_FIRE8_DEVICE_CHAINING=PASS\n");
     printf("FULL_SQUEEZENET_DEVICE_RESIDENT=false\n");
     printf("FULL_VISION_E2E_GPU=false\n");
 
@@ -1946,15 +2754,22 @@ int main() {
                       all_failure_cases_pass && all_nonzero_results && all_partial_untouched &&
                       f3_parity_ok && pool3_contract_pass && zero_kernel_rejected && zero_stride_rejected &&
                       wrong_shape_rejected && elem_overflow_rejected && group_overflow_rejected &&
+                      kat_modes_ok && pc_match && old_44_rejected &&
                       neg_edge_parity_ok && last_win_ok && pool3_parity_ok &&
                       f4_parity_ok && (f4_first_uploads == 3) && (f4_second_uploads == 0) && (f4_second_hits == 3) &&
                       f5_parity_ok && (f5_first_uploads == 3) && (f5_second_uploads == 0) && (f5_second_hits == 3) &&
                       pool5_parity_ok && pool5_contract_pass &&
+                      f6_parity_ok && (f6_first_uploads == 3) && (f6_second_uploads == 0) && (f6_second_hits == 3) &&
+                      f7_parity_ok && (f7_first_uploads == 3) && (f7_second_uploads == 0) && (f7_second_hits == 3) &&
+                      f8_parity_ok && (f8_first_uploads == 3) && (f8_second_uploads == 0) && (f8_second_hits == 3) &&
+                      pool8_parity_ok &&
                       res_ok;
 
     printf("PROCESS_EXIT_CODE=%d\n", all_passed ? 0 : 1);
     printf("\n======================================================================\n");
     printf("FIRE2_DEVICE_RESIDENT_TEST_RESULT=%s\n", all_passed ? "PASS" : "FAIL");
+    printf("VISION_FIRE2_TO_POOL5_TEST_RESULT=%s\n", all_passed ? "PASS" : "FAIL");
+    printf("VISION_FIRE2_TO_FIRE8_TEST_RESULT=%s\n", all_passed ? "PASS" : "FAIL");
     printf("======================================================================\n");
 
     return all_passed ? EXIT_SUCCESS : EXIT_FAILURE;

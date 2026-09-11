@@ -17,6 +17,9 @@ layout(push_constant) uniform PushConstants {
     uint kernel_w;
     uint pad_top;
     uint pad_left;
+    uint pad_bottom;
+    uint pad_right;
+    uint pad_mode;
 } pc;
 
 void main() {

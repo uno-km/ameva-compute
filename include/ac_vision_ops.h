@@ -348,6 +348,22 @@ AcResult ac_vision_concat2_device_f32(
  * GPU MaxPool2d Operations (NHWC Layout)
  * ============================================================================= */
 
+#ifdef __cplusplus
+enum class AcVisionPoolPadMode : uint32_t {
+    FULL = 0,
+    VALID = 1,
+    SAME_UPPER = 2,
+    SAME_LOWER = 3,
+};
+#else
+typedef enum {
+    AC_VISION_POOL_PAD_FULL = 0,
+    AC_VISION_POOL_PAD_VALID = 1,
+    AC_VISION_POOL_PAD_SAME_UPPER = 2,
+    AC_VISION_POOL_PAD_SAME_LOWER = 3,
+} AcVisionPoolPadMode;
+#endif
+
 typedef struct {
     uint32_t in_h;
     uint32_t in_w;
@@ -360,10 +376,13 @@ typedef struct {
     uint32_t kernel_w;
     uint32_t pad_top;
     uint32_t pad_left;
+    uint32_t pad_bottom;
+    uint32_t pad_right;
+    uint32_t pad_mode;
 } AcVisionMaxPoolPushConstants;
 
 #if defined(__cplusplus)
-static_assert(sizeof(AcVisionMaxPoolPushConstants) == 44, "AcVisionMaxPoolPushConstants must be exactly 44 bytes");
+static_assert(sizeof(AcVisionMaxPoolPushConstants) == 56, "AcVisionMaxPoolPushConstants must be exactly 56 bytes");
 #endif
 
 typedef struct {
@@ -382,6 +401,7 @@ typedef struct {
     uint32_t pad_left;
     uint32_t pad_bottom;
     uint32_t pad_right;
+    uint32_t pad_mode;
 } AcVisionMaxPool2dParams;
 
 AcResult ac_vision_maxpool2d_kernel_create(
@@ -404,6 +424,33 @@ AcResult ac_vision_maxpool2d_device_f32(
     AcBuffer* out_buf,
     AcEvent** out_event
 );
+
+#ifdef __cplusplus
+AcResult ac_vision_checked_pool_output_size(
+    uint32_t input,
+    uint32_t pad_before,
+    uint32_t pad_after,
+    uint32_t kernel,
+    uint32_t stride,
+    uint32_t pad_mode,
+    uint32_t* output,
+    uint32_t* out_tail_pad = nullptr,
+    uint32_t* out_tail_rem = nullptr
+);
+#else
+AcResult ac_vision_checked_pool_output_size(
+    uint32_t input,
+    uint32_t pad_before,
+    uint32_t pad_after,
+    uint32_t kernel,
+    uint32_t stride,
+    uint32_t pad_mode,
+    uint32_t* output,
+    uint32_t* out_tail_pad,
+    uint32_t* out_tail_rem
+);
+#endif
+
 
 /* =============================================================================
  * SqueezeNet Fire2 Subgraph Operations (Device-Resident & Host Convenience)
@@ -455,10 +502,19 @@ typedef struct {
     uint32_t subgraph_output_readback_count; /* 1 */
     uint32_t device_resident_layer_count;    /* 4 */
     uint32_t later_dispatches_executed_after_failure; /* 0 on error */
+
+    /* MaxPool Effective Padding & Mode Evidence */
+    uint32_t effective_pad_right;
+    uint32_t effective_pad_bottom;
+    uint32_t pool_pad_mode;
 } AcVisionFire2ExecutionProfile;
 
 typedef AcVisionFire2Params AcVisionFire3Params;
 typedef AcVisionFire2Params AcVisionFire4Params;
+typedef AcVisionFire2Params AcVisionFire5Params;
+typedef AcVisionFire2Params AcVisionFire6Params;
+typedef AcVisionFire2Params AcVisionFire7Params;
+typedef AcVisionFire2Params AcVisionFire8Params;
 typedef AcVisionFire2ExecutionProfile AcVisionChainExecutionProfile;
 
 /* =============================================================================

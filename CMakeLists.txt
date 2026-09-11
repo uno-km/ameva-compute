@@ -382,6 +382,24 @@ if(AMEVA_BUILD_VISION_NCNN_TESTS)
         target_link_libraries(generate_strict_fixtures dl m pthread android log)
     endif()
 
+    add_executable(extract_fire6_7_8_fixtures scripts/extract_fire6_7_8_fixtures.cpp)
+    target_include_directories(extract_fire6_7_8_fixtures PRIVATE
+        ${NCNN_DIR}/src
+        ${NCNN_DIR}/build-cpu/src
+    )
+    target_link_libraries(extract_fire6_7_8_fixtures
+        ${NCNN_DIR}/build-cpu/src/libncnn.a
+    )
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(extract_fire6_7_8_fixtures OpenMP::OpenMP_CXX)
+    else()
+        target_compile_options(extract_fire6_7_8_fixtures PRIVATE -fopenmp)
+        target_link_libraries(extract_fire6_7_8_fixtures -fopenmp)
+    endif()
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(extract_fire6_7_8_fixtures dl m pthread android log)
+    endif()
+
     add_executable(test_vision_cat_fire2_integration tests/vision/test_vision_cat_fire2_integration.cpp)
     target_include_directories(test_vision_cat_fire2_integration PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include

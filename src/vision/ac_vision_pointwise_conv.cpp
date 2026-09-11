@@ -41,7 +41,7 @@ static const AcKernelRuntimeMetadata kDefaultMaxPool2dMetadata = {
     "main",
     2,
     kMaxPool2dBindings,
-    sizeof(AcVisionMaxPoolPushConstants), /* push_constant_size: 44 bytes */
+    sizeof(AcVisionMaxPoolPushConstants), /* push_constant_size: 56 bytes */
     { 8, 8, 4 },
     0,
     kMaxPool3NhwcSpvSha256,
@@ -1088,28 +1088,80 @@ AcResult ac_vision_maxpool2d_kernel_destroy(AcKernel* kernel) {
     return ac_runtime_kernel_destroy(kernel);
 }
 
-static bool checked_pool_output_size(
+static inline bool checked_add_u64(uint64_t a, uint64_t b, uint64_t* out) {
+    if (!out) return false;
+    if (UINT64_MAX - a < b) return false;
+    *out = a + b;
+    return true;
+}
+
+#define checked_pool_output_size ac_vision_checked_pool_output_size
+
+AcResult ac_vision_checked_pool_output_size(
     uint32_t input,
     uint32_t pad_before,
     uint32_t pad_after,
     uint32_t kernel,
     uint32_t stride,
-    uint32_t* output)
+    uint32_t pad_mode,
+    uint32_t* output,
+    uint32_t* out_tail_pad,
+    uint32_t* out_tail_rem)
 {
-    if (!output || kernel == 0 || stride == 0) {
-        return false;
+    if (!output) {
+        return AC_ERR_NULL_POINTER;
     }
-    uint64_t padded = (uint64_t)input + pad_before + pad_after;
-    if (padded < kernel) {
-        return false;
+    if (input == 0 || kernel == 0 || stride == 0) {
+        return AC_ERR_INVALID_ARGUMENT;
     }
-    uint64_t numer = padded - kernel;
-    uint64_t out_val = (numer + stride - 1) / stride + 1;
-    if (out_val > UINT32_MAX) {
-        return false;
+
+    uint64_t bordered = 0;
+    if (!checked_add_u64(input, pad_before, &bordered) ||
+        !checked_add_u64(bordered, pad_after, &bordered)) {
+        return AC_ERR_NUMERICAL_OVERFLOW;
     }
-    *output = (uint32_t)out_val;
-    return true;
+
+    if (bordered < kernel) {
+        return AC_ERR_INVALID_SHAPE;
+    }
+
+    if (pad_mode == 0 /* FULL (NCNN style with tail padding) */) {
+        const uint64_t remainder = (bordered - kernel) % stride;
+        const uint64_t tail_pad = (remainder == 0) ? 0 : (stride - remainder);
+        uint64_t effective_bordered = 0;
+        if (!checked_add_u64(bordered, tail_pad, &effective_bordered)) {
+            return AC_ERR_NUMERICAL_OVERFLOW;
+        }
+        const uint64_t out_val = (effective_bordered - kernel) / stride + 1;
+        if (out_val > UINT32_MAX) {
+            return AC_ERR_NUMERICAL_OVERFLOW;
+        }
+        *output = (uint32_t)out_val;
+        if (out_tail_pad) *out_tail_pad = (uint32_t)tail_pad;
+        if (out_tail_rem) *out_tail_rem = (uint32_t)remainder;
+        return AC_SUCCESS;
+    } else if (pad_mode == 1 /* VALID */) {
+        const uint64_t remainder = (bordered - kernel) % stride;
+        const uint64_t out_val = (bordered - kernel) / stride + 1;
+        if (out_val > UINT32_MAX) {
+            return AC_ERR_NUMERICAL_OVERFLOW;
+        }
+        *output = (uint32_t)out_val;
+        if (out_tail_pad) *out_tail_pad = 0;
+        if (out_tail_rem) *out_tail_rem = (uint32_t)remainder;
+        return AC_SUCCESS;
+    } else if (pad_mode == 2 /* SAME_UPPER */ || pad_mode == 3 /* SAME_LOWER */) {
+        const uint64_t out_val = ((uint64_t)input + stride - 1) / stride;
+        if (out_val > UINT32_MAX) {
+            return AC_ERR_NUMERICAL_OVERFLOW;
+        }
+        *output = (uint32_t)out_val;
+        if (out_tail_pad) *out_tail_pad = 0;
+        if (out_tail_rem) *out_tail_rem = 0;
+        return AC_SUCCESS;
+    } else {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
 }
 
 AcResult ac_vision_maxpool2d_device_f32(
@@ -1137,16 +1189,53 @@ AcResult ac_vision_maxpool2d_device_f32(
         return AC_ERR_INVALID_ARGUMENT;
     }
 
+    /* P0-4 Gate: 56-byte Push Constant ABI Verification. Reject legacy 44-byte shaders. */
+    size_t pc_sz = 0;
+    AcResult pc_res = ac_runtime_kernel_get_push_constant_size(kernel, &pc_sz);
+    if (pc_res != AC_SUCCESS) {
+        return pc_res;
+    }
+    if (pc_sz != sizeof(AcVisionMaxPoolPushConstants)) {
+        return AC_ERR_ABI_MISMATCH;
+    }
+
     uint32_t exp_out_h = 0;
     uint32_t exp_out_w = 0;
-    if (!checked_pool_output_size(params->in_h, params->pad_top, params->pad_bottom,
-                                  params->kernel_h, params->stride_h, &exp_out_h) ||
-        !checked_pool_output_size(params->in_w, params->pad_left, params->pad_right,
-                                  params->kernel_w, params->stride_w, &exp_out_w)) {
-        return AC_ERR_INVALID_ARGUMENT;
+    uint32_t tail_pad_h = 0;
+    uint32_t tail_pad_w = 0;
+    uint32_t tail_rem_h = 0;
+    uint32_t tail_rem_w = 0;
+
+    AcResult res_h = checked_pool_output_size(
+        params->in_h, params->pad_top, params->pad_bottom,
+        params->kernel_h, params->stride_h, params->pad_mode,
+        &exp_out_h, &tail_pad_h, &tail_rem_h
+    );
+    if (res_h != AC_SUCCESS) {
+        return res_h;
     }
+
+    AcResult res_w = checked_pool_output_size(
+        params->in_w, params->pad_left, params->pad_right,
+        params->kernel_w, params->stride_w, params->pad_mode,
+        &exp_out_w, &tail_pad_w, &tail_rem_w
+    );
+    if (res_w != AC_SUCCESS) {
+        return res_w;
+    }
+
     if (params->out_h != exp_out_h || params->out_w != exp_out_w) {
         return AC_ERR_INVALID_SHAPE;
+    }
+
+    /* P1-1: Connect effective padding metadata to host contract */
+    if (params->pad_mode == 0 /* FULL */) {
+        if (params->pad_right != 0 && params->pad_right != (params->pad_left + tail_pad_w)) {
+            return AC_ERR_INVALID_SHAPE;
+        }
+        if (params->pad_bottom != 0 && params->pad_bottom != (params->pad_top + tail_pad_h)) {
+            return AC_ERR_INVALID_SHAPE;
+        }
     }
 
     uint64_t in_hw = (uint64_t)params->in_h * (uint64_t)params->in_w;
@@ -1191,7 +1280,10 @@ AcResult ac_vision_maxpool2d_device_f32(
         params->kernel_h,
         params->kernel_w,
         params->pad_top,
-        params->pad_left
+        params->pad_left,
+        params->pad_bottom ? params->pad_bottom : (params->pad_top + tail_pad_h),
+        params->pad_right ? params->pad_right : (params->pad_left + tail_pad_w),
+        params->pad_mode
     };
 
     AcLaunchDesc ldesc = {};
