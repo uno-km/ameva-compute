@@ -175,3 +175,11 @@ if(UNIX AND NOT APPLE)
 endif()
 add_test(NAME ameva_leaky_relu COMMAND test_ameva_leaky_relu)
 
+add_executable(test_tts_failure_injection tests/tts/test_tts_failure_injection.cpp)
+target_link_libraries(test_tts_failure_injection ac_vulkan_core)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_tts_failure_injection vulkan dl m)
+endif()
+add_test(NAME tts_failure_injection COMMAND test_tts_failure_injection)
+
+
