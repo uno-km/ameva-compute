@@ -180,6 +180,13 @@ if(UNIX AND NOT APPLE)
 endif()
 add_test(NAME amuda_vulkan_sgemm COMMAND test_amuda_vulkan_sgemm)
 
+add_executable(test_amuda_q5_0_dequant tests/test_amuda_q5_0_dequant.cpp)
+target_link_libraries(test_amuda_q5_0_dequant ac_vulkan_core)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_amuda_q5_0_dequant vulkan dl m)
+endif()
+add_test(NAME amuda_q5_0_dequant COMMAND test_amuda_q5_0_dequant)
+
 add_executable(test_amuda_qwen_parity tests/test_amuda_qwen_parity.cpp)
 target_link_libraries(test_amuda_qwen_parity ac_vulkan_core amuda_static)
 if(UNIX AND NOT APPLE)

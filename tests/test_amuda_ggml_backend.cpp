@@ -584,6 +584,7 @@ int main(int argc, char** argv) {
     ggml_build_forward_expand(gf_qwen, t_q_dst);
 
     int64_t dequant_count_before = ggml_backend_ameva_get_q5_0_cpu_dequant_count();
+    int64_t gpu_dequant_before = ggml_backend_ameva_get_q5_0_gpu_dequant_count();
     int64_t sgemm_count_before = ggml_backend_ameva_get_f32_gpu_sgemm_dispatch_count();
 
     enum ggml_status qwen_st = ggml_backend_graph_compute(backend, gf_qwen);
@@ -595,9 +596,11 @@ int main(int argc, char** argv) {
     }
 
     int64_t dequant_count_after = ggml_backend_ameva_get_q5_0_cpu_dequant_count();
+    int64_t gpu_dequant_after = ggml_backend_ameva_get_q5_0_gpu_dequant_count();
     int64_t sgemm_count_after = ggml_backend_ameva_get_f32_gpu_sgemm_dispatch_count();
 
     printf("Q5_0_CPU_DEQUANT_COUNT=%lld\n", (long long)(dequant_count_after - dequant_count_before));
+    printf("Q5_0_GPU_DEQUANT_COUNT=%lld\n", (long long)(gpu_dequant_after - gpu_dequant_before));
     printf("F32_GPU_SGEMM_DISPATCH_COUNT=%lld\n", (long long)(sgemm_count_after - sgemm_count_before));
     printf("QWEN_AMEVA_DISPATCH_COUNT=%lld\n", (long long)(sgemm_count_after - sgemm_count_before));
 

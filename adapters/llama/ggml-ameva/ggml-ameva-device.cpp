@@ -17,6 +17,7 @@ static std::atomic<int64_t> g_ameva_supports_query_count{0};
 static std::atomic<int64_t> g_ameva_supported_op_count{0};
 static std::atomic<int64_t> g_ameva_gpu_op_count{0};
 static std::atomic<int64_t> g_ameva_q5_0_cpu_dequant_count{0};
+static std::atomic<int64_t> g_ameva_q5_0_gpu_dequant_count{0};
 static std::atomic<int64_t> g_ameva_f32_gpu_sgemm_dispatch_count{0};
 static std::atomic<int64_t> g_ameva_context_create_count{0};
 static std::atomic<int64_t> g_ameva_context_destroy_count{0};
@@ -41,6 +42,7 @@ static std::atomic<int64_t> g_generation_phase_dispatch_count{0};
 static std::atomic<int64_t> g_ameva_q5_0_execution_count{0};
 static std::atomic<int64_t> g_ameva_non_q5_0_execution_count{0};
 static std::atomic<uint64_t> g_ameva_cpu_dequant_time_us{0};
+static std::atomic<uint64_t> g_ameva_gpu_dequant_time_us{0};
 static std::atomic<uint64_t> g_ameva_host_to_device_time_us{0};
 static std::atomic<uint64_t> g_ameva_gpu_sgemm_time_us{0};
 static std::atomic<uint64_t> g_ameva_device_to_host_time_us{0};
@@ -53,6 +55,7 @@ struct ShapeMetrics {
     uint64_t q5_bytes = 0;
     uint64_t f32_bytes = 0;
     uint64_t dequant_us = 0;
+    uint64_t gpu_dequant_us = 0;
     uint64_t upload_us = 0;
     uint64_t sgemm_us = 0;
     uint64_t total_us = 0;
@@ -64,8 +67,9 @@ extern "C" {
 void ameva_record_timing_and_shape(
     uint32_t M, uint32_t N, uint32_t K,
     uint64_t q5_bytes, uint64_t f32_bytes,
-    uint64_t dequant_us, uint64_t upload_us, uint64_t sgemm_us, uint64_t d2h_us
+    uint64_t dequant_us, uint64_t gpu_dequant_us, uint64_t upload_us, uint64_t sgemm_us, uint64_t d2h_us
 ) {
+    g_ameva_gpu_dequant_time_us += gpu_dequant_us;
     g_ameva_cpu_dequant_time_us += dequant_us;
     g_ameva_host_to_device_time_us += upload_us;
     g_ameva_gpu_sgemm_time_us += sgemm_us;
@@ -78,9 +82,10 @@ void ameva_record_timing_and_shape(
             sm.q5_bytes += q5_bytes;
             sm.f32_bytes += f32_bytes;
             sm.dequant_us += dequant_us;
+            sm.gpu_dequant_us += gpu_dequant_us;
             sm.upload_us += upload_us;
             sm.sgemm_us += sgemm_us;
-            sm.total_us += (dequant_us + upload_us + sgemm_us + d2h_us);
+            sm.total_us += (dequant_us + gpu_dequant_us + upload_us + sgemm_us + d2h_us);
             return;
         }
     }
@@ -90,13 +95,15 @@ void ameva_record_timing_and_shape(
     sm.q5_bytes = q5_bytes;
     sm.f32_bytes = f32_bytes;
     sm.dequant_us = dequant_us;
+    sm.gpu_dequant_us = gpu_dequant_us;
     sm.upload_us = upload_us;
     sm.sgemm_us = sgemm_us;
-    sm.total_us = (dequant_us + upload_us + sgemm_us + d2h_us);
+    sm.total_us = (dequant_us + gpu_dequant_us + upload_us + sgemm_us + d2h_us);
     s_shape_metrics.push_back(sm);
 }
 
 uint64_t ggml_backend_ameva_get_cpu_dequant_time_us(void) { return g_ameva_cpu_dequant_time_us.load(); }
+uint64_t ggml_backend_ameva_get_gpu_dequant_time_us(void) { return g_ameva_gpu_dequant_time_us.load(); }
 uint64_t ggml_backend_ameva_get_host_to_device_time_us(void) { return g_ameva_host_to_device_time_us.load(); }
 uint64_t ggml_backend_ameva_get_gpu_sgemm_time_us(void) { return g_ameva_gpu_sgemm_time_us.load(); }
 uint64_t ggml_backend_ameva_get_device_to_host_time_us(void) { return g_ameva_device_to_host_time_us.load(); }
@@ -114,6 +121,8 @@ int64_t ggml_backend_ameva_get_supports_query_count(void) { return g_ameva_suppo
 int64_t ggml_backend_ameva_get_supported_op_count(void) { return g_ameva_supported_op_count.load(); }
 int64_t ggml_backend_ameva_get_gpu_op_count(void) { return g_ameva_gpu_op_count.load(); }
 int64_t ggml_backend_ameva_get_q5_0_cpu_dequant_count(void) { return g_ameva_q5_0_cpu_dequant_count.load(); }
+int64_t ggml_backend_ameva_get_q5_0_gpu_dequant_count(void) { return g_ameva_q5_0_gpu_dequant_count.load(); }
+void ameva_increment_q5_0_gpu_dequant_count(void) { g_ameva_q5_0_gpu_dequant_count.fetch_add(1, std::memory_order_relaxed); }
 int64_t ggml_backend_ameva_get_f32_gpu_sgemm_dispatch_count(void) { return g_ameva_f32_gpu_sgemm_dispatch_count.load(); }
 int64_t ggml_backend_ameva_get_context_create_count(void) { return g_ameva_context_create_count.load(); }
 int64_t ggml_backend_ameva_get_context_destroy_count(void) { return g_ameva_context_destroy_count.load(); }

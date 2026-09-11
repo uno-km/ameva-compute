@@ -4,6 +4,7 @@
 #include "ac_runtime.h"
 #include "ac_dispatch.h"
 #include "ggml_mul_mat_spv.h"
+#include "q5_0_dequant_spv.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -16,6 +17,7 @@
 
 void ameva_increment_gpu_op_count(void);
 void ameva_increment_q5_0_cpu_dequant_count(void);
+void ameva_increment_q5_0_gpu_dequant_count(void);
 void ameva_increment_f32_gpu_sgemm_dispatch_count(void);
 void ameva_increment_context_create_count(void);
 void ameva_increment_context_destroy_count(void);
@@ -183,9 +185,68 @@ static AcKernel* ameva_get_mul_mat_kernel() {
     return s_kernel;
 }
 
+
+static AcKernel* s_kernel_dequant = nullptr;
+
+static AcKernel* ameva_get_q5_0_dequant_kernel() {
+    std::lock_guard<std::mutex> lock(s_mutex);
+    if (!s_kernel_dequant) {
+        if (!s_ctx) {
+            AcContextDesc cdesc = { AC_ABI_VERSION, sizeof(AcContextDesc), AC_BACKEND_VULKAN, 0 };
+            AcResult res = ac_runtime_context_create(&cdesc, &s_ctx);
+            if (res != AC_SUCCESS) {
+                fprintf(stderr, "ggml-ameva: failed to create Vulkan AcContext (code %d)\n", res);
+                return nullptr;
+            }
+            ameva_increment_context_create_count();
+        }
+
+        static const AcRuntimeBindingDesc kDequantBindings[2] = {
+            { 0, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE },
+            { 1, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE }
+        };
+
+        AcKernelRuntimeMetadata meta = {
+            "q5_0_dequant",
+            "main",
+            2,
+            kDequantBindings,
+            12, // 3 x uint32: num_blocks, byte_offset_src, elem_offset_dst
+            { 64, 1, 1 },
+            0,
+            kQ5_0DequantSpvSha256,
+            0,
+            nullptr
+        };
+
+        AcKernelDesc kdesc = {
+            AC_ABI_VERSION,
+            sizeof(AcKernelDesc),
+            kQ5_0DequantSpv,
+            kQ5_0DequantSpvByteSize,
+            &meta,
+            0,
+            nullptr
+        };
+
+        AcResult res = ac_runtime_kernel_create(s_ctx, &kdesc, &s_kernel_dequant);
+        if (res != AC_SUCCESS) {
+            fprintf(stderr, "ggml-ameva: failed to create q5_0_dequant AcKernel (code %d)\n", res);
+            return nullptr;
+        }
+        ameva_increment_kernel_create_count();
+    }
+    return s_kernel_dequant;
+}
+
 void ggml_backend_ameva_teardown(void) {
     std::lock_guard<std::mutex> lock(s_mutex);
     ameva_buffer_teardown();
+    if (s_kernel_dequant) {
+        ac_runtime_kernel_destroy(s_kernel_dequant);
+        s_kernel_dequant = nullptr;
+        ameva_increment_kernel_destroy_count();
+    }
     if (s_kernel) {
         ac_runtime_kernel_destroy(s_kernel);
         s_kernel = nullptr;
@@ -337,6 +398,7 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
         };
 
         uint64_t node_dequant_us = 0;
+        uint64_t node_gpu_dequant_us = 0;
         uint64_t node_upload_us = 0;
         uint64_t node_sgemm_us = 0;
         uint64_t node_readback_us = 0;
@@ -349,49 +411,115 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
                 return GGML_STATUS_FAILED;
             }
 
-            // Q5_0 CPU Dequantization Staging -> F32
-            ameva_increment_q5_0_cpu_dequant_count();
+            // Q5_0 GPU-Native Dequantization -> GPU-resident F32 buffer
+            size_t num_blocks = ((size_t)K * N) / 32;
+            size_t q5_raw_bytes = num_blocks * 22;
             size_t f32_bytes = (size_t)K * N * sizeof(float);
-            AcBufferDesc bdesc = { AC_ABI_VERSION, sizeof(AcBufferDesc), (f32_bytes + 63) & ~63, AC_BUFFER_USAGE_STORAGE, 0 };
-            if (ac_runtime_buffer_create(ctx, &bdesc, &temp_src0) != AC_SUCCESS) {
+
+            // Step 1a: Allocate GPU Raw Q5_0 buffer and upload raw Q5_0 bytes
+            AcBuffer* raw_q5_buf = nullptr;
+            AcBufferDesc bdesc_q5 = { AC_ABI_VERSION, sizeof(AcBufferDesc), (q5_raw_bytes + 63) & ~63, AC_BUFFER_USAGE_STORAGE, 0 };
+            if (ac_runtime_buffer_create(ctx, &bdesc_q5, &raw_q5_buf) != AC_SUCCESS) {
+                cleanup_temps();
                 return GGML_STATUS_FAILED;
             }
             ameva_increment_buffer_create_count();
-            ameva_increment_q5_0_staging_alloc_count();
-            void* map_ptr = nullptr;
-            AcResult mres = ac_runtime_buffer_get_mapped_ptr(temp_src0, &map_ptr);
-            if (mres != AC_SUCCESS || !map_ptr) {
+
+            void* q5_map_ptr = nullptr;
+            auto t_up0_start = std::chrono::high_resolution_clock::now();
+            AcResult mres = ac_runtime_buffer_get_mapped_ptr(raw_q5_buf, &q5_map_ptr);
+            if (mres != AC_SUCCESS || !q5_map_ptr) {
+                ac_runtime_buffer_destroy(raw_q5_buf);
+                ameva_increment_buffer_destroy_count();
                 cleanup_temps();
                 return GGML_STATUS_FAILED;
             }
 
-            size_t q5_row_bytes = (size_t)(K / 32) * 22;
-            const char* q5_src_bytes = (const char*)src0->data;
-            float* f32_dst_ptr = (float*)map_ptr;
-
-            auto t_deq_start = std::chrono::high_resolution_clock::now();
-            for (uint32_t row = 0; row < N; ++row) {
-                const ameva_block_q5_0* row_blocks = (const ameva_block_q5_0*)(q5_src_bytes + row * q5_row_bytes);
-                ameva_dequantize_row_q5_0(row_blocks, f32_dst_ptr + row * K, K);
-            }
-            auto t_deq_end = std::chrono::high_resolution_clock::now();
-            node_dequant_us += std::chrono::duration_cast<std::chrono::microseconds>(t_deq_end - t_deq_start).count();
+            memcpy(q5_map_ptr, src0->data, q5_raw_bytes);
 
             // Failure Injection: FLUSH_SRC0_FAIL
             if (fi == AMEVA_FAIL_FLUSH_SRC0) {
                 fprintf(stderr, "ggml-ameva [FAILURE_INJECTION]: FLUSH_SRC0_FAIL triggered\n");
+                ac_runtime_buffer_destroy(raw_q5_buf);
+                ameva_increment_buffer_destroy_count();
                 cleanup_temps();
                 return GGML_STATUS_FAILED;
             }
 
-            auto t_up0_start = std::chrono::high_resolution_clock::now();
-            AcResult fres = ac_runtime_buffer_flush(temp_src0, 0, f32_bytes);
-            auto t_up0_end = std::chrono::high_resolution_clock::now();
-            node_upload_us += std::chrono::duration_cast<std::chrono::microseconds>(t_up0_end - t_up0_start).count();
-            if (fres != AC_SUCCESS) {
+            if (ac_runtime_buffer_flush(raw_q5_buf, 0, q5_raw_bytes) != AC_SUCCESS) {
+                ac_runtime_buffer_destroy(raw_q5_buf);
+                ameva_increment_buffer_destroy_count();
                 cleanup_temps();
                 return GGML_STATUS_FAILED;
             }
+            auto t_up0_end = std::chrono::high_resolution_clock::now();
+            node_upload_us += std::chrono::duration_cast<std::chrono::microseconds>(t_up0_end - t_up0_start).count();
+
+            // Step 1b: Allocate GPU F32 destination buffer
+            AcBufferDesc bdesc_f32 = { AC_ABI_VERSION, sizeof(AcBufferDesc), (f32_bytes + 63) & ~63, AC_BUFFER_USAGE_STORAGE, 0 };
+            if (ac_runtime_buffer_create(ctx, &bdesc_f32, &temp_src0) != AC_SUCCESS) {
+                ac_runtime_buffer_destroy(raw_q5_buf);
+                ameva_increment_buffer_destroy_count();
+                cleanup_temps();
+                return GGML_STATUS_FAILED;
+            }
+            ameva_increment_buffer_create_count();
+            ameva_increment_q5_0_staging_alloc_count();
+
+            // Step 1c: Dispatch GPU Q5_0 Dequant Kernel
+            AcKernel* deq_kernel = ameva_get_q5_0_dequant_kernel();
+            if (!deq_kernel) {
+                ac_runtime_buffer_destroy(raw_q5_buf);
+                ameva_increment_buffer_destroy_count();
+                cleanup_temps();
+                return GGML_STATUS_FAILED;
+            }
+
+            uint32_t deq_pc[3] = { (uint32_t)num_blocks, 0, 0 };
+            AcBuffer* deq_bufs[2] = { raw_q5_buf, temp_src0 };
+            uint32_t grid_blocks = ((uint32_t)num_blocks + 63) / 64;
+
+            AcLaunchDesc deq_desc = {
+                AC_ABI_VERSION,
+                sizeof(AcLaunchDesc),
+                deq_kernel,
+                deq_bufs,
+                2,
+                deq_pc,
+                sizeof(deq_pc),
+                { grid_blocks, 1, 1 }
+            };
+
+            auto t_deq_start = std::chrono::high_resolution_clock::now();
+            AcEvent* ev_deq = nullptr;
+            AcResult dres = ac_runtime_dispatch(ctx, &deq_desc, &ev_deq);
+            if (dres != AC_SUCCESS) {
+                ac_runtime_buffer_destroy(raw_q5_buf);
+                ameva_increment_buffer_destroy_count();
+                cleanup_temps();
+                return GGML_STATUS_FAILED;
+            }
+            if (ev_deq) {
+                ameva_increment_event_create_count();
+                AcResult wres = ac_runtime_event_wait(ev_deq, 5000000000ULL);
+                ac_runtime_event_destroy(ev_deq);
+                ameva_increment_event_destroy_count();
+                if (wres != AC_SUCCESS) {
+                    ac_runtime_buffer_destroy(raw_q5_buf);
+                    ameva_increment_buffer_destroy_count();
+                    cleanup_temps();
+                    return GGML_STATUS_FAILED;
+                }
+            }
+            auto t_deq_end = std::chrono::high_resolution_clock::now();
+            node_gpu_dequant_us += std::chrono::duration_cast<std::chrono::microseconds>(t_deq_end - t_deq_start).count();
+            ameva_increment_q5_0_gpu_dequant_count();
+
+            // Destroy raw_q5_buf now that dequantization into temp_src0 is complete
+            ac_runtime_buffer_destroy(raw_q5_buf);
+            ameva_increment_buffer_destroy_count();
+
+            // buf_src0 points directly to GPU-resident F32 buffer!
             buf_src0 = temp_src0;
             off_src0 = 0;
         } else {
@@ -628,7 +756,7 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
             M, N, K,
             (src0->type == GGML_TYPE_Q5_0) ? ((size_t)(K / 32) * 22 * N) : 0,
             (size_t)K * N * sizeof(float),
-            node_dequant_us, node_upload_us, node_sgemm_us, node_readback_us
+            node_dequant_us, node_gpu_dequant_us, node_upload_us, node_sgemm_us, node_readback_us
         );
 
         cleanup_temps();

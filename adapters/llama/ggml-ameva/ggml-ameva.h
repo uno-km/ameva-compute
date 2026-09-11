@@ -29,6 +29,7 @@ GGML_API int64_t ggml_backend_ameva_get_supports_query_count(void);
 GGML_API int64_t ggml_backend_ameva_get_supported_op_count(void);
 GGML_API int64_t ggml_backend_ameva_get_gpu_op_count(void);
 GGML_API int64_t ggml_backend_ameva_get_q5_0_cpu_dequant_count(void);
+GGML_API int64_t ggml_backend_ameva_get_q5_0_gpu_dequant_count(void);
 GGML_API int64_t ggml_backend_ameva_get_f32_gpu_sgemm_dispatch_count(void);
 GGML_API int64_t ggml_backend_ameva_get_context_create_count(void);
 GGML_API int64_t ggml_backend_ameva_get_context_destroy_count(void);
@@ -53,13 +54,14 @@ GGML_API void ameva_plugin_diagnostics_dump(void);
 
 // Timing & Shape Diagnostics
 GGML_API uint64_t ggml_backend_ameva_get_cpu_dequant_time_us(void);
+GGML_API uint64_t ggml_backend_ameva_get_gpu_dequant_time_us(void);
 GGML_API uint64_t ggml_backend_ameva_get_host_to_device_time_us(void);
 GGML_API uint64_t ggml_backend_ameva_get_gpu_sgemm_time_us(void);
 GGML_API uint64_t ggml_backend_ameva_get_device_to_host_time_us(void);
 void ameva_record_timing_and_shape(
     uint32_t M, uint32_t N, uint32_t K,
     uint64_t q5_bytes, uint64_t f32_bytes,
-    uint64_t dequant_us, uint64_t upload_us, uint64_t sgemm_us, uint64_t d2h_us
+    uint64_t dequant_us, uint64_t gpu_dequant_us, uint64_t upload_us, uint64_t sgemm_us, uint64_t d2h_us
 );
 
 // Failure Injection Hooks (P0 Hardening Verification)
