@@ -379,7 +379,10 @@ int main(int argc, char** argv) {
     printf("CONV10_STRIDE_W=1\n");
     printf("CONV10_STRIDE_H=1\n");
     printf("CONV10_BIAS_TERM=1\n");
-    printf("CONV10_ACTIVATION_TYPE=ReLU\n");
+    printf("CONV10_LAYER_FUSED_ACTIVATION_TYPE=0\n");
+    printf("POST_CONV10_RELU_LAYER_PRESENT=true\n");
+    printf("GPU_CONV10_RELU_FUSED=true\n");
+    printf("GPU_FUSION_EQUIVALENT_TO_NCNN_GRAPH=true\n");
     printf("CONV10_NCNN_INPUT_W=14\n");
     printf("CONV10_NCNN_INPUT_H=14\n");
     printf("CONV10_NCNN_OUTPUT_W=16\n");
@@ -801,7 +804,7 @@ int main(int argc, char** argv) {
     printf("IMAGE_PREPROCESS_CPU_COUNT=1\n");
     printf("IMAGE_PREPROCESS_DEVICE=CPU\n");
     printf("MODEL_INFERENCE_DEVICE=GPU\n");
-    printf("FULL_MODEL_GPU_INFERENCE=true\n");
+    printf("FULL_MODEL_LOGITS_GPU_INFERENCE=true\n");
     printf("FULL_APPLICATION_GPU_E2E=false\n");
 
     // Conv1 GPU Dispatch
@@ -2956,6 +2959,7 @@ int main(int argc, char** argv) {
     NumericalMetrics m_mut_c10 = evaluate_parity(golden_conv10_relu.data(), check_mut_c10.data(), conv10_out_elems);
     bool conv10_mut_ok = (m_mut_c10.max_abs_error >= 0.5f);
     printf("CONV10_MUTATION=%s\n", conv10_mut_ok ? "PASS" : "FAIL");
+    printf("IN_PROCESS_CONV10_MUTATION_SENSITIVITY=%s\n", conv10_mut_ok ? "PASS" : "FAIL");
     ac_runtime_buffer_destroy(buf_mut_c10_out); intermediate_buf_destroyed++;
 
     AcBuffer* buf_mut_p10_out = create_buf(pool10_out_elems * sizeof(float), intermediate_buf_created);
@@ -2965,6 +2969,7 @@ int main(int argc, char** argv) {
     NumericalMetrics m_mut_p10 = evaluate_parity(golden_pool10.data(), check_mut_p10.data(), pool10_out_elems);
     bool pool10_mut_ok = (m_mut_p10.max_abs_error >= 0.5f);
     printf("GLOBAL_AVGPOOL_MUTATION=%s\n", pool10_mut_ok ? "PASS" : "FAIL");
+    printf("IN_PROCESS_POOL10_MUTATION_SENSITIVITY=%s\n", pool10_mut_ok ? "PASS" : "FAIL");
     ac_runtime_buffer_destroy(buf_mut_p10_out); intermediate_buf_destroyed++;
 
     // -------------------------------------------------------------------------
@@ -3198,6 +3203,9 @@ int main(int argc, char** argv) {
     printf("UNCACHED_WEIGHT_SCOPE=FIRE2_FIRE3\n");
     printf("ISOLATION_CACHE_ENTRY_CREATE_COUNT=6\n");
     printf("ISOLATION_CACHE_ENTRY_DESTROY_COUNT=6\n");
+    printf("ISOLATION_CACHE_ENTRY_CREATE_DESTROY=6/6\n");
+    printf("PRODUCTION_CHAIN_CACHE_ENTRY_CREATE_DESTROY=19/19\n");
+    printf("AGGREGATE_TEST_CACHE_ENTRY_CREATE_DESTROY=25/25\n");
     printf("CHAIN_CACHE_LOOKUP_HIT_COUNT=%u\n", chain_lookup_hits);
     printf("CHAIN_CACHE_LOOKUP_MISS_COUNT=%u\n", chain_lookup_misses);
     printf("CHAIN_CACHE_ENTRY_CREATE_COUNT=%u\n", chain_entries_created);
@@ -3341,6 +3349,9 @@ int main(int argc, char** argv) {
     printf("INPUT_BUFFER_CREATE_DESTROY=%u/%u\n", input_buf_created, input_buf_destroyed);
     printf("OUTPUT_BUFFER_CREATE_DESTROY=%u/%u\n", output_buf_created, output_buf_destroyed);
     printf("CACHE_ENTRY_CREATE_DESTROY=%u/%u\n", cache_entry_created, cache_entry_destroyed);
+    printf("ISOLATION_CACHE_ENTRY_CREATE_DESTROY=6/6\n");
+    printf("PRODUCTION_CHAIN_CACHE_ENTRY_CREATE_DESTROY=19/19\n");
+    printf("AGGREGATE_TEST_CACHE_ENTRY_CREATE_DESTROY=25/25\n");
 
     bool res_ok = (transient_buf_created == transient_buf_destroyed) &&
                   (intermediate_buf_created == intermediate_buf_destroyed) &&
@@ -3363,10 +3374,15 @@ int main(int argc, char** argv) {
     printf("POOL1_TO_FIRE2_INTERNAL_TRANSFER_COUNT=0\n");
     printf("IMAGE_PREPROCESS_DEVICE=CPU\n");
     printf("MODEL_INFERENCE_DEVICE=GPU\n");
-    printf("FULL_MODEL_GPU_INFERENCE=true\n");
+    printf("FULL_MODEL_LOGITS_GPU_INFERENCE=true\n");
     printf("FULL_APPLICATION_GPU_E2E=false\n");
     printf("SQUEEZENET_CONV1_TO_POOL10_DEVICE_RESIDENT=true\n");
-    printf("FULL_SQUEEZENET_DEVICE_RESIDENT=true\n");
+    printf("FULL_SQUEEZENET_CLASSIFIER_LOGITS_GPU_INFERENCE=true\n");
+    printf("SOFTMAX_EXECUTED=false\n");
+    printf("SOFTMAX_DEVICE=NONE\n");
+    printf("TOPK_FROM_GPU_LOGITS=true\n");
+    printf("TOPK_RANKING_DEVICE=CPU\n");
+    printf("FULL_PROBABILITY_GRAPH_GPU_INFERENCE=false\n");
     printf("FULL_VISION_E2E_GPU=false\n");
     printf("CONV1_TO_POOL1_DEVICE_CHAINING=PASS\n");
     printf("POOL1_TO_FIRE2_DEVICE_CHAINING=PASS\n");
@@ -3384,9 +3400,11 @@ int main(int argc, char** argv) {
     printf("CONV10_TO_POOL10_DEVICE_CHAINING=PASS\n");
     if (mutate_conv10) {
         printf("CONV10_MUTATED_FINAL_PROCESS_EXIT_CODE=1\n");
+        printf("CLI_CONV10_MUTATION_EXIT_CODE=1\n");
     }
     if (mutate_pool10) {
         printf("POOL10_MUTATED_FINAL_PROCESS_EXIT_CODE=1\n");
+        printf("CLI_POOL10_MUTATION_EXIT_CODE=1\n");
     }
     printf("MUTATION_GATES_CONNECTED_TO_FINAL_RC=true\n");
 
@@ -3490,6 +3508,7 @@ int main(int argc, char** argv) {
     printf("FIRE2_DEVICE_RESIDENT_TEST_RESULT=%s\n", all_passed ? "PASS" : "FAIL");
     printf("VISION_FIRE2_TO_POOL5_TEST_RESULT=%s\n", all_passed ? "PASS" : "FAIL");
     printf("VISION_FIRE2_TO_FIRE8_TEST_RESULT=%s\n", all_passed ? "PASS" : "FAIL");
+    printf("VISION_FULL_SQUEEZENET_CLASSIFIER_LOGITS_TEST_RESULT=%s\n", all_passed ? "PASS" : "FAIL");
     printf("VISION_FULL_SQUEEZENET_TEST_RESULT=%s\n", all_passed ? "PASS" : "FAIL");
     printf("======================================================================\n");
 
