@@ -519,6 +519,45 @@ typedef AcVisionFire2Params AcVisionFire9Params;
 typedef AcVisionFire2ExecutionProfile AcVisionChainExecutionProfile;
 
 /* =============================================================================
+ * SqueezeNet Conv1 (3x3 Conv with Stride=2 + ReLU) Operations
+ * ============================================================================= */
+
+typedef struct {
+    uint32_t abi_version;       /* Must match AC_VISION_ABI_VERSION */
+    uint32_t struct_size;       /* Must match sizeof(AcVisionConv1Params) */
+    uint32_t in_h;              /* 227 */
+    uint32_t in_w;              /* 227 */
+    uint32_t in_c;              /* 3 */
+    uint32_t out_h;             /* 113 */
+    uint32_t out_w;             /* 113 */
+    uint32_t out_c;             /* 64 */
+    uint32_t has_bias;          /* 1 */
+} AcVisionConv1Params;
+
+AcResult ac_vision_conv1_relu_kernel_create(
+    AcContext* ctx,
+    const uint32_t* spirv_code,
+    size_t code_size_bytes,
+    const char* expected_sha256,
+    AcKernel** out_kernel
+);
+
+AcResult ac_vision_conv1_relu_kernel_destroy(
+    AcKernel* kernel
+);
+
+AcResult ac_vision_conv1_relu_device_f32(
+    AcContext* ctx,
+    AcKernel* kernel,
+    const AcVisionConv1Params* params,
+    AcBuffer* in_buf,
+    AcBuffer* weight_buf,
+    AcBuffer* bias_buf,
+    AcBuffer* out_buf,
+    AcEvent** out_event
+);
+
+/* =============================================================================
  * SqueezeNet Conv10 (1x1 Conv with Pad=1 + ReLU) Operations
  * ============================================================================= */
 

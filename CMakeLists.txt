@@ -296,6 +296,8 @@ add_vision_shader(pointwise_conv_relu_mutated PointwiseConvReluMutated)
 add_vision_shader(maxpool3_nhwc MaxPool3Nhwc)
 add_vision_shader(maxpool3_nhwc_mutated MaxPool3NhwcMutated)
 
+add_vision_shader(conv1_relu Conv1Relu)
+add_vision_shader(conv1_relu_mutated Conv1ReluMutated)
 add_vision_shader(conv10_relu Conv10Relu)
 add_vision_shader(conv10_relu_mutated Conv10ReluMutated)
 add_vision_shader(global_avgpool GlobalAvgpool)

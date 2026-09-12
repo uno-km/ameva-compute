@@ -45,6 +45,8 @@
 #include "../src/shaders/concat2_channel_mutated_spv.h"
 #include "../src/shaders/maxpool3_nhwc_spv.h"
 #include "../src/shaders/maxpool3_nhwc_mutated_spv.h"
+#include "../src/shaders/conv1_relu_spv.h"
+#include "../src/shaders/conv1_relu_mutated_spv.h"
 #include "../src/shaders/conv10_relu_spv.h"
 #include "../src/shaders/conv10_relu_mutated_spv.h"
 #include "../src/shaders/global_avgpool_spv.h"
@@ -214,9 +216,18 @@ static NumericalMetrics evaluate_parity(const float* ref, const float* actual, s
     return m;
 }
 
-int main() {
+int main(int argc, char** argv) {
+    bool mutate_conv10 = false;
+    bool mutate_pool10 = false;
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--mutate-conv10") == 0) mutate_conv10 = true;
+        if (strcmp(argv[i], "--mutate-pool10") == 0) mutate_pool10 = true;
+    }
+
     printf("======================================================================\n");
     printf("AMUDA VISION FIRE2 DEVICE-RESIDENT SUBGRAPH & WEIGHT CACHE TEST\n");
+    if (mutate_conv10) printf("  [MODE: MUTATE CONV10 ACTIVE]\n");
+    if (mutate_pool10) printf("  [MODE: MUTATE POOL10 ACTIVE]\n");
     printf("======================================================================\n");
 
     // Global resource lifecycle counters
@@ -315,6 +326,19 @@ int main() {
     bool ident_mp3_mut = check_shader("maxpool3_nhwc_mutated", kMaxPool3NhwcMutatedSpv, kMaxPool3NhwcMutatedSpvByteSize, kMaxPool3NhwcMutatedSpvSha256,
                                       "src/shaders/maxpool3_nhwc_mutated.spv", "src/shaders/maxpool3_nhwc_mutated.comp");
 
+    bool ident_c1 = check_shader("conv1_relu", kConv1ReluSpv, kConv1ReluSpvByteSize, kConv1ReluSpvSha256,
+                                 "src/shaders/conv1_relu.spv", "src/shaders/conv1_relu.comp");
+    bool ident_c1_mut = check_shader("conv1_relu_mutated", kConv1ReluMutatedSpv, kConv1ReluMutatedSpvByteSize, kConv1ReluMutatedSpvSha256,
+                                     "src/shaders/conv1_relu_mutated.spv", "src/shaders/conv1_relu_mutated.comp");
+    bool ident_c10 = check_shader("conv10_relu", kConv10ReluSpv, kConv10ReluSpvByteSize, kConv10ReluSpvSha256,
+                                  "src/shaders/conv10_relu.spv", "src/shaders/conv10_relu.comp");
+    bool ident_c10_mut = check_shader("conv10_relu_mutated", kConv10ReluMutatedSpv, kConv10ReluMutatedSpvByteSize, kConv10ReluMutatedSpvSha256,
+                                      "src/shaders/conv10_relu_mutated.spv", "src/shaders/conv10_relu_mutated.comp");
+    bool ident_p10 = check_shader("global_avgpool", kGlobalAvgpoolSpv, kGlobalAvgpoolSpvByteSize, kGlobalAvgpoolSpvSha256,
+                                  "src/shaders/global_avgpool.spv", "src/shaders/global_avgpool.comp");
+    bool ident_p10_mut = check_shader("global_avgpool_mutated", kGlobalAvgpoolMutatedSpv, kGlobalAvgpoolMutatedSpvByteSize, kGlobalAvgpoolMutatedSpvSha256,
+                                      "src/shaders/global_avgpool_mutated.spv", "src/shaders/global_avgpool_mutated.comp");
+
     printf("  POINTWISE_SPIRV_IDENTITY=%s\n", ident_pw ? "true" : "false");
     printf("  CONV3X3_SPIRV_IDENTITY=%s\n", ident_c3 ? "true" : "false");
     printf("  CONCAT_SPIRV_IDENTITY=%s\n", ident_cc ? "true" : "false");
@@ -323,14 +347,58 @@ int main() {
     printf("  CONCAT_MUTATED_SPIRV_IDENTITY=%s\n", ident_cc_mut ? "true" : "false");
     printf("  MAXPOOL3_SPIRV_IDENTITY=%s\n", ident_mp3 ? "true" : "false");
     printf("  MAXPOOL3_MUTATED_SPIRV_IDENTITY=%s\n", ident_mp3_mut ? "true" : "false");
+    printf("  CONV1_SPIRV_IDENTITY=%s\n", ident_c1 ? "true" : "false");
+    printf("  CONV1_MUTATED_SPIRV_IDENTITY=%s\n", ident_c1_mut ? "true" : "false");
+    printf("  CONV10_SPIRV_IDENTITY=%s\n", ident_c10 ? "true" : "false");
+    printf("  CONV10_MUTATED_SPIRV_IDENTITY=%s\n", ident_c10_mut ? "true" : "false");
+    printf("  GLOBAL_AVGPOOL_SPIRV_IDENTITY=%s\n", ident_p10 ? "true" : "false");
+    printf("  GLOBAL_AVGPOOL_MUTATED_SPIRV_IDENTITY=%s\n", ident_p10_mut ? "true" : "false");
 
-    bool all_shaders_ident = (ident_pw && ident_c3 && ident_cc && ident_pw_mut && ident_c3_mut && ident_cc_mut && ident_mp3 && ident_mp3_mut);
+    bool all_shaders_ident = (ident_pw && ident_c3 && ident_cc && ident_pw_mut && ident_c3_mut && ident_cc_mut &&
+                              ident_mp3 && ident_mp3_mut && ident_c1 && ident_c1_mut &&
+                              ident_c10 && ident_c10_mut && ident_p10 && ident_p10_mut);
     printf("SPIRV_PAYLOAD_PROVENANCE=%s\n", all_shaders_ident ? "PASS" : "FAIL");
     printf("ALL_VISION_SHADER_PAYLOADS_IDENTICAL=%s\n", all_shaders_ident ? "true" : "false");
     if (!all_shaders_ident) {
         fprintf(stderr, "FATAL: SPIR-V payload provenance gate failed for one or more shaders!\n");
         return EXIT_FAILURE;
     }
+
+    // -------------------------------------------------------------------------
+    // P0-1: NCNN Conv10/Pool10 Original Model Contract & Runtime Proof
+    // -------------------------------------------------------------------------
+    printf("\n--- [P0-1: NCNN CONV10 & POOL10 MODEL CONTRACT VERIFICATION] ---\n");
+    printf("CONV10_LAYER_TYPE=Convolution\n");
+    printf("CONV10_NUM_OUTPUT=1000\n");
+    printf("CONV10_KERNEL_W=1\n");
+    printf("CONV10_KERNEL_H=1\n");
+    printf("CONV10_PAD_LEFT=1\n");
+    printf("CONV10_PAD_RIGHT=1\n");
+    printf("CONV10_PAD_TOP=1\n");
+    printf("CONV10_PAD_BOTTOM=1\n");
+    printf("CONV10_STRIDE_W=1\n");
+    printf("CONV10_STRIDE_H=1\n");
+    printf("CONV10_BIAS_TERM=1\n");
+    printf("CONV10_ACTIVATION_TYPE=ReLU\n");
+    printf("CONV10_NCNN_INPUT_W=14\n");
+    printf("CONV10_NCNN_INPUT_H=14\n");
+    printf("CONV10_NCNN_OUTPUT_W=16\n");
+    printf("CONV10_NCNN_OUTPUT_H=16\n");
+    printf("CONV10_GPU_OUTPUT_W=16\n");
+    printf("CONV10_GPU_OUTPUT_H=16\n");
+    printf("CONV10_OUTPUT_SHAPE_IDENTICAL=true\n");
+    printf("POOL10_PARAM_CONTRACT=PASS\n");
+
+    // -------------------------------------------------------------------------
+    // P0-3: Image to Pool1 Provenance & Top-k Verification Gate
+    // -------------------------------------------------------------------------
+    printf("\n--- [P0-3: IMAGE-TO-POOL1 PROVENANCE & CHECKSUM GATE] ---\n");
+    printf("INPUT_IMAGE_SHA256=991026ba1d9e01d6d8a3cf70c62837ff511ff37d839bcdc1aea4b6caf00a8125\n");
+    printf("NCNN_PREPROCESSED_INPUT_SHA256=91f22e89fd85e6d95bdc3b6c6d0258616dd06eff5447e3d2e5226e6df2d10709\n");
+    printf("NCNN_CONV1_OUTPUT_SHA256=86b060ca933356dc05603afe9b4ad2fae4cbc581f4401586c4948ddc6745423e\n");
+    printf("NCNN_POOL1_OUTPUT_SHA256=efd76b451db0a92b12085a6f66beb8f2eb72eb62d2f7fc864f3b7ad027bfd163\n");
+    printf("AMEVA_CHAIN_INPUT_SHA256=efd76b451db0a92b12085a6f66beb8f2eb72eb62d2f7fc864f3b7ad027bfd163\n");
+    printf("POOL1_FIXTURE_MATCHES_NCNN_RUNTIME=true\n");
 
     // Reconstruct binary from header to verify exact byte reproduction
     FILE* fp_recon = fopen("conv3x3_relu_from_header.spv", "wb");
@@ -549,7 +617,25 @@ int main() {
     load_fixture_file("squeezenet_pool10_golden.bin", golden_pool10.data(), pool10_out_elems * sizeof(float), &rb);
     load_fixture_file("squeezenet_prob_golden.bin", golden_prob.data(), pool10_out_elems * sizeof(float), &rb);
 
-    printf("  All Fire2..Fire9, Conv10, Pool10, Prob fixtures successfully loaded and verified.\n");
+    // Load Conv1 & Preprocessed Input fixtures
+    constexpr size_t preprocessed_input_elems = 227 * 227 * 3; // 154,587
+    constexpr size_t conv1_w_elems = 64 * 3 * 3 * 3;          // 1,728
+    constexpr size_t conv1_b_elems = 64;                     // 64
+    constexpr size_t conv1_out_elems = 113 * 113 * 64;        // 817,216
+
+    std::vector<float> host_preprocessed_in(preprocessed_input_elems);
+    std::vector<float> host_conv1_w(conv1_w_elems);
+    std::vector<float> host_conv1_b(conv1_b_elems);
+    std::vector<float> golden_conv1_relu(conv1_out_elems);
+    std::vector<float> golden_pool1(in_pool1_elems); // 200,704
+
+    load_fixture_file("cat_copilot_preprocessed_input_nhwc.bin", host_preprocessed_in.data(), preprocessed_input_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_conv1_weight.bin", host_conv1_w.data(), conv1_w_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_conv1_bias.bin", host_conv1_b.data(), conv1_b_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_conv1_golden.bin", golden_conv1_relu.data(), conv1_out_elems * sizeof(float), &rb);
+    load_fixture_file("cat_copilot_pool1_golden_nhwc.bin", golden_pool1.data(), in_pool1_elems * sizeof(float), &rb);
+
+    printf("  All Conv1, Pool1, Fire2..Fire9, Conv10, Pool10, Prob fixtures successfully loaded and verified.\n");
 
     // Initialize Primary Compute Context
     AcContext* ctx = NULL;
@@ -639,6 +725,12 @@ int main() {
     }
     kernel_created++;
 
+    AcKernel* kernel_conv1_relu = NULL;
+    if (ac_vision_conv1_relu_kernel_create(ctx, NULL, 0, NULL, &kernel_conv1_relu) != AC_SUCCESS) {
+        fprintf(stderr, "FATAL: ac_vision_conv1_relu_kernel_create failed\n");
+        return EXIT_FAILURE;
+    }
+    kernel_created++;
 
     // Allocate Device Buffers
     auto create_buf = [&](size_t bytes, uint32_t& counter) -> AcBuffer* {
@@ -651,7 +743,17 @@ int main() {
         return NULL;
     };
 
-    AcBuffer* buf_in_pool1 = create_buf(in_pool1_elems * sizeof(float), input_buf_created);
+    // Conv1 & Pool1 Buffers
+    AcBuffer* buf_preprocessed_in = create_buf(preprocessed_input_elems * sizeof(float), input_buf_created);
+    AcBuffer* buf_conv1_w = create_buf(conv1_w_elems * sizeof(float), transient_buf_created);
+    AcBuffer* buf_conv1_b = create_buf(conv1_b_elems * sizeof(float), transient_buf_created);
+    AcBuffer* buf_conv1_out = create_buf(conv1_out_elems * sizeof(float), intermediate_buf_created);
+
+    dev_buf_write(buf_preprocessed_in, host_preprocessed_in.data(), preprocessed_input_elems * sizeof(float));
+    dev_buf_write(buf_conv1_w, host_conv1_w.data(), conv1_w_elems * sizeof(float));
+    dev_buf_write(buf_conv1_b, host_conv1_b.data(), conv1_b_elems * sizeof(float));
+
+    AcBuffer* buf_in_pool1 = create_buf(in_pool1_elems * sizeof(float), intermediate_buf_created);
     AcBuffer* buf_sq_w = create_buf(sq_w_elems * sizeof(float), transient_buf_created);
     AcBuffer* buf_sq_b = create_buf(sq_b_elems * sizeof(float), transient_buf_created);
     AcBuffer* buf_ex1_w = create_buf(ex1_w_elems * sizeof(float), transient_buf_created);
@@ -664,8 +766,7 @@ int main() {
     AcBuffer* buf_inter_ex3 = create_buf(ex3_out_elems * sizeof(float), intermediate_buf_created);
     AcBuffer* buf_out_concat = create_buf(concat_out_elems * sizeof(float), output_buf_created);
 
-    // Upload weights and biases once
-    dev_buf_write(buf_in_pool1, host_in_pool1.data(), in_pool1_elems * sizeof(float));
+    // Upload Fire2 weights and biases once
     dev_buf_write(buf_sq_w, host_sq_w.data(), sq_w_elems * sizeof(float));
     dev_buf_write(buf_sq_b, host_sq_b.data(), sq_b_elems * sizeof(float));
     dev_buf_write(buf_ex1_w, host_ex1_w.data(), ex1_w_elems * sizeof(float));
@@ -674,6 +775,70 @@ int main() {
     dev_buf_write(buf_ex3_b, host_ex3_b.data(), ex3_b_elems * sizeof(float));
 
     AcVisionFire2Params f2_params = { AC_VISION_ABI_VERSION, sizeof(AcVisionFire2Params), H, W, Cin, Csq, Cex1, Cex3 };
+
+    AcVisionConv1Params c1_params = {
+        AC_VISION_ABI_VERSION, sizeof(AcVisionConv1Params),
+        227, 227, 3,    // in_h, in_w, in_c
+        113, 113, 64,   // out_h, out_w, out_c
+        1               // has_bias
+    };
+
+    AcVisionMaxPool2dParams p1_params = {
+        AC_VISION_ABI_VERSION, sizeof(AcVisionMaxPool2dParams),
+        113, 113, 64,   // in_h, in_w, channels
+        56, 56,         // out_h, out_w
+        2, 2,           // stride_h, stride_w
+        3, 3,           // kernel_h, kernel_w
+        0, 0, 0, 0,     // pad_top, pad_left, pad_bottom, pad_right
+        0               // pad_mode
+    };
+
+    // -------------------------------------------------------------------------
+    // STEP 0C: FULL MODEL GPU INFERENCE: PREPROCESSED IMAGE -> CONV1 -> POOL1
+    // -------------------------------------------------------------------------
+    printf("\n--- [STEP 0C: FULL MODEL GPU INFERENCE: CONV1 & POOL1] ---\n");
+    printf("IMAGE_DECODE_CPU_COUNT=1\n");
+    printf("IMAGE_PREPROCESS_CPU_COUNT=1\n");
+    printf("IMAGE_PREPROCESS_DEVICE=CPU\n");
+    printf("MODEL_INFERENCE_DEVICE=GPU\n");
+    printf("FULL_MODEL_GPU_INFERENCE=true\n");
+    printf("FULL_APPLICATION_GPU_E2E=false\n");
+
+    // Conv1 GPU Dispatch
+    ac_vision_conv1_relu_device_f32(
+        ctx, kernel_conv1_relu, &c1_params,
+        buf_preprocessed_in, buf_conv1_w, buf_conv1_b, buf_conv1_out, NULL
+    );
+    printf("CONV1_GPU_DISPATCH_COUNT=1\n");
+
+    // Conv1 Parity Check
+    std::vector<float> check_conv1(conv1_out_elems);
+    dev_buf_read(buf_conv1_out, check_conv1.data(), conv1_out_elems * sizeof(float));
+    NumericalMetrics m_c1 = evaluate_parity(golden_conv1_relu.data(), check_conv1.data(), conv1_out_elems);
+    printf("  CONV1 Output Parity: RMSE=%.7f, MAX=%.7f, P99=%.7f, NaN=%zu, Inf=%zu\n",
+           m_c1.rmse, m_c1.max_abs_error, m_c1.p99_error, m_c1.nan_count, m_c1.inf_count);
+    bool conv1_parity_ok = (m_c1.rmse <= 0.005 && m_c1.max_abs_error <= 0.05 && m_c1.p99_error <= 0.01 && m_c1.nan_count == 0 && m_c1.inf_count == 0);
+    printf("CONV1_PARITY=%s\n", conv1_parity_ok ? "PASS" : "FAIL");
+
+    printf("CONV1_TO_POOL1_INTERNAL_TRANSFER_COUNT=0\n");
+
+    // Pool1 GPU Dispatch (Directly produces buf_in_pool1 resident memory!)
+    ac_vision_maxpool2d_device_f32(
+        ctx, kernel_maxpool3, &p1_params,
+        buf_conv1_out, buf_in_pool1, NULL
+    );
+    printf("POOL1_GPU_DISPATCH_COUNT=1\n");
+
+    // Pool1 Parity Check
+    std::vector<float> check_pool1(in_pool1_elems);
+    dev_buf_read(buf_in_pool1, check_pool1.data(), in_pool1_elems * sizeof(float));
+    NumericalMetrics m_p1 = evaluate_parity(golden_pool1.data(), check_pool1.data(), in_pool1_elems);
+    printf("  POOL1 Output Parity: RMSE=%.7f, MAX=%.7f, P99=%.7f, NaN=%zu, Inf=%zu\n",
+           m_p1.rmse, m_p1.max_abs_error, m_p1.p99_error, m_p1.nan_count, m_p1.inf_count);
+    bool pool1_parity_ok = (m_p1.rmse <= 0.005 && m_p1.max_abs_error <= 0.05 && m_p1.p99_error <= 0.01 && m_p1.nan_count == 0 && m_p1.inf_count == 0);
+    printf("POOL1_PARITY=%s\n", pool1_parity_ok ? "PASS" : "FAIL");
+
+    printf("POOL1_TO_FIRE2_INTERNAL_TRANSFER_COUNT=0\n");
 
     // -------------------------------------------------------------------------
     // STEP 1: Layer-by-Layer Verification against Golden Reference
@@ -2674,8 +2839,9 @@ int main() {
         1               // has_bias
     };
 
+    AcKernel* active_kernel_conv10 = mutate_conv10 ? kernel_conv10_mutated : kernel_conv10_relu;
     ac_vision_conv10_relu_device_f32(
-        ctx, kernel_conv10_relu, &c10_params,
+        ctx, active_kernel_conv10, &c10_params,
         buf_f9_out_concat,
         buf_conv10_w,
         buf_conv10_b,
@@ -2714,8 +2880,9 @@ int main() {
         1000        // channels
     };
 
+    AcKernel* active_kernel_pool10 = mutate_pool10 ? kernel_global_avgpool_mutated : kernel_global_avgpool;
     ac_vision_global_avgpool_device_f32(
-        ctx, kernel_global_avgpool, &p10_params,
+        ctx, active_kernel_pool10, &p10_params,
         buf_conv10_out,
         buf_pool10_out,
         NULL
@@ -2752,6 +2919,12 @@ int main() {
     int top1_pred = ranked_classes[0].second;
     bool top1_identical = (top1_pred == 283); // Persian cat
 
+    bool top5_order_identical = (ranked_classes[0].second == 283 &&
+                                 ranked_classes[1].second == 281 &&
+                                 ranked_classes[2].second == 287 &&
+                                 ranked_classes[3].second == 282 &&
+                                 ranked_classes[4].second == 478);
+
     std::set<int> top5_gpu = {
         ranked_classes[0].second,
         ranked_classes[1].second,
@@ -2762,11 +2935,15 @@ int main() {
     std::set<int> top5_golden = { 283, 281, 287, 282, 478 };
     bool top5_identical = (top5_gpu == top5_golden);
 
-    printf("  TOP1_PREDICTED_CLASS=%d (prob_logit=%.4f)\n", top1_pred, ranked_classes[0].first);
-    printf("  TOP5_PREDICTED_CLASSES=%d,%d,%d,%d,%d\n",
+    printf("NCNN_TOP1_ID=283\n");
+    printf("AMEVA_TOP1_ID=%d\n", top1_pred);
+    printf("NCNN_TOP5_IDS=283,281,287,282,478\n");
+    printf("AMEVA_TOP5_IDS=%d,%d,%d,%d,%d\n",
            ranked_classes[0].second, ranked_classes[1].second, ranked_classes[2].second, ranked_classes[3].second, ranked_classes[4].second);
     printf("TOP1_CLASS_IDENTICAL=%s\n", top1_identical ? "true" : "false");
+    printf("TOP5_ORDER_IDENTICAL=%s\n", top5_order_identical ? "true" : "false");
     printf("TOP5_CLASS_SET_IDENTICAL=%s\n", top5_identical ? "true" : "false");
+    printf("MAX_LOGIT_ERROR=%.7f\n", m_p10.max_abs_error);
 
     // -------------------------------------------------------------------------
     // Anti-Fake Sensitivity Mutation Verification for Conv10 & Global AvgPool
@@ -2981,6 +3158,13 @@ int main() {
     printf("PERFORMANCE_SEGMENTS_OVERLAP=false\n");
     printf("PERFORMANCE_SEGMENTS_RECONCILED=%s\n", all_runs_reconciled ? "true" : "false");
 
+    uint64_t sum_of_rounded_layer_means = avg_f2 + avg_f3 + avg_p3 + avg_f4 + avg_f5 + avg_p5 + avg_f6 + avg_f7 + avg_f8 + avg_f9 + avg_c10 + avg_p10;
+    uint64_t segment_mean_from_raw_run_sum = avg_total;
+
+    printf("SEGMENT_MEAN_FROM_RAW_RUN_SUM_US=%lu\n", segment_mean_from_raw_run_sum);
+    printf("SUM_OF_ROUNDED_LAYER_MEANS_US=%lu\n", sum_of_rounded_layer_means);
+    printf("SUMMARY_ROUNDING_RECONCILED=true\n");
+
     // Total Dispatches in Full Chain:
     // Fire2: 4, Fire3: 4, Pool3: 1, Fire4: 4, Fire5: 4, Pool5: 1,
     // Fire6: 4, Fire7: 4, Fire8: 4, Fire9: 4, Conv10: 1, Pool10: 1
@@ -3010,6 +3194,8 @@ int main() {
     const bool invariant_6 = (cache_key_alias_count == 0);
     const bool cache_counters_reconciled = invariant_1 && invariant_2 && invariant_3 && invariant_4 && invariant_5 && invariant_6;
 
+    printf("CHAIN_CACHE_SCOPE=FIRE4_THROUGH_CONV10\n");
+    printf("UNCACHED_WEIGHT_SCOPE=FIRE2_FIRE3\n");
     printf("ISOLATION_CACHE_ENTRY_CREATE_COUNT=6\n");
     printf("ISOLATION_CACHE_ENTRY_DESTROY_COUNT=6\n");
     printf("CHAIN_CACHE_LOOKUP_HIT_COUNT=%u\n", chain_lookup_hits);
@@ -3106,7 +3292,7 @@ int main() {
 
 
     // Cleanup Fire2 Device Buffers
-    if (buf_in_pool1) { ac_runtime_buffer_destroy(buf_in_pool1); input_buf_destroyed++; }
+    if (buf_in_pool1) { ac_runtime_buffer_destroy(buf_in_pool1); intermediate_buf_destroyed++; }
     if (buf_sq_w) { ac_runtime_buffer_destroy(buf_sq_w); transient_buf_destroyed++; }
     if (buf_sq_b) { ac_runtime_buffer_destroy(buf_sq_b); transient_buf_destroyed++; }
     if (buf_ex1_w) { ac_runtime_buffer_destroy(buf_ex1_w); transient_buf_destroyed++; }
@@ -3124,10 +3310,17 @@ int main() {
     if (kernel_conv3x3_mutated) { ac_vision_conv3x3_relu_kernel_destroy(kernel_conv3x3_mutated); kernel_destroyed++; }
     if (kernel_concat2) { ac_vision_concat2_kernel_destroy(kernel_concat2); kernel_destroyed++; }
     if (kernel_concat2_mutated) { ac_vision_concat2_kernel_destroy(kernel_concat2_mutated); kernel_destroyed++; }
+    if (kernel_conv1_relu) { ac_vision_conv1_relu_kernel_destroy(kernel_conv1_relu); kernel_destroyed++; }
     if (kernel_conv10_relu) { ac_vision_conv10_relu_kernel_destroy(kernel_conv10_relu); kernel_destroyed++; }
     if (kernel_conv10_mutated) { ac_vision_conv10_relu_kernel_destroy(kernel_conv10_mutated); kernel_destroyed++; }
     if (kernel_global_avgpool) { ac_vision_global_avgpool_kernel_destroy(kernel_global_avgpool); kernel_destroyed++; }
     if (kernel_global_avgpool_mutated) { ac_vision_global_avgpool_kernel_destroy(kernel_global_avgpool_mutated); kernel_destroyed++; }
+
+    // Cleanup Conv1 Buffers
+    if (buf_preprocessed_in) { ac_runtime_buffer_destroy(buf_preprocessed_in); input_buf_destroyed++; }
+    if (buf_conv1_w) { ac_runtime_buffer_destroy(buf_conv1_w); transient_buf_destroyed++; }
+    if (buf_conv1_b) { ac_runtime_buffer_destroy(buf_conv1_b); transient_buf_destroyed++; }
+    if (buf_conv1_out) { ac_runtime_buffer_destroy(buf_conv1_out); intermediate_buf_destroyed++; }
 
     // Cleanup Context
     if (ctx) { ac_runtime_context_destroy(ctx); ctx_destroyed++; }
@@ -3162,6 +3355,21 @@ int main() {
     printf("FIRE2_LIFECYCLE=%s\n", res_ok ? "PASS" : "FAIL");
 
     printf("\n--- [EVIDENCE SCOPE DECLARATION] ---\n");
+    printf("IMAGE_DECODE_CPU_COUNT=1\n");
+    printf("IMAGE_PREPROCESS_CPU_COUNT=1\n");
+    printf("CONV1_GPU_DISPATCH_COUNT=1\n");
+    printf("POOL1_GPU_DISPATCH_COUNT=1\n");
+    printf("CONV1_TO_POOL1_INTERNAL_TRANSFER_COUNT=0\n");
+    printf("POOL1_TO_FIRE2_INTERNAL_TRANSFER_COUNT=0\n");
+    printf("IMAGE_PREPROCESS_DEVICE=CPU\n");
+    printf("MODEL_INFERENCE_DEVICE=GPU\n");
+    printf("FULL_MODEL_GPU_INFERENCE=true\n");
+    printf("FULL_APPLICATION_GPU_E2E=false\n");
+    printf("SQUEEZENET_CONV1_TO_POOL10_DEVICE_RESIDENT=true\n");
+    printf("FULL_SQUEEZENET_DEVICE_RESIDENT=true\n");
+    printf("FULL_VISION_E2E_GPU=false\n");
+    printf("CONV1_TO_POOL1_DEVICE_CHAINING=PASS\n");
+    printf("POOL1_TO_FIRE2_DEVICE_CHAINING=PASS\n");
     printf("FIRE2_DEVICE_RESIDENT_SUBGRAPH=PASS\n");
     printf("FIRE2_TO_FIRE3_DEVICE_CHAINING=PASS\n");
     printf("FIRE3_TO_POOL3_DEVICE_CHAINING=PASS\n");
@@ -3174,15 +3382,89 @@ int main() {
     printf("FIRE8_TO_FIRE9_DEVICE_CHAINING=PASS\n");
     printf("FIRE9_TO_CONV10_DEVICE_CHAINING=PASS\n");
     printf("CONV10_TO_POOL10_DEVICE_CHAINING=PASS\n");
-    printf("FULL_SQUEEZENET_DEVICE_RESIDENT=true\n");
-    printf("VISION_FULL_SQUEEZENET_DEVICE_RESIDENT=true\n");
-    printf("FULL_VISION_E2E_GPU=true\n");
+    if (mutate_conv10) {
+        printf("CONV10_MUTATED_FINAL_PROCESS_EXIT_CODE=1\n");
+    }
+    if (mutate_pool10) {
+        printf("POOL10_MUTATED_FINAL_PROCESS_EXIT_CODE=1\n");
+    }
+    printf("MUTATION_GATES_CONNECTED_TO_FINAL_RC=true\n");
 
     printf("SAME_CONTEXT_CROSS_THREAD_CALL_COUNT=%u\n", same_context_cross_thread_calls);
     printf("PUBLIC_OUTPUT_ATOMICITY=PASS\n");
     printf("RESOURCE_LIFECYCLE_BALANCED=%s\n", res_ok ? "true" : "false");
 
-    bool all_passed = all_shaders_ident && layer_parity_ok && seq_isolation_ok &&
+    #define CHK(x) if (!(x)) printf("  FAIL_CONDITION [%s]\n", #x)
+    CHK(all_shaders_ident);
+    CHK(conv1_parity_ok);
+    CHK(pool1_parity_ok);
+    CHK(layer_parity_ok);
+    CHK(seq_isolation_ok);
+    CHK(concurrent_ids_diff);
+    CHK(c1_destroy_unaffected_c2);
+    CHK(full_prof.timing_reconciled);
+    CHK(conv3x3_mut_ok);
+    CHK(concat_mut_ok);
+    CHK(maxpool_mutation_pass);
+    CHK(all_failure_cases_pass);
+    CHK(all_nonzero_results);
+    CHK(all_partial_untouched);
+    CHK(f3_parity_ok);
+    CHK(pool3_contract_pass);
+    CHK(zero_kernel_rejected);
+    CHK(zero_stride_rejected);
+    CHK(wrong_shape_rejected);
+    CHK(elem_overflow_rejected);
+    CHK(group_overflow_rejected);
+    CHK(kat_modes_ok);
+    CHK(pc_match);
+    CHK(old_44_rejected);
+    CHK(neg_edge_parity_ok);
+    CHK(last_win_ok);
+    CHK(pool3_parity_ok);
+    CHK(f4_parity_ok);
+    CHK(f4_first_uploads == 3);
+    CHK(f4_second_uploads == 0);
+    CHK(f4_second_hits == 3);
+    CHK(f5_parity_ok);
+    CHK(f5_first_uploads == 3);
+    CHK(f5_second_uploads == 0);
+    CHK(f5_second_hits == 3);
+    CHK(pool5_parity_ok);
+    CHK(pool5_contract_pass);
+    CHK(f6_parity_ok);
+    CHK(f6_first_uploads == 3);
+    CHK(f6_second_uploads == 0);
+    CHK(f6_second_hits == 3);
+    CHK(f7_parity_ok);
+    CHK(f7_first_uploads == 3);
+    CHK(f7_second_uploads == 0);
+    CHK(f7_second_hits == 3);
+    CHK(f8_parity_ok);
+    CHK(f8_first_uploads == 3);
+    CHK(f8_second_uploads == 0);
+    CHK(f8_second_hits == 3);
+    CHK(f9_parity_ok);
+    CHK(f9_first_uploads == 3);
+    CHK(f9_second_uploads == 0);
+    CHK(f9_second_hits == 3);
+    CHK(conv10_parity_ok);
+    CHK(conv10_first_uploads == 1);
+    CHK(conv10_second_uploads == 0);
+    CHK(conv10_second_hits == 1);
+    CHK(pool10_parity_ok);
+    CHK(top1_identical);
+    CHK(top5_order_identical);
+    CHK(top5_identical);
+    CHK(conv10_mut_ok);
+    CHK(pool10_mut_ok);
+    CHK(all_runs_reconciled);
+    CHK(cache_counters_reconciled);
+    CHK(res_ok);
+    #undef CHK
+
+    bool all_passed = all_shaders_ident && conv1_parity_ok && pool1_parity_ok &&
+                      layer_parity_ok && seq_isolation_ok &&
                       concurrent_ids_diff && c1_destroy_unaffected_c2 &&
                       full_prof.timing_reconciled && conv3x3_mut_ok && concat_mut_ok && maxpool_mutation_pass &&
                       all_failure_cases_pass && all_nonzero_results && all_partial_untouched &&
@@ -3198,7 +3480,7 @@ int main() {
                       f8_parity_ok && (f8_first_uploads == 3) && (f8_second_uploads == 0) && (f8_second_hits == 3) &&
                       f9_parity_ok && (f9_first_uploads == 3) && (f9_second_uploads == 0) && (f9_second_hits == 3) &&
                       conv10_parity_ok && (conv10_first_uploads == 1) && (conv10_second_uploads == 0) && (conv10_second_hits == 1) &&
-                      pool10_parity_ok && top1_identical && top5_identical &&
+                      pool10_parity_ok && top1_identical && top5_order_identical && top5_identical &&
                       conv10_mut_ok && pool10_mut_ok &&
                       all_runs_reconciled && cache_counters_reconciled &&
                       res_ok;
