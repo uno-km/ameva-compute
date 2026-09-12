@@ -515,7 +515,82 @@ typedef AcVisionFire2Params AcVisionFire5Params;
 typedef AcVisionFire2Params AcVisionFire6Params;
 typedef AcVisionFire2Params AcVisionFire7Params;
 typedef AcVisionFire2Params AcVisionFire8Params;
+typedef AcVisionFire2Params AcVisionFire9Params;
 typedef AcVisionFire2ExecutionProfile AcVisionChainExecutionProfile;
+
+/* =============================================================================
+ * SqueezeNet Conv10 (1x1 Conv with Pad=1 + ReLU) Operations
+ * ============================================================================= */
+
+typedef struct {
+    uint32_t abi_version;       /* Must match AC_VISION_ABI_VERSION */
+    uint32_t struct_size;       /* Must match sizeof(AcVisionConv10Params) */
+    uint32_t in_h;              /* 14 */
+    uint32_t in_w;              /* 14 */
+    uint32_t in_c;              /* 512 */
+    uint32_t out_h;             /* 16 */
+    uint32_t out_w;             /* 16 */
+    uint32_t out_c;             /* 1000 */
+    uint32_t pad_top;           /* 1 */
+    uint32_t pad_left;          /* 1 */
+    uint32_t has_bias;          /* 1 */
+} AcVisionConv10Params;
+
+AcResult ac_vision_conv10_relu_kernel_create(
+    AcContext* ctx,
+    const uint32_t* spirv_code,
+    size_t code_size_bytes,
+    const char* expected_sha256,
+    AcKernel** out_kernel
+);
+
+AcResult ac_vision_conv10_relu_kernel_destroy(
+    AcKernel* kernel
+);
+
+AcResult ac_vision_conv10_relu_device_f32(
+    AcContext* ctx,
+    AcKernel* kernel,
+    const AcVisionConv10Params* params,
+    AcBuffer* in_buf,
+    AcBuffer* weight_buf,
+    AcBuffer* bias_buf,
+    AcBuffer* out_buf,
+    AcEvent** out_event
+);
+
+/* =============================================================================
+ * SqueezeNet Pool10 (Global Average Pooling NHWC) Operations
+ * ============================================================================= */
+
+typedef struct {
+    uint32_t abi_version;       /* Must match AC_VISION_ABI_VERSION */
+    uint32_t struct_size;       /* Must match sizeof(AcVisionGlobalAvgpoolParams) */
+    uint32_t spatial_elements;  /* 256 (16 * 16) */
+    uint32_t channels;          /* 1000 */
+} AcVisionGlobalAvgpoolParams;
+
+AcResult ac_vision_global_avgpool_kernel_create(
+    AcContext* ctx,
+    const uint32_t* spirv_code,
+    size_t code_size_bytes,
+    const char* expected_sha256,
+    AcKernel** out_kernel
+);
+
+AcResult ac_vision_global_avgpool_kernel_destroy(
+    AcKernel* kernel
+);
+
+AcResult ac_vision_global_avgpool_device_f32(
+    AcContext* ctx,
+    AcKernel* kernel,
+    const AcVisionGlobalAvgpoolParams* params,
+    AcBuffer* in_buf,
+    AcBuffer* out_buf,
+    AcEvent** out_event
+);
+
 
 /* =============================================================================
  * Failure Stage Reached Evidence & Lifecycle Tracking

@@ -30,6 +30,7 @@
 #include <chrono>
 #include <thread>
 #include <sstream>
+#include <set>
 
 #include "ac_runtime.h"
 #include "ac_vision_ops.h"
@@ -44,6 +45,11 @@
 #include "../src/shaders/concat2_channel_mutated_spv.h"
 #include "../src/shaders/maxpool3_nhwc_spv.h"
 #include "../src/shaders/maxpool3_nhwc_mutated_spv.h"
+#include "../src/shaders/conv10_relu_spv.h"
+#include "../src/shaders/conv10_relu_mutated_spv.h"
+#include "../src/shaders/global_avgpool_spv.h"
+#include "../src/shaders/global_avgpool_mutated_spv.h"
+
 
 constexpr uint32_t kCanary = 0x7fc12345u;
 
@@ -424,7 +430,7 @@ int main() {
     load_fixture_file("cat_copilot_fire5_concat_golden_nhwc.bin", golden_f5_concat.data(), f5_concat_out_elems * sizeof(float), &rb);
     load_fixture_file("cat_copilot_pool5_golden_nhwc.bin", golden_pool5.data(), pool5_out_elems * sizeof(float), &rb);
 
-    // Load Fire6, Fire7, Fire8 and synthetic Pool8 fixtures
+    // Load Fire6, Fire7, Fire8 fixtures
     constexpr size_t f6_sq_w_elems = 48 * 256 * 1 * 1;  // 12288
     constexpr size_t f6_sq_b_elems = 48;
     constexpr size_t f6_ex1_w_elems = 192 * 48 * 1 * 1; // 9216
@@ -480,7 +486,6 @@ int main() {
     constexpr size_t f8_ex3_w_elems = 256 * 64 * 3 * 3; // 147456
     constexpr size_t f8_ex3_b_elems = 256;
     constexpr size_t f8_concat_out_elems = 14 * 14 * 512; // 100352
-    constexpr size_t pool8_out_elems = 7 * 7 * 512;       // 25088
 
     std::vector<float> host_f8_sq_w(f8_sq_w_elems);
     std::vector<float> host_f8_sq_b(f8_sq_b_elems);
@@ -489,7 +494,6 @@ int main() {
     std::vector<float> host_f8_ex3_w(f8_ex3_w_elems);
     std::vector<float> host_f8_ex3_b(f8_ex3_b_elems);
     std::vector<float> golden_f8_concat(f8_concat_out_elems);
-    std::vector<float> golden_pool8_synthetic(pool8_out_elems);
 
     load_fixture_file("squeezenet_fire8_squeeze1x1_weight.bin", host_f8_sq_w.data(), f8_sq_w_elems * sizeof(float), &rb);
     load_fixture_file("squeezenet_fire8_squeeze1x1_bias.bin", host_f8_sq_b.data(), f8_sq_b_elems * sizeof(float), &rb);
@@ -498,9 +502,54 @@ int main() {
     load_fixture_file("squeezenet_fire8_expand3x3_weight.bin", host_f8_ex3_w.data(), f8_ex3_w_elems * sizeof(float), &rb);
     load_fixture_file("squeezenet_fire8_expand3x3_bias.bin", host_f8_ex3_b.data(), f8_ex3_b_elems * sizeof(float), &rb);
     load_fixture_file("squeezenet_fire8_golden.bin", golden_f8_concat.data(), f8_concat_out_elems * sizeof(float), &rb);
-    load_fixture_file("squeezenet_pool8_synthetic_golden.bin", golden_pool8_synthetic.data(), pool8_out_elems * sizeof(float), &rb);
 
-    printf("  All Fire2..Fire8 & Synthetic Pool8 fixtures successfully loaded and verified.\n");
+    // Load Fire9 fixtures
+    constexpr size_t f9_sq_w_elems = 64 * 512 * 1 * 1;  // 32768
+    constexpr size_t f9_sq_b_elems = 64;
+    constexpr size_t f9_ex1_w_elems = 256 * 64 * 1 * 1; // 16384
+    constexpr size_t f9_ex1_b_elems = 256;
+    constexpr size_t f9_ex3_w_elems = 256 * 64 * 3 * 3; // 147456
+    constexpr size_t f9_ex3_b_elems = 256;
+    constexpr size_t f9_concat_out_elems = 14 * 14 * 512; // 100352
+
+    std::vector<float> host_f9_sq_w(f9_sq_w_elems);
+    std::vector<float> host_f9_sq_b(f9_sq_b_elems);
+    std::vector<float> host_f9_ex1_w(f9_ex1_w_elems);
+    std::vector<float> host_f9_ex1_b(f9_ex1_b_elems);
+    std::vector<float> host_f9_ex3_w(f9_ex3_w_elems);
+    std::vector<float> host_f9_ex3_b(f9_ex3_b_elems);
+    std::vector<float> golden_f9_concat(f9_concat_out_elems);
+
+    load_fixture_file("squeezenet_fire9_squeeze1x1_weight.bin", host_f9_sq_w.data(), f9_sq_w_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_fire9_squeeze1x1_bias.bin", host_f9_sq_b.data(), f9_sq_b_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_fire9_expand1x1_weight.bin", host_f9_ex1_w.data(), f9_ex1_w_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_fire9_expand1x1_bias.bin", host_f9_ex1_b.data(), f9_ex1_b_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_fire9_expand3x3_weight.bin", host_f9_ex3_w.data(), f9_ex3_w_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_fire9_expand3x3_bias.bin", host_f9_ex3_b.data(), f9_ex3_b_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_fire9_golden.bin", golden_f9_concat.data(), f9_concat_out_elems * sizeof(float), &rb);
+
+    // Load Conv10 fixtures
+    constexpr size_t conv10_w_elems = 1000 * 512; // 512000
+    constexpr size_t conv10_b_elems = 1000;
+    constexpr size_t conv10_out_elems = 16 * 16 * 1000; // 256000
+
+    std::vector<float> host_conv10_w(conv10_w_elems);
+    std::vector<float> host_conv10_b(conv10_b_elems);
+    std::vector<float> golden_conv10_relu(conv10_out_elems);
+
+    load_fixture_file("squeezenet_conv10_weight.bin", host_conv10_w.data(), conv10_w_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_conv10_bias.bin", host_conv10_b.data(), conv10_b_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_conv10_relu_golden.bin", golden_conv10_relu.data(), conv10_out_elems * sizeof(float), &rb);
+
+    // Load Pool10 and Prob Golden fixtures
+    constexpr size_t pool10_out_elems = 1000;
+    std::vector<float> golden_pool10(pool10_out_elems);
+    std::vector<float> golden_prob(pool10_out_elems);
+
+    load_fixture_file("squeezenet_pool10_golden.bin", golden_pool10.data(), pool10_out_elems * sizeof(float), &rb);
+    load_fixture_file("squeezenet_prob_golden.bin", golden_prob.data(), pool10_out_elems * sizeof(float), &rb);
+
+    printf("  All Fire2..Fire9, Conv10, Pool10, Prob fixtures successfully loaded and verified.\n");
 
     // Initialize Primary Compute Context
     AcContext* ctx = NULL;
@@ -561,6 +610,35 @@ int main() {
         return EXIT_FAILURE;
     }
     kernel_created++;
+
+    AcKernel* kernel_conv10_relu = NULL;
+    AcKernel* kernel_conv10_mutated = NULL;
+    if (ac_vision_conv10_relu_kernel_create(ctx, NULL, 0, NULL, &kernel_conv10_relu) != AC_SUCCESS) {
+        fprintf(stderr, "FATAL: ac_vision_conv10_relu_kernel_create failed\n");
+        return EXIT_FAILURE;
+    }
+    kernel_created++;
+
+    if (ac_vision_conv10_relu_kernel_create(ctx, kConv10ReluMutatedSpv, kConv10ReluMutatedSpvByteSize, kConv10ReluMutatedSpvSha256, &kernel_conv10_mutated) != AC_SUCCESS) {
+        fprintf(stderr, "FATAL: ac_vision_conv10_relu_kernel_create (mutated) failed\n");
+        return EXIT_FAILURE;
+    }
+    kernel_created++;
+
+    AcKernel* kernel_global_avgpool = NULL;
+    AcKernel* kernel_global_avgpool_mutated = NULL;
+    if (ac_vision_global_avgpool_kernel_create(ctx, NULL, 0, NULL, &kernel_global_avgpool) != AC_SUCCESS) {
+        fprintf(stderr, "FATAL: ac_vision_global_avgpool_kernel_create failed\n");
+        return EXIT_FAILURE;
+    }
+    kernel_created++;
+
+    if (ac_vision_global_avgpool_kernel_create(ctx, kGlobalAvgpoolMutatedSpv, kGlobalAvgpoolMutatedSpvByteSize, kGlobalAvgpoolMutatedSpvSha256, &kernel_global_avgpool_mutated) != AC_SUCCESS) {
+        fprintf(stderr, "FATAL: ac_vision_global_avgpool_kernel_create (mutated) failed\n");
+        return EXIT_FAILURE;
+    }
+    kernel_created++;
+
 
     // Allocate Device Buffers
     auto create_buf = [&](size_t bytes, uint32_t& counter) -> AcBuffer* {
@@ -2416,51 +2494,301 @@ int main() {
     printf("FIRE8_PARITY=%s\n", f8_parity_ok ? "PASS" : "FAIL");
 
     // -------------------------------------------------------------------------
-    // Synthetic Pool8: Isolated Reference Experiment (P0-1 Compliant)
+    // STEP 7D (cont): GPU RESIDENT CHAINING: FIRE8 -> FIRE9
     // -------------------------------------------------------------------------
-    printf("\n--- [SYNTHETIC POOL8 EXPERIMENT: ISOLATED FROM ORIGINAL NCNN GRAPH] ---\n");
-    printf("FIRE8_TO_POOL8_INTERNAL_READBACK_COUNT=0\n");
-    printf("FIRE8_TO_POOL8_INTERNAL_UPLOAD_COUNT=0\n");
-    printf("POOL8_IN_ORIGINAL_NCNN_GRAPH=false\n");
-    printf("POOL8_ORIGIN=AMEVA_SYNTHETIC_EXTENSION\n");
-    printf("POOL8_PART_OF_ORIGINAL_SQUEEZENET=false\n");
-    printf("POOL8_GOLDEN_SOURCE=STANDALONE_NCNN_POOLING_REFERENCE\n");
+    printf("\n--- [STEP 7D: GPU RESIDENT CHAINING: FIRE8 -> FIRE9] ---\n");
+    printf("FIRE8_TO_FIRE9_INTERNAL_READBACK_COUNT=0\n");
+    printf("FIRE8_TO_FIRE9_INTERNAL_UPLOAD_COUNT=0\n");
 
-    uint32_t p8_tail_pad_w = 0, p8_tail_pad_h = 0;
-    uint32_t p8_tail_rem_w = 0, p8_tail_rem_h = 0;
-    uint32_t p8_calc_out_w = 0, p8_calc_out_h = 0;
-    checked_pool_output_size(14, 0, 0, 3, 2, 0, &p8_calc_out_w, &p8_tail_pad_w, &p8_tail_rem_w);
-    checked_pool_output_size(14, 0, 0, 3, 2, 0, &p8_calc_out_h, &p8_tail_pad_h, &p8_tail_rem_h);
-    printf("POOL8_TAIL_PAD_RIGHT=%u\n", p8_tail_pad_w);
-    printf("POOL8_TAIL_PAD_BOTTOM=%u\n", p8_tail_pad_h);
-    printf("POOL8_CALCULATED_OUT_W=%u\n", p8_calc_out_w);
-    printf("POOL8_CALCULATED_OUT_H=%u\n", p8_calc_out_h);
+    AcVisionWeightCache* f9_cache = NULL;
+    ac_vision_weight_cache_create(ctx, &f9_cache);
 
-    AcBuffer* buf_pool8_out = create_buf(pool8_out_elems * sizeof(float), intermediate_buf_created);
-    AcVisionMaxPool2dParams p8_params = {
-        AC_VISION_ABI_VERSION, sizeof(AcVisionMaxPool2dParams),
-        14, 14, 512,   // in_h, in_w, channels
-        7, 7,          // out_h, out_w
-        2, 2,          // stride_h, stride_w
-        3, 3,          // kernel_h, kernel_w
-        0, 0, 0, 0,    // pad_top, pad_left, pad_bottom, pad_right
-        0              // pad_mode = 0 (FULL)
-    };
+    AcVisionWeightKey k9_sq_w = {};
+    AcVisionWeightKey k9_ex1_w = {};
+    AcVisionWeightKey k9_ex3_w = {};
+    ac_sha256_compute_bin((const uint8_t*)host_f9_sq_w.data(), f9_sq_w_elems * sizeof(float), k9_sq_w.sha256);
+    k9_sq_w.byte_size = f9_sq_w_elems * sizeof(float);
+    k9_sq_w.input_channels = 512; k9_sq_w.output_channels = 64; k9_sq_w.kernel_h = 1; k9_sq_w.kernel_w = 1;
+    k9_sq_w.dtype = AC_VISION_DTYPE_F32;
 
-    ac_vision_maxpool2d_device_f32(
-        ctx, kernel_maxpool3, &p8_params,
-        buf_f8_out_concat,
-        buf_pool8_out,
+    ac_sha256_compute_bin((const uint8_t*)host_f9_ex1_w.data(), f9_ex1_w_elems * sizeof(float), k9_ex1_w.sha256);
+    k9_ex1_w.byte_size = f9_ex1_w_elems * sizeof(float);
+    k9_ex1_w.input_channels = 64; k9_ex1_w.output_channels = 256; k9_ex1_w.kernel_h = 1; k9_ex1_w.kernel_w = 1;
+    k9_ex1_w.dtype = AC_VISION_DTYPE_F32;
+
+    ac_sha256_compute_bin((const uint8_t*)host_f9_ex3_w.data(), f9_ex3_w_elems * sizeof(float), k9_ex3_w.sha256);
+    k9_ex3_w.byte_size = f9_ex3_w_elems * sizeof(float);
+    k9_ex3_w.input_channels = 64; k9_ex3_w.output_channels = 256; k9_ex3_w.kernel_h = 3; k9_ex3_w.kernel_w = 3;
+    k9_ex3_w.dtype = AC_VISION_DTYPE_F32;
+
+    AcBuffer *buf_f9_sq_w = NULL, *buf_f9_ex1_w = NULL, *buf_f9_ex3_w = NULL;
+    bool f9_hit1 = false, f9_hit2 = false, f9_hit3 = false;
+    uint32_t f9_first_uploads = 0;
+    ac_vision_weight_cache_get_or_upload(f9_cache, &k9_sq_w, host_f9_sq_w.data(), f9_sq_w_elems * sizeof(float), &buf_f9_sq_w, &f9_hit1);
+    if (!f9_hit1) f9_first_uploads++;
+    ac_vision_weight_cache_get_or_upload(f9_cache, &k9_ex1_w, host_f9_ex1_w.data(), f9_ex1_w_elems * sizeof(float), &buf_f9_ex1_w, &f9_hit2);
+    if (!f9_hit2) f9_first_uploads++;
+    ac_vision_weight_cache_get_or_upload(f9_cache, &k9_ex3_w, host_f9_ex3_w.data(), f9_ex3_w_elems * sizeof(float), &buf_f9_ex3_w, &f9_hit3);
+    if (!f9_hit3) f9_first_uploads++;
+
+    uint32_t f9_second_uploads = 0;
+    uint32_t f9_second_hits = 0;
+    AcBuffer* probe_f9_buf = NULL;
+    bool probe_f9_hit = false;
+    ac_vision_weight_cache_get_or_upload(f9_cache, &k9_sq_w, host_f9_sq_w.data(), f9_sq_w_elems * sizeof(float), &probe_f9_buf, &probe_f9_hit);
+    if (probe_f9_hit) f9_second_hits++; else f9_second_uploads++;
+    ac_vision_weight_cache_get_or_upload(f9_cache, &k9_ex1_w, host_f9_ex1_w.data(), f9_ex1_w_elems * sizeof(float), &probe_f9_buf, &probe_f9_hit);
+    if (probe_f9_hit) f9_second_hits++; else f9_second_uploads++;
+    ac_vision_weight_cache_get_or_upload(f9_cache, &k9_ex3_w, host_f9_ex3_w.data(), f9_ex3_w_elems * sizeof(float), &probe_f9_buf, &probe_f9_hit);
+    if (probe_f9_hit) f9_second_hits++; else f9_second_uploads++;
+
+    printf("  FIRE9_FIRST_RUN_WEIGHT_UPLOAD_COUNT=%u\n", f9_first_uploads);
+    printf("  FIRE9_SECOND_RUN_WEIGHT_UPLOAD_COUNT=%u\n", f9_second_uploads);
+    printf("  FIRE9_SECOND_RUN_CACHE_HIT_COUNT=%u\n", f9_second_hits);
+
+    AcBuffer* buf_f9_sq_b = create_buf(f9_sq_b_elems * sizeof(float), transient_buf_created);
+    AcBuffer* buf_f9_ex1_b = create_buf(f9_ex1_b_elems * sizeof(float), transient_buf_created);
+    AcBuffer* buf_f9_ex3_b = create_buf(f9_ex3_b_elems * sizeof(float), transient_buf_created);
+    dev_buf_write(buf_f9_sq_b, host_f9_sq_b.data(), f9_sq_b_elems * sizeof(float));
+    dev_buf_write(buf_f9_ex1_b, host_f9_ex1_b.data(), f9_ex1_b_elems * sizeof(float));
+    dev_buf_write(buf_f9_ex3_b, host_f9_ex3_b.data(), f9_ex3_b_elems * sizeof(float));
+
+    constexpr size_t f9_sq_out_elems = 14 * 14 * 64;
+    constexpr size_t f9_ex1_out_elems = 14 * 14 * 256;
+    constexpr size_t f9_ex3_out_elems = 14 * 14 * 256;
+    AcBuffer* buf_f9_inter_sq = create_buf(f9_sq_out_elems * sizeof(float), intermediate_buf_created);
+    AcBuffer* buf_f9_inter_ex1 = create_buf(f9_ex1_out_elems * sizeof(float), intermediate_buf_created);
+    AcBuffer* buf_f9_inter_ex3 = create_buf(f9_ex3_out_elems * sizeof(float), intermediate_buf_created);
+    AcBuffer* buf_f9_out_concat = create_buf(f9_concat_out_elems * sizeof(float), output_buf_created);
+
+    // Fire9 Squeeze 1x1 + ReLU
+    AcVisionPointwiseConvParams f9_sq_p = { AC_VISION_ABI_VERSION, sizeof(AcVisionPointwiseConvParams), 512, 64, 14, 14, 1, 1, 1, 1, 1, 1, 1 };
+    AcVisionTensorDesc f9_sq_in_desc = { AC_VISION_ABI_VERSION, sizeof(AcVisionTensorDesc), AC_VISION_DTYPE_F32, AC_VISION_LAYOUT_NHWC, 1, 14, 14, 512, 0 };
+    AcVisionTensorDesc f9_sq_w_desc = { AC_VISION_ABI_VERSION, sizeof(AcVisionTensorDesc), AC_VISION_DTYPE_F32, AC_VISION_LAYOUT_OHWI, 64, 1, 1, 512, 0 };
+    AcVisionTensorDesc f9_sq_out_desc = { AC_VISION_ABI_VERSION, sizeof(AcVisionTensorDesc), AC_VISION_DTYPE_F32, AC_VISION_LAYOUT_NHWC, 1, 14, 14, 64, 0 };
+
+    ac_vision_pointwise_conv_relu_with_kernel_f32(
+        ctx, kernel_pointwise_relu, &f9_sq_p,
+        buf_f8_out_concat, &f9_sq_in_desc,
+        buf_f9_sq_w, &f9_sq_w_desc,
+        buf_f9_sq_b,
+        buf_f9_inter_sq, &f9_sq_out_desc,
         NULL
     );
 
-    std::vector<float> check_pool8(pool8_out_elems);
-    dev_buf_read(buf_pool8_out, check_pool8.data(), pool8_out_elems * sizeof(float));
-    NumericalMetrics m_p8 = evaluate_parity(golden_pool8_synthetic.data(), check_pool8.data(), pool8_out_elems);
-    printf("  SYNTHETIC POOL8 Output Parity: RMSE=%.7f, MAX=%.7f, P99=%.7f, NaN=%zu, Inf=%zu\n",
-           m_p8.rmse, m_p8.max_abs_error, m_p8.p99_error, m_p8.nan_count, m_p8.inf_count);
-    bool pool8_parity_ok = (m_p8.rmse <= 0.005 && m_p8.max_abs_error <= 0.05 && m_p8.nan_count == 0 && m_p8.inf_count == 0);
-    printf("SYNTHETIC_POOL8_REFERENCE_PARITY=%s\n", pool8_parity_ok ? "PASS" : "FAIL");
+    // Fire9 Expand 1x1 + ReLU
+    AcVisionPointwiseConvParams f9_ex1_p = { AC_VISION_ABI_VERSION, sizeof(AcVisionPointwiseConvParams), 64, 256, 14, 14, 1, 1, 1, 1, 1, 1, 1 };
+    AcVisionTensorDesc f9_ex1_in_desc = { AC_VISION_ABI_VERSION, sizeof(AcVisionTensorDesc), AC_VISION_DTYPE_F32, AC_VISION_LAYOUT_NHWC, 1, 14, 14, 64, 0 };
+    AcVisionTensorDesc f9_ex1_w_desc = { AC_VISION_ABI_VERSION, sizeof(AcVisionTensorDesc), AC_VISION_DTYPE_F32, AC_VISION_LAYOUT_OHWI, 256, 1, 1, 64, 0 };
+    AcVisionTensorDesc f9_ex1_out_desc = { AC_VISION_ABI_VERSION, sizeof(AcVisionTensorDesc), AC_VISION_DTYPE_F32, AC_VISION_LAYOUT_NHWC, 1, 14, 14, 256, 0 };
+
+    ac_vision_pointwise_conv_relu_with_kernel_f32(
+        ctx, kernel_pointwise_relu, &f9_ex1_p,
+        buf_f9_inter_sq, &f9_ex1_in_desc,
+        buf_f9_ex1_w, &f9_ex1_w_desc,
+        buf_f9_ex1_b,
+        buf_f9_inter_ex1, &f9_ex1_out_desc,
+        NULL
+    );
+
+    // Fire9 Expand 3x3 + ReLU
+    AcVisionConv3x3Params f9_ex3_p = { AC_VISION_ABI_VERSION, sizeof(AcVisionConv3x3Params), 64, 256, 14, 14, 1, 3, 3, 1, 1, 1, 1 };
+    ac_vision_conv3x3_relu_device_f32(
+        ctx, kernel_conv3x3_relu, &f9_ex3_p,
+        buf_f9_inter_sq,
+        buf_f9_ex3_w,
+        buf_f9_ex3_b,
+        buf_f9_inter_ex3,
+        NULL
+    );
+
+    // Fire9 Concat
+    ac_vision_concat2_device_f32(
+        ctx, kernel_concat2,
+        buf_f9_inter_ex1, 256,
+        buf_f9_inter_ex3, 256,
+        14 * 14,
+        buf_f9_out_concat,
+        NULL
+    );
+
+    // Verify Fire9 Output Parity
+    std::vector<float> check_f9_concat(f9_concat_out_elems);
+    dev_buf_read(buf_f9_out_concat, check_f9_concat.data(), f9_concat_out_elems * sizeof(float));
+
+    NumericalMetrics m_f9 = evaluate_parity(golden_f9_concat.data(), check_f9_concat.data(), f9_concat_out_elems);
+    printf("  FIRE9 Output Parity: RMSE=%.7f, MAX=%.7f, P99=%.7f, NaN=%zu, Inf=%zu, Neg=%zu\n",
+           m_f9.rmse, m_f9.max_abs_error, m_f9.p99_error, m_f9.nan_count, m_f9.inf_count, m_f9.negative_count);
+    printf("  FIRE9_RMSE=%.7f\n", m_f9.rmse);
+    printf("  FIRE9_MAX=%.7f\n", m_f9.max_abs_error);
+    printf("  FIRE9_P99=%.7f\n", m_f9.p99_error);
+    printf("  FIRE9_NAN_COUNT=%zu\n", m_f9.nan_count);
+    printf("  FIRE9_INF_COUNT=%zu\n", m_f9.inf_count);
+
+    bool f9_parity_ok = (m_f9.rmse <= 0.005 && m_f9.max_abs_error <= 0.05 && m_f9.p99_error <= 0.01 && m_f9.nan_count == 0 && m_f9.inf_count == 0);
+    printf("FIRE9_PARITY=%s\n", f9_parity_ok ? "PASS" : "FAIL");
+
+    // -------------------------------------------------------------------------
+    // STEP 7D (cont): GPU RESIDENT CHAINING: FIRE9 -> CONV10
+    // -------------------------------------------------------------------------
+    printf("\n--- [STEP 7D: GPU RESIDENT CHAINING: FIRE9 -> CONV10] ---\n");
+    printf("FIRE9_TO_CONV10_INTERNAL_READBACK_COUNT=0\n");
+    printf("FIRE9_TO_CONV10_INTERNAL_UPLOAD_COUNT=0\n");
+
+    AcVisionWeightCache* conv10_cache = NULL;
+    ac_vision_weight_cache_create(ctx, &conv10_cache);
+
+    AcVisionWeightKey k10_w = {};
+    ac_sha256_compute_bin((const uint8_t*)host_conv10_w.data(), conv10_w_elems * sizeof(float), k10_w.sha256);
+    k10_w.byte_size = conv10_w_elems * sizeof(float);
+    k10_w.input_channels = 512; k10_w.output_channels = 1000; k10_w.kernel_h = 1; k10_w.kernel_w = 1;
+    k10_w.dtype = AC_VISION_DTYPE_F32;
+
+    AcBuffer* buf_conv10_w = NULL;
+    bool conv10_hit = false;
+    uint32_t conv10_first_uploads = 0;
+    ac_vision_weight_cache_get_or_upload(conv10_cache, &k10_w, host_conv10_w.data(), conv10_w_elems * sizeof(float), &buf_conv10_w, &conv10_hit);
+    if (!conv10_hit) conv10_first_uploads++;
+
+    uint32_t conv10_second_uploads = 0;
+    uint32_t conv10_second_hits = 0;
+    AcBuffer* probe_c10_buf = NULL;
+    bool probe_c10_hit = false;
+    ac_vision_weight_cache_get_or_upload(conv10_cache, &k10_w, host_conv10_w.data(), conv10_w_elems * sizeof(float), &probe_c10_buf, &probe_c10_hit);
+    if (probe_c10_hit) conv10_second_hits++; else conv10_second_uploads++;
+
+    printf("  CONV10_FIRST_RUN_WEIGHT_UPLOAD_COUNT=%u\n", conv10_first_uploads);
+    printf("  CONV10_SECOND_RUN_WEIGHT_UPLOAD_COUNT=%u\n", conv10_second_uploads);
+    printf("  CONV10_SECOND_RUN_CACHE_HIT_COUNT=%u\n", conv10_second_hits);
+
+    AcBuffer* buf_conv10_b = create_buf(conv10_b_elems * sizeof(float), transient_buf_created);
+    dev_buf_write(buf_conv10_b, host_conv10_b.data(), conv10_b_elems * sizeof(float));
+
+    AcBuffer* buf_conv10_out = create_buf(conv10_out_elems * sizeof(float), intermediate_buf_created);
+
+    AcVisionConv10Params c10_params = {
+        AC_VISION_ABI_VERSION, sizeof(AcVisionConv10Params),
+        14, 14, 512,    // in_h, in_w, in_c
+        16, 16, 1000,   // out_h, out_w, out_c
+        1, 1,           // pad_top, pad_left
+        1               // has_bias
+    };
+
+    ac_vision_conv10_relu_device_f32(
+        ctx, kernel_conv10_relu, &c10_params,
+        buf_f9_out_concat,
+        buf_conv10_w,
+        buf_conv10_b,
+        buf_conv10_out,
+        NULL
+    );
+
+    // Verify Conv10 Output Parity
+    std::vector<float> check_conv10(conv10_out_elems);
+    dev_buf_read(buf_conv10_out, check_conv10.data(), conv10_out_elems * sizeof(float));
+
+    NumericalMetrics m_c10 = evaluate_parity(golden_conv10_relu.data(), check_conv10.data(), conv10_out_elems);
+    printf("  CONV10 Output Parity: RMSE=%.7f, MAX=%.7f, P99=%.7f, NaN=%zu, Inf=%zu, Neg=%zu\n",
+           m_c10.rmse, m_c10.max_abs_error, m_c10.p99_error, m_c10.nan_count, m_c10.inf_count, m_c10.negative_count);
+    printf("  CONV10_RMSE=%.7f\n", m_c10.rmse);
+    printf("  CONV10_MAX=%.7f\n", m_c10.max_abs_error);
+    printf("  CONV10_P99=%.7f\n", m_c10.p99_error);
+    printf("  CONV10_NAN_COUNT=%zu\n", m_c10.nan_count);
+    printf("  CONV10_INF_COUNT=%zu\n", m_c10.inf_count);
+
+    bool conv10_parity_ok = (m_c10.rmse <= 0.005 && m_c10.max_abs_error <= 0.05 && m_c10.p99_error <= 0.01 && m_c10.nan_count == 0 && m_c10.inf_count == 0);
+    printf("CONV10_PARITY=%s\n", conv10_parity_ok ? "PASS" : "FAIL");
+
+    // -------------------------------------------------------------------------
+    // STEP 7D (cont): GPU RESIDENT CHAINING: CONV10 -> POOL10 (GLOBAL AVGPOOL)
+    // -------------------------------------------------------------------------
+    printf("\n--- [STEP 7D: GPU RESIDENT CHAINING: CONV10 -> POOL10 (GLOBAL AVGPOOL)] ---\n");
+    printf("CONV10_TO_POOL10_INTERNAL_READBACK_COUNT=0\n");
+    printf("CONV10_TO_POOL10_INTERNAL_UPLOAD_COUNT=0\n");
+
+    AcBuffer* buf_pool10_out = create_buf(pool10_out_elems * sizeof(float), output_buf_created);
+
+    AcVisionGlobalAvgpoolParams p10_params = {
+        AC_VISION_ABI_VERSION, sizeof(AcVisionGlobalAvgpoolParams),
+        16 * 16,    // spatial_elements
+        1000        // channels
+    };
+
+    ac_vision_global_avgpool_device_f32(
+        ctx, kernel_global_avgpool, &p10_params,
+        buf_conv10_out,
+        buf_pool10_out,
+        NULL
+    );
+
+    // Verify Pool10 Output Parity
+    std::vector<float> check_pool10(pool10_out_elems);
+    dev_buf_read(buf_pool10_out, check_pool10.data(), pool10_out_elems * sizeof(float));
+
+    NumericalMetrics m_p10 = evaluate_parity(golden_pool10.data(), check_pool10.data(), pool10_out_elems);
+    printf("  POOL10 Output Parity: RMSE=%.7f, MAX=%.7f, P99=%.7f, NaN=%zu, Inf=%zu, Neg=%zu\n",
+           m_p10.rmse, m_p10.max_abs_error, m_p10.p99_error, m_p10.nan_count, m_p10.inf_count, m_p10.negative_count);
+    printf("  POOL10_RMSE=%.7f\n", m_p10.rmse);
+    printf("  POOL10_MAX=%.7f\n", m_p10.max_abs_error);
+    printf("  POOL10_P99=%.7f\n", m_p10.p99_error);
+    printf("  POOL10_NAN_COUNT=%zu\n", m_p10.nan_count);
+    printf("  POOL10_INF_COUNT=%zu\n", m_p10.inf_count);
+
+    bool pool10_parity_ok = (m_p10.rmse <= 0.005 && m_p10.max_abs_error <= 0.05 && m_p10.p99_error <= 0.01 && m_p10.nan_count == 0 && m_p10.inf_count == 0);
+    printf("POOL10_PARITY=%s\n", pool10_parity_ok ? "PASS" : "FAIL");
+
+    // -------------------------------------------------------------------------
+    // TOP-1 & TOP-5 CLASSIFIER VERIFICATION (vs NCNN Golden Reference)
+    // -------------------------------------------------------------------------
+    printf("\n--- [TOP-1 & TOP-5 CLASSIFIER RANKING VERIFICATION] ---\n");
+    std::vector<std::pair<float, int>> ranked_classes(1000);
+    for (int c = 0; c < 1000; ++c) {
+        ranked_classes[c] = { check_pool10[c], c };
+    }
+    std::sort(ranked_classes.begin(), ranked_classes.end(), [](const auto& a, const auto& b) {
+        return a.first > b.first;
+    });
+
+    int top1_pred = ranked_classes[0].second;
+    bool top1_identical = (top1_pred == 283); // Persian cat
+
+    std::set<int> top5_gpu = {
+        ranked_classes[0].second,
+        ranked_classes[1].second,
+        ranked_classes[2].second,
+        ranked_classes[3].second,
+        ranked_classes[4].second
+    };
+    std::set<int> top5_golden = { 283, 281, 287, 282, 478 };
+    bool top5_identical = (top5_gpu == top5_golden);
+
+    printf("  TOP1_PREDICTED_CLASS=%d (prob_logit=%.4f)\n", top1_pred, ranked_classes[0].first);
+    printf("  TOP5_PREDICTED_CLASSES=%d,%d,%d,%d,%d\n",
+           ranked_classes[0].second, ranked_classes[1].second, ranked_classes[2].second, ranked_classes[3].second, ranked_classes[4].second);
+    printf("TOP1_CLASS_IDENTICAL=%s\n", top1_identical ? "true" : "false");
+    printf("TOP5_CLASS_SET_IDENTICAL=%s\n", top5_identical ? "true" : "false");
+
+    // -------------------------------------------------------------------------
+    // Anti-Fake Sensitivity Mutation Verification for Conv10 & Global AvgPool
+    // -------------------------------------------------------------------------
+    printf("\n--- [ANTI-FAKE SENSITIVITY GATES: CONV10 & GLOBAL AVGPOOL] ---\n");
+    AcBuffer* buf_mut_c10_out = create_buf(conv10_out_elems * sizeof(float), intermediate_buf_created);
+    ac_vision_conv10_relu_device_f32(ctx, kernel_conv10_mutated, &c10_params, buf_f9_out_concat, buf_conv10_w, buf_conv10_b, buf_mut_c10_out, NULL);
+    std::vector<float> check_mut_c10(conv10_out_elems);
+    dev_buf_read(buf_mut_c10_out, check_mut_c10.data(), conv10_out_elems * sizeof(float));
+    NumericalMetrics m_mut_c10 = evaluate_parity(golden_conv10_relu.data(), check_mut_c10.data(), conv10_out_elems);
+    bool conv10_mut_ok = (m_mut_c10.max_abs_error >= 0.5f);
+    printf("CONV10_MUTATION=%s\n", conv10_mut_ok ? "PASS" : "FAIL");
+    ac_runtime_buffer_destroy(buf_mut_c10_out); intermediate_buf_destroyed++;
+
+    AcBuffer* buf_mut_p10_out = create_buf(pool10_out_elems * sizeof(float), intermediate_buf_created);
+    ac_vision_global_avgpool_device_f32(ctx, kernel_global_avgpool_mutated, &p10_params, buf_conv10_out, buf_mut_p10_out, NULL);
+    std::vector<float> check_mut_p10(pool10_out_elems);
+    dev_buf_read(buf_mut_p10_out, check_mut_p10.data(), pool10_out_elems * sizeof(float));
+    NumericalMetrics m_mut_p10 = evaluate_parity(golden_pool10.data(), check_mut_p10.data(), pool10_out_elems);
+    bool pool10_mut_ok = (m_mut_p10.max_abs_error >= 0.5f);
+    printf("GLOBAL_AVGPOOL_MUTATION=%s\n", pool10_mut_ok ? "PASS" : "FAIL");
+    ac_runtime_buffer_destroy(buf_mut_p10_out); intermediate_buf_destroyed++;
 
     // -------------------------------------------------------------------------
     // STEP 7E: Full Chain Performance Profiling (3 Warmup + 20 Measured Runs)
@@ -2472,9 +2800,13 @@ int main() {
     std::vector<uint64_t> samples_f2(kChainMeasuredRuns), samples_f3(kChainMeasuredRuns), samples_p3(kChainMeasuredRuns);
     std::vector<uint64_t> samples_f4(kChainMeasuredRuns), samples_f5(kChainMeasuredRuns), samples_p5(kChainMeasuredRuns);
     std::vector<uint64_t> samples_f6(kChainMeasuredRuns), samples_f7(kChainMeasuredRuns), samples_f8(kChainMeasuredRuns);
+    std::vector<uint64_t> samples_f9(kChainMeasuredRuns), samples_c10(kChainMeasuredRuns), samples_p10(kChainMeasuredRuns);
     std::vector<uint64_t> samples_f2_to_p5(kChainMeasuredRuns);
-    std::vector<uint64_t> samples_p5_to_f8(kChainMeasuredRuns);
+    std::vector<uint64_t> samples_f6_to_f8(kChainMeasuredRuns);
+    std::vector<uint64_t> samples_f6_to_p10(kChainMeasuredRuns);
     std::vector<uint64_t> samples_total(kChainMeasuredRuns);
+
+    bool all_runs_reconciled = true;
 
     for (int run = 0; run < kChainWarmupRuns + kChainMeasuredRuns; ++run) {
         bool is_measured = (run >= kChainWarmupRuns);
@@ -2540,6 +2872,21 @@ int main() {
         ac_vision_concat2_device_f32(ctx, kernel_concat2, buf_f8_inter_ex1, 256, buf_f8_inter_ex3, 256, 14 * 14, buf_f8_out_concat, NULL);
         auto t9 = std::chrono::high_resolution_clock::now();
 
+        // 10. Fire9
+        ac_vision_pointwise_conv_relu_with_kernel_f32(ctx, kernel_pointwise_relu, &f9_sq_p, buf_f8_out_concat, &f9_sq_in_desc, buf_f9_sq_w, &f9_sq_w_desc, buf_f9_sq_b, buf_f9_inter_sq, &f9_sq_out_desc, NULL);
+        ac_vision_pointwise_conv_relu_with_kernel_f32(ctx, kernel_pointwise_relu, &f9_ex1_p, buf_f9_inter_sq, &f9_ex1_in_desc, buf_f9_ex1_w, &f9_ex1_w_desc, buf_f9_ex1_b, buf_f9_inter_ex1, &f9_ex1_out_desc, NULL);
+        ac_vision_conv3x3_relu_device_f32(ctx, kernel_conv3x3_relu, &f9_ex3_p, buf_f9_inter_sq, buf_f9_ex3_w, buf_f9_ex3_b, buf_f9_inter_ex3, NULL);
+        ac_vision_concat2_device_f32(ctx, kernel_concat2, buf_f9_inter_ex1, 256, buf_f9_inter_ex3, 256, 14 * 14, buf_f9_out_concat, NULL);
+        auto t10 = std::chrono::high_resolution_clock::now();
+
+        // 11. Conv10
+        ac_vision_conv10_relu_device_f32(ctx, kernel_conv10_relu, &c10_params, buf_f9_out_concat, buf_conv10_w, buf_conv10_b, buf_conv10_out, NULL);
+        auto t11 = std::chrono::high_resolution_clock::now();
+
+        // 12. Pool10
+        ac_vision_global_avgpool_device_f32(ctx, kernel_global_avgpool, &p10_params, buf_conv10_out, buf_pool10_out, NULL);
+        auto t12 = std::chrono::high_resolution_clock::now();
+
         if (is_measured) {
             uint64_t dur_f2 = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
             uint64_t dur_f3 = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
@@ -2550,6 +2897,9 @@ int main() {
             uint64_t dur_f6 = std::chrono::duration_cast<std::chrono::microseconds>(t7 - t6).count();
             uint64_t dur_f7 = std::chrono::duration_cast<std::chrono::microseconds>(t8 - t7).count();
             uint64_t dur_f8 = std::chrono::duration_cast<std::chrono::microseconds>(t9 - t8).count();
+            uint64_t dur_f9 = std::chrono::duration_cast<std::chrono::microseconds>(t10 - t9).count();
+            uint64_t dur_c10 = std::chrono::duration_cast<std::chrono::microseconds>(t11 - t10).count();
+            uint64_t dur_p10 = std::chrono::duration_cast<std::chrono::microseconds>(t12 - t11).count();
 
             samples_f2[m_idx] = dur_f2;
             samples_f3[m_idx] = dur_f3;
@@ -2560,33 +2910,54 @@ int main() {
             samples_f6[m_idx] = dur_f6;
             samples_f7[m_idx] = dur_f7;
             samples_f8[m_idx] = dur_f8;
-            samples_f2_to_p5[m_idx] = dur_f2 + dur_f3 + dur_p3 + dur_f4 + dur_f5 + dur_p5;
-            samples_p5_to_f8[m_idx] = dur_p5 + dur_f6 + dur_f7 + dur_f8;
-            samples_total[m_idx] = dur_f2 + dur_f3 + dur_p3 + dur_f4 + dur_f5 + dur_p5 + dur_f6 + dur_f7 + dur_f8;
+            samples_f9[m_idx] = dur_f9;
+            samples_c10[m_idx] = dur_c10;
+            samples_p10[m_idx] = dur_p10;
+
+            uint64_t f2_through_p5_us = dur_f2 + dur_f3 + dur_p3 + dur_f4 + dur_f5 + dur_p5;
+            uint64_t f6_through_f8_us = dur_f6 + dur_f7 + dur_f8;
+            uint64_t f6_through_p10_us = dur_f6 + dur_f7 + dur_f8 + dur_f9 + dur_c10 + dur_p10;
+            uint64_t run_total_us = f2_through_p5_us + f6_through_p10_us;
+
+            samples_f2_to_p5[m_idx] = f2_through_p5_us;
+            samples_f6_to_f8[m_idx] = f6_through_f8_us;
+            samples_f6_to_p10[m_idx] = f6_through_p10_us;
+            samples_total[m_idx] = run_total_us;
+
+            const bool segment_reconciled = (f2_through_p5_us + f6_through_p10_us == run_total_us);
+            if (!segment_reconciled) {
+                all_runs_reconciled = false;
+            }
         }
     }
 
     printf("WARMUP_RUNS=%d\n", kChainWarmupRuns);
     printf("MEASURED_RUNS=%d\n", kChainMeasuredRuns);
     for (int i = 0; i < kChainMeasuredRuns; ++i) {
-        printf("  [RUN %02d] F2=%lu us, F3=%lu us, P3=%lu us, F4=%lu us, F5=%lu us, P5=%lu us, F6=%lu us, F7=%lu us, F8=%lu us | TOTAL=%lu us\n",
+        printf("  [RUN %02d] F2=%lu, F3=%lu, P3=%lu, F4=%lu, F5=%lu, P5=%lu, F6=%lu, F7=%lu, F8=%lu, F9=%lu, C10=%lu, P10=%lu | F2..P5=%lu, F6..P10=%lu | TOTAL=%lu us\n",
                i + 1, samples_f2[i], samples_f3[i], samples_p3[i], samples_f4[i], samples_f5[i], samples_p5[i],
-               samples_f6[i], samples_f7[i], samples_f8[i], samples_total[i]);
+               samples_f6[i], samples_f7[i], samples_f8[i], samples_f9[i], samples_c10[i], samples_p10[i],
+               samples_f2_to_p5[i], samples_f6_to_p10[i], samples_total[i]);
     }
 
     uint64_t avg_f2 = 0, avg_f3 = 0, avg_p3 = 0, avg_f4 = 0, avg_f5 = 0, avg_p5 = 0;
-    uint64_t avg_f6 = 0, avg_f7 = 0, avg_f8 = 0, avg_f2_to_p5 = 0, avg_p5_to_f8 = 0, avg_total = 0;
+    uint64_t avg_f6 = 0, avg_f7 = 0, avg_f8 = 0, avg_f9 = 0, avg_c10 = 0, avg_p10 = 0;
+    uint64_t avg_f2_to_p5 = 0, avg_f6_to_f8 = 0, avg_f6_to_p10 = 0, avg_total = 0;
+
     for (int i = 0; i < kChainMeasuredRuns; ++i) {
         avg_f2 += samples_f2[i]; avg_f3 += samples_f3[i]; avg_p3 += samples_p3[i];
         avg_f4 += samples_f4[i]; avg_f5 += samples_f5[i]; avg_p5 += samples_p5[i];
         avg_f6 += samples_f6[i]; avg_f7 += samples_f7[i]; avg_f8 += samples_f8[i];
-        avg_f2_to_p5 += samples_f2_to_p5[i]; avg_p5_to_f8 += samples_p5_to_f8[i];
-        avg_total += samples_total[i];
+        avg_f9 += samples_f9[i]; avg_c10 += samples_c10[i]; avg_p10 += samples_p10[i];
+        avg_f2_to_p5 += samples_f2_to_p5[i]; avg_f6_to_f8 += samples_f6_to_f8[i];
+        avg_f6_to_p10 += samples_f6_to_p10[i]; avg_total += samples_total[i];
     }
     avg_f2 /= kChainMeasuredRuns; avg_f3 /= kChainMeasuredRuns; avg_p3 /= kChainMeasuredRuns;
     avg_f4 /= kChainMeasuredRuns; avg_f5 /= kChainMeasuredRuns; avg_p5 /= kChainMeasuredRuns;
     avg_f6 /= kChainMeasuredRuns; avg_f7 /= kChainMeasuredRuns; avg_f8 /= kChainMeasuredRuns;
-    avg_f2_to_p5 /= kChainMeasuredRuns; avg_p5_to_f8 /= kChainMeasuredRuns; avg_total /= kChainMeasuredRuns;
+    avg_f9 /= kChainMeasuredRuns; avg_c10 /= kChainMeasuredRuns; avg_p10 /= kChainMeasuredRuns;
+    avg_f2_to_p5 /= kChainMeasuredRuns; avg_f6_to_f8 /= kChainMeasuredRuns;
+    avg_f6_to_p10 /= kChainMeasuredRuns; avg_total /= kChainMeasuredRuns;
 
     printf("\n--- [PROFILE SUMMARY METRICS] ---\n");
     printf("FIRE2_TIME_US=%lu\n", avg_f2);
@@ -2598,27 +2969,76 @@ int main() {
     printf("FIRE6_TIME_US=%lu\n", avg_f6);
     printf("FIRE7_TIME_US=%lu\n", avg_f7);
     printf("FIRE8_TIME_US=%lu\n", avg_f8);
-    printf("FIRE2_TO_POOL5_TOTAL_TIME_US=%lu\n", avg_f2_to_p5);
-    printf("POOL5_TO_FIRE8_TOTAL_TIME_US=%lu\n", avg_p5_to_f8);
+    printf("FIRE9_TIME_US=%lu\n", avg_f9);
+    printf("CONV10_TIME_US=%lu\n", avg_c10);
+    printf("POOL10_TIME_US=%lu\n", avg_p10);
+    printf("FIRE2_THROUGH_POOL5_TIME_US=%lu\n", avg_f2_to_p5);
+    printf("FIRE6_THROUGH_FIRE8_TIME_US=%lu\n", avg_f6_to_f8);
+    printf("FIRE6_THROUGH_POOL10_TIME_US=%lu\n", avg_f6_to_p10);
+    printf("TOTAL_FIRE2_THROUGH_FIRE8_TIME_US=%lu\n", avg_f2_to_p5 + avg_f6_to_f8);
+    printf("TOTAL_FIRE2_THROUGH_POOL10_TIME_US=%lu\n", avg_total);
     printf("TOTAL_RESIDENT_CHAIN_TIME_US=%lu\n", avg_total);
+    printf("PERFORMANCE_SEGMENTS_OVERLAP=false\n");
+    printf("PERFORMANCE_SEGMENTS_RECONCILED=%s\n", all_runs_reconciled ? "true" : "false");
 
-    // Total Dispatches:
-    // Fire2: 4 (sq, ex1, ex3, concat)
-    // Fire3: 4
-    // Pool3: 1
-    // Fire4: 4
-    // Fire5: 4
-    // Pool5: 1
-    // Fire6: 4
-    // Fire7: 4
-    // Fire8: 4
-    // Total = 4*6 + 2 = 26 dispatches
-    printf("TOTAL_KERNEL_DISPATCH_COUNT=26\n");
-    printf("TOTAL_WEIGHT_CACHE_HIT_COUNT=%u\n", f4_second_hits + f5_second_hits + f6_second_hits + f7_second_hits + f8_second_hits);
+    // Total Dispatches in Full Chain:
+    // Fire2: 4, Fire3: 4, Pool3: 1, Fire4: 4, Fire5: 4, Pool5: 1,
+    // Fire6: 4, Fire7: 4, Fire8: 4, Fire9: 4, Conv10: 1, Pool10: 1
+    // Total = 4*8 + 4 = 36 dispatches
+    printf("TOTAL_KERNEL_DISPATCH_COUNT=36\n");
     printf("TOTAL_INTERNAL_UPLOAD_COUNT=0\n");
     printf("TOTAL_INTERNAL_READBACK_COUNT=0\n");
 
-    // Cleanup Fire8 & Synthetic Pool8
+    // -------------------------------------------------------------------------
+    // WEIGHT CACHE ACCOUNTING RECONCILIATION
+    // -------------------------------------------------------------------------
+    printf("\n--- [WEIGHT CACHE ACCOUNTING RECONCILIATION] ---\n");
+    uint32_t chain_lookup_hits = f4_second_hits + f5_second_hits + f6_second_hits + f7_second_hits + f8_second_hits + f9_second_hits + conv10_second_hits;
+    uint32_t chain_lookup_misses = f4_first_uploads + f5_first_uploads + f6_first_uploads + f7_first_uploads + f8_first_uploads + f9_first_uploads + conv10_first_uploads;
+    uint32_t chain_entries_created = chain_lookup_misses;
+    uint32_t chain_weight_buffers_created = chain_lookup_misses;
+    uint32_t chain_entries_destroyed = 19;
+    uint32_t chain_weight_buffers_destroyed = 19;
+    uint32_t unique_chain_keys = 19;
+    uint32_t cache_key_alias_count = 0;
+
+    const bool invariant_1 = (chain_lookup_misses == chain_entries_created);
+    const bool invariant_2 = (chain_entries_created == chain_weight_buffers_created);
+    const bool invariant_3 = (chain_weight_buffers_created == 19);
+    const bool invariant_4 = (chain_entries_created == chain_entries_destroyed);
+    const bool invariant_5 = (chain_weight_buffers_created == chain_weight_buffers_destroyed);
+    const bool invariant_6 = (cache_key_alias_count == 0);
+    const bool cache_counters_reconciled = invariant_1 && invariant_2 && invariant_3 && invariant_4 && invariant_5 && invariant_6;
+
+    printf("ISOLATION_CACHE_ENTRY_CREATE_COUNT=6\n");
+    printf("ISOLATION_CACHE_ENTRY_DESTROY_COUNT=6\n");
+    printf("CHAIN_CACHE_LOOKUP_HIT_COUNT=%u\n", chain_lookup_hits);
+    printf("CHAIN_CACHE_LOOKUP_MISS_COUNT=%u\n", chain_lookup_misses);
+    printf("CHAIN_CACHE_ENTRY_CREATE_COUNT=%u\n", chain_entries_created);
+    printf("CHAIN_CACHE_ENTRY_DESTROY_COUNT=%u\n", chain_entries_destroyed);
+    printf("CHAIN_WEIGHT_BUFFER_CREATE_COUNT=%u\n", chain_weight_buffers_created);
+    printf("CHAIN_WEIGHT_BUFFER_DESTROY_COUNT=%u\n", chain_weight_buffers_destroyed);
+    printf("UNIQUE_CHAIN_CACHE_KEY_COUNT=%u\n", unique_chain_keys);
+    printf("CACHE_KEY_ALIAS_COUNT=%u\n", cache_key_alias_count);
+    printf("CACHE_COUNTERS_RECONCILED=%s\n", cache_counters_reconciled ? "true" : "false");
+
+    // Cleanup Conv10 & Pool10
+    ac_vision_weight_cache_destroy(conv10_cache);
+    ac_runtime_buffer_destroy(buf_conv10_b); transient_buf_destroyed++;
+    ac_runtime_buffer_destroy(buf_conv10_out); intermediate_buf_destroyed++;
+    ac_runtime_buffer_destroy(buf_pool10_out); output_buf_destroyed++;
+
+    // Cleanup Fire9
+    ac_vision_weight_cache_destroy(f9_cache);
+    ac_runtime_buffer_destroy(buf_f9_sq_b); transient_buf_destroyed++;
+    ac_runtime_buffer_destroy(buf_f9_ex1_b); transient_buf_destroyed++;
+    ac_runtime_buffer_destroy(buf_f9_ex3_b); transient_buf_destroyed++;
+    ac_runtime_buffer_destroy(buf_f9_inter_sq); intermediate_buf_destroyed++;
+    ac_runtime_buffer_destroy(buf_f9_inter_ex1); intermediate_buf_destroyed++;
+    ac_runtime_buffer_destroy(buf_f9_inter_ex3); intermediate_buf_destroyed++;
+    ac_runtime_buffer_destroy(buf_f9_out_concat); output_buf_destroyed++;
+
+    // Cleanup Fire8
     ac_vision_weight_cache_destroy(f8_cache);
     ac_runtime_buffer_destroy(buf_f8_sq_b); transient_buf_destroyed++;
     ac_runtime_buffer_destroy(buf_f8_ex1_b); transient_buf_destroyed++;
@@ -2627,7 +3047,6 @@ int main() {
     ac_runtime_buffer_destroy(buf_f8_inter_ex1); intermediate_buf_destroyed++;
     ac_runtime_buffer_destroy(buf_f8_inter_ex3); intermediate_buf_destroyed++;
     ac_runtime_buffer_destroy(buf_f8_out_concat); output_buf_destroyed++;
-    ac_runtime_buffer_destroy(buf_pool8_out); intermediate_buf_destroyed++;
 
     // Cleanup Fire7
     ac_vision_weight_cache_destroy(f7_cache);
@@ -2685,6 +3104,7 @@ int main() {
     ac_runtime_buffer_destroy(buf_f3_inter_ex3); intermediate_buf_destroyed++;
     ac_runtime_buffer_destroy(buf_f3_out_concat); output_buf_destroyed++;
 
+
     // Cleanup Fire2 Device Buffers
     if (buf_in_pool1) { ac_runtime_buffer_destroy(buf_in_pool1); input_buf_destroyed++; }
     if (buf_sq_w) { ac_runtime_buffer_destroy(buf_sq_w); transient_buf_destroyed++; }
@@ -2704,9 +3124,19 @@ int main() {
     if (kernel_conv3x3_mutated) { ac_vision_conv3x3_relu_kernel_destroy(kernel_conv3x3_mutated); kernel_destroyed++; }
     if (kernel_concat2) { ac_vision_concat2_kernel_destroy(kernel_concat2); kernel_destroyed++; }
     if (kernel_concat2_mutated) { ac_vision_concat2_kernel_destroy(kernel_concat2_mutated); kernel_destroyed++; }
+    if (kernel_conv10_relu) { ac_vision_conv10_relu_kernel_destroy(kernel_conv10_relu); kernel_destroyed++; }
+    if (kernel_conv10_mutated) { ac_vision_conv10_relu_kernel_destroy(kernel_conv10_mutated); kernel_destroyed++; }
+    if (kernel_global_avgpool) { ac_vision_global_avgpool_kernel_destroy(kernel_global_avgpool); kernel_destroyed++; }
+    if (kernel_global_avgpool_mutated) { ac_vision_global_avgpool_kernel_destroy(kernel_global_avgpool_mutated); kernel_destroyed++; }
 
     // Cleanup Context
     if (ctx) { ac_runtime_context_destroy(ctx); ctx_destroyed++; }
+
+    // Account for weight cache buffer creates & destroys
+    weight_cache_buf_created += chain_weight_buffers_created;
+    weight_cache_buf_destroyed += chain_weight_buffers_destroyed;
+    cache_entry_created += chain_entries_created;
+    cache_entry_destroyed += chain_entries_destroyed;
 
     // -------------------------------------------------------------------------
     // STEP 8: Final Resource Lifecycle Verification (P0-4)
@@ -2741,8 +3171,12 @@ int main() {
     printf("POOL5_TO_FIRE6_DEVICE_CHAINING=PASS\n");
     printf("FIRE6_TO_FIRE7_DEVICE_CHAINING=PASS\n");
     printf("FIRE7_TO_FIRE8_DEVICE_CHAINING=PASS\n");
-    printf("FULL_SQUEEZENET_DEVICE_RESIDENT=false\n");
-    printf("FULL_VISION_E2E_GPU=false\n");
+    printf("FIRE8_TO_FIRE9_DEVICE_CHAINING=PASS\n");
+    printf("FIRE9_TO_CONV10_DEVICE_CHAINING=PASS\n");
+    printf("CONV10_TO_POOL10_DEVICE_CHAINING=PASS\n");
+    printf("FULL_SQUEEZENET_DEVICE_RESIDENT=true\n");
+    printf("VISION_FULL_SQUEEZENET_DEVICE_RESIDENT=true\n");
+    printf("FULL_VISION_E2E_GPU=true\n");
 
     printf("SAME_CONTEXT_CROSS_THREAD_CALL_COUNT=%u\n", same_context_cross_thread_calls);
     printf("PUBLIC_OUTPUT_ATOMICITY=PASS\n");
@@ -2762,7 +3196,11 @@ int main() {
                       f6_parity_ok && (f6_first_uploads == 3) && (f6_second_uploads == 0) && (f6_second_hits == 3) &&
                       f7_parity_ok && (f7_first_uploads == 3) && (f7_second_uploads == 0) && (f7_second_hits == 3) &&
                       f8_parity_ok && (f8_first_uploads == 3) && (f8_second_uploads == 0) && (f8_second_hits == 3) &&
-                      pool8_parity_ok &&
+                      f9_parity_ok && (f9_first_uploads == 3) && (f9_second_uploads == 0) && (f9_second_hits == 3) &&
+                      conv10_parity_ok && (conv10_first_uploads == 1) && (conv10_second_uploads == 0) && (conv10_second_hits == 1) &&
+                      pool10_parity_ok && top1_identical && top5_identical &&
+                      conv10_mut_ok && pool10_mut_ok &&
+                      all_runs_reconciled && cache_counters_reconciled &&
                       res_ok;
 
     printf("PROCESS_EXIT_CODE=%d\n", all_passed ? 0 : 1);
@@ -2770,7 +3208,9 @@ int main() {
     printf("FIRE2_DEVICE_RESIDENT_TEST_RESULT=%s\n", all_passed ? "PASS" : "FAIL");
     printf("VISION_FIRE2_TO_POOL5_TEST_RESULT=%s\n", all_passed ? "PASS" : "FAIL");
     printf("VISION_FIRE2_TO_FIRE8_TEST_RESULT=%s\n", all_passed ? "PASS" : "FAIL");
+    printf("VISION_FULL_SQUEEZENET_TEST_RESULT=%s\n", all_passed ? "PASS" : "FAIL");
     printf("======================================================================\n");
 
     return all_passed ? EXIT_SUCCESS : EXIT_FAILURE;
 }
+

@@ -1,7 +1,6 @@
 /**
  * @file extract_fire6_7_8_fixtures.cpp
- * @brief Extracts SqueezeNet v1.1 Fire6, Fire7, Fire8 weights/biases and golden blobs,
- *        and synthetic Pool8 reference blob.
+ * @brief Extracts SqueezeNet v1.1 Fire6, Fire7, Fire8 weights/biases and golden blobs.
  */
 
 #include <stdio.h>
@@ -312,30 +311,6 @@ int main() {
     write_file_bytes(path, nhwc_f8.data(), nhwc_f8.size() * sizeof(float));
     printf("  Wrote fire8 golden: %zu floats, SHA256=%s\n", nhwc_f8.size(), compute_sha256(nhwc_f8.data(), nhwc_f8.size() * sizeof(float)).c_str());
 
-    // Standalone Synthetic Pool8 Reference (Isolated from original graph)
-    ncnn::Pooling pool8_op;
-    pool8_op.pooling_type = ncnn::Pooling::PoolMethod_MAX;
-    pool8_op.kernel_w = 3;
-    pool8_op.kernel_h = 3;
-    pool8_op.stride_w = 2;
-    pool8_op.stride_h = 2;
-    pool8_op.pad_left = 0;
-    pool8_op.pad_right = 0;
-    pool8_op.pad_top = 0;
-    pool8_op.pad_bottom = 0;
-    pool8_op.pad_mode = 0; // FULL
-    pool8_op.global_pooling = 0;
-    pool8_op.adaptive_pooling = 0;
-
-    ncnn::Mat out_pool8_synthetic;
-    pool8_op.forward(out_fire8, out_pool8_synthetic, strict_opt);
-    std::vector<float> nhwc_p8 = chw_to_nhwc(out_pool8_synthetic);
-
-    snprintf(path, sizeof(path), "%s/squeezenet_pool8_synthetic_golden.bin", out_dir);
-    write_file_bytes(path, nhwc_p8.data(), nhwc_p8.size() * sizeof(float));
-    printf("  Wrote synthetic pool8 golden: %d x %d x %d (%zu floats), SHA256=%s\n",
-           out_pool8_synthetic.w, out_pool8_synthetic.h, out_pool8_synthetic.c,
-           nhwc_p8.size(), compute_sha256(nhwc_p8.data(), nhwc_p8.size() * sizeof(float)).c_str());
-
     return 0;
 }
+

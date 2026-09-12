@@ -19,7 +19,10 @@
 #include "../shaders/conv3x3_relu_spv.h"
 #include "../shaders/concat2_channel_spv.h"
 #include "../shaders/maxpool3_nhwc_spv.h"
+#include "../shaders/conv10_relu_spv.h"
+#include "../shaders/global_avgpool_spv.h"
 #include "../backend/vulkan/ac_vk_sha256.h"
+
 
 static AcVisionFailureStageEvidence g_failure_evidence = {};
 
@@ -49,7 +52,46 @@ static const AcKernelRuntimeMetadata kDefaultMaxPool2dMetadata = {
     NULL
 };
 
+static const AcRuntimeBindingDesc kConv10ReluBindings[4] = {
+    { 0, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE },
+    { 1, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE },
+    { 2, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE },
+    { 3, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE }
+};
+
+static const AcKernelRuntimeMetadata kDefaultConv10ReluMetadata = {
+    "conv10_relu",
+    "main",
+    4,
+    kConv10ReluBindings,
+    36, /* 9 * sizeof(uint32_t) */
+    { 16, 16, 1 },
+    0,
+    kConv10ReluSpvSha256,
+    0,
+    NULL
+};
+
+static const AcRuntimeBindingDesc kGlobalAvgpoolBindings[2] = {
+    { 0, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE },
+    { 1, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE }
+};
+
+static const AcKernelRuntimeMetadata kDefaultGlobalAvgpoolMetadata = {
+    "global_avgpool",
+    "main",
+    2,
+    kGlobalAvgpoolBindings,
+    8, /* 2 * sizeof(uint32_t) */
+    { 64, 1, 1 },
+    0,
+    kGlobalAvgpoolSpvSha256,
+    0,
+    NULL
+};
+
 static const AcRuntimeBindingDesc kPointwiseConvBindings[4] = {
+
     { 0, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE },
     { 1, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE },
     { 2, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE },
@@ -1848,3 +1890,212 @@ cleanup_kernels:
 
     return res;
 }
+
+/* =============================================================================
+ * SqueezeNet Conv10 Implementation
+ * ============================================================================= */
+
+AcResult ac_vision_conv10_relu_kernel_create(
+    AcContext* ctx,
+    const uint32_t* spirv_code,
+    size_t code_size_bytes,
+    const char* expected_sha256,
+    AcKernel** out_kernel
+) {
+    if (!out_kernel) return AC_ERR_NULL_POINTER;
+    *out_kernel = NULL;
+    if (!ctx) return AC_ERR_NULL_POINTER;
+
+    const uint32_t* code = spirv_code ? spirv_code : kConv10ReluSpv;
+    size_t code_size = code_size_bytes ? code_size_bytes : kConv10ReluSpvByteSize;
+
+    char computed_sha256[65] = {0};
+    AcKernelRuntimeMetadata meta = kDefaultConv10ReluMetadata;
+    if (expected_sha256) {
+        meta.expected_spirv_sha256 = expected_sha256;
+    } else if (spirv_code && spirv_code != kConv10ReluSpv) {
+        ac_sha256_compute_hex((const uint8_t*)code, code_size, computed_sha256);
+        meta.expected_spirv_sha256 = computed_sha256;
+    } else {
+        meta.expected_spirv_sha256 = kConv10ReluSpvSha256;
+    }
+
+    AcKernelDesc kdesc = {};
+    kdesc.abi_version = AC_ABI_VERSION;
+    kdesc.struct_size = sizeof(AcKernelDesc);
+    kdesc.spirv_code = code;
+    kdesc.code_size_bytes = code_size;
+    kdesc.metadata = &meta;
+    kdesc.specialization_count = 0;
+    kdesc.specializations = NULL;
+
+    return ac_runtime_kernel_create(ctx, &kdesc, out_kernel);
+}
+
+AcResult ac_vision_conv10_relu_kernel_destroy(AcKernel* kernel) {
+    if (!kernel) return AC_ERR_NULL_POINTER;
+    return ac_runtime_kernel_destroy(kernel);
+}
+
+AcResult ac_vision_conv10_relu_device_f32(
+    AcContext* ctx,
+    AcKernel* kernel,
+    const AcVisionConv10Params* params,
+    AcBuffer* in_buf,
+    AcBuffer* weight_buf,
+    AcBuffer* bias_buf,
+    AcBuffer* out_buf,
+    AcEvent** out_event
+) {
+    if (out_event) *out_event = NULL;
+    if (!ctx || !kernel || !params || !in_buf || !weight_buf || !out_buf) {
+        return AC_ERR_NULL_POINTER;
+    }
+    if (params->has_bias && !bias_buf) {
+        return AC_ERR_NULL_POINTER;
+    }
+    if (params->abi_version != AC_VISION_ABI_VERSION || params->struct_size != sizeof(AcVisionConv10Params)) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (params->in_h == 0 || params->in_w == 0 || params->in_c == 0 ||
+        params->out_h == 0 || params->out_w == 0 || params->out_c == 0) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+
+    size_t in_req = (size_t)params->in_h * params->in_w * params->in_c * sizeof(float);
+    size_t w_req = (size_t)params->out_c * params->in_c * sizeof(float);
+    size_t out_req = (size_t)params->out_h * params->out_w * params->out_c * sizeof(float);
+
+    size_t in_sz = 0, w_sz = 0, out_sz = 0;
+    if (ac_runtime_buffer_get_size(in_buf, &in_sz) != AC_SUCCESS || in_sz < in_req) return AC_ERR_INVALID_ARGUMENT;
+    if (ac_runtime_buffer_get_size(weight_buf, &w_sz) != AC_SUCCESS || w_sz < w_req) return AC_ERR_INVALID_ARGUMENT;
+    if (ac_runtime_buffer_get_size(out_buf, &out_sz) != AC_SUCCESS || out_sz < out_req) return AC_ERR_INVALID_ARGUMENT;
+
+    if (params->has_bias) {
+        size_t b_req = (size_t)params->out_c * sizeof(float);
+        size_t b_sz = 0;
+        if (ac_runtime_buffer_get_size(bias_buf, &b_sz) != AC_SUCCESS || b_sz < b_req) return AC_ERR_INVALID_ARGUMENT;
+    }
+
+    uint32_t grid_x = (params->out_c + 15u) / 16u;
+    uint32_t grid_y = (params->out_h * params->out_w + 15u) / 16u;
+    uint32_t grid_z = 1;
+
+    AcBuffer* bound_buffers[4] = { in_buf, weight_buf, bias_buf ? bias_buf : weight_buf, out_buf };
+    uint32_t push_constants[9] = {
+        params->in_h,
+        params->in_w,
+        params->in_c,
+        params->out_h,
+        params->out_w,
+        params->out_c,
+        params->pad_top,
+        params->pad_left,
+        params->has_bias
+    };
+
+    AcLaunchDesc ldesc = {};
+    ldesc.abi_version = AC_ABI_VERSION;
+    ldesc.struct_size = sizeof(AcLaunchDesc);
+    ldesc.kernel = kernel;
+    ldesc.buffer_count = 4;
+    ldesc.buffers = bound_buffers;
+    ldesc.push_constants = push_constants;
+    ldesc.push_constants_size = sizeof(push_constants);
+    ldesc.grid_dim = (AcDim3){ grid_x, grid_y, grid_z };
+
+    return ac_runtime_dispatch(ctx, &ldesc, out_event);
+}
+
+/* =============================================================================
+ * SqueezeNet Pool10 (Global Average Pooling) Implementation
+ * ============================================================================= */
+
+AcResult ac_vision_global_avgpool_kernel_create(
+    AcContext* ctx,
+    const uint32_t* spirv_code,
+    size_t code_size_bytes,
+    const char* expected_sha256,
+    AcKernel** out_kernel
+) {
+    if (!out_kernel) return AC_ERR_NULL_POINTER;
+    *out_kernel = NULL;
+    if (!ctx) return AC_ERR_NULL_POINTER;
+
+    const uint32_t* code = spirv_code ? spirv_code : kGlobalAvgpoolSpv;
+    size_t code_size = code_size_bytes ? code_size_bytes : kGlobalAvgpoolSpvByteSize;
+
+    char computed_sha256[65] = {0};
+    AcKernelRuntimeMetadata meta = kDefaultGlobalAvgpoolMetadata;
+    if (expected_sha256) {
+        meta.expected_spirv_sha256 = expected_sha256;
+    } else if (spirv_code && spirv_code != kGlobalAvgpoolSpv) {
+        ac_sha256_compute_hex((const uint8_t*)code, code_size, computed_sha256);
+        meta.expected_spirv_sha256 = computed_sha256;
+    } else {
+        meta.expected_spirv_sha256 = kGlobalAvgpoolSpvSha256;
+    }
+
+    AcKernelDesc kdesc = {};
+    kdesc.abi_version = AC_ABI_VERSION;
+    kdesc.struct_size = sizeof(AcKernelDesc);
+    kdesc.spirv_code = code;
+    kdesc.code_size_bytes = code_size;
+    kdesc.metadata = &meta;
+    kdesc.specialization_count = 0;
+    kdesc.specializations = NULL;
+
+    return ac_runtime_kernel_create(ctx, &kdesc, out_kernel);
+}
+
+AcResult ac_vision_global_avgpool_kernel_destroy(AcKernel* kernel) {
+    if (!kernel) return AC_ERR_NULL_POINTER;
+    return ac_runtime_kernel_destroy(kernel);
+}
+
+AcResult ac_vision_global_avgpool_device_f32(
+    AcContext* ctx,
+    AcKernel* kernel,
+    const AcVisionGlobalAvgpoolParams* params,
+    AcBuffer* in_buf,
+    AcBuffer* out_buf,
+    AcEvent** out_event
+) {
+    if (out_event) *out_event = NULL;
+    if (!ctx || !kernel || !params || !in_buf || !out_buf) {
+        return AC_ERR_NULL_POINTER;
+    }
+    if (params->abi_version != AC_VISION_ABI_VERSION || params->struct_size != sizeof(AcVisionGlobalAvgpoolParams)) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (params->spatial_elements == 0 || params->channels == 0) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+
+    size_t in_req = (size_t)params->spatial_elements * params->channels * sizeof(float);
+    size_t out_req = (size_t)params->channels * sizeof(float);
+
+    size_t in_sz = 0, out_sz = 0;
+    if (ac_runtime_buffer_get_size(in_buf, &in_sz) != AC_SUCCESS || in_sz < in_req) return AC_ERR_INVALID_ARGUMENT;
+    if (ac_runtime_buffer_get_size(out_buf, &out_sz) != AC_SUCCESS || out_sz < out_req) return AC_ERR_INVALID_ARGUMENT;
+
+    uint32_t grid_x = (params->channels + 63u) / 64u;
+    uint32_t grid_y = 1;
+    uint32_t grid_z = 1;
+
+    AcBuffer* bound_buffers[2] = { in_buf, out_buf };
+    uint32_t push_constants[2] = { params->spatial_elements, params->channels };
+
+    AcLaunchDesc ldesc = {};
+    ldesc.abi_version = AC_ABI_VERSION;
+    ldesc.struct_size = sizeof(AcLaunchDesc);
+    ldesc.kernel = kernel;
+    ldesc.buffer_count = 2;
+    ldesc.buffers = bound_buffers;
+    ldesc.push_constants = push_constants;
+    ldesc.push_constants_size = sizeof(push_constants);
+    ldesc.grid_dim = (AcDim3){ grid_x, grid_y, grid_z };
+
+    return ac_runtime_dispatch(ctx, &ldesc, out_event);
+}
+
