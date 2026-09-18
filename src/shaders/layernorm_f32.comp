@@ -1,0 +1,72 @@
+#version 450
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuffer {
+    float in_data[];
+};
+
+layout(set = 0, binding = 1) readonly buffer GammaBuffer {
+    float gamma[];
+};
+
+layout(set = 0, binding = 2) readonly buffer BetaBuffer {
+    float beta[];
+};
+
+layout(set = 0, binding = 3) writeonly buffer OutputBuffer {
+    float out_data[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint num_tokens; // e.g. 729
+    uint hidden_dim; // e.g. 1152
+    float eps;       // e.g. 1e-5
+};
+
+shared float s_sum[256];
+shared float s_sq_sum[256];
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    if (row >= num_tokens) return;
+
+    uint tid = gl_LocalInvocationID.x;
+    uint base_idx = row * hidden_dim;
+
+    // Phase 1: Local accumulation of sum and sum of squares
+    float local_sum = 0.0;
+    float local_sq_sum = 0.0;
+
+    for (uint j = tid; j < hidden_dim; j += 256) {
+        float val = in_data[base_idx + j];
+        local_sum += val;
+        local_sq_sum += val * val;
+    }
+
+    s_sum[tid] = local_sum;
+    s_sq_sum[tid] = local_sq_sum;
+    barrier();
+
+    // Reduction in shared memory
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            s_sum[tid] += s_sum[tid + stride];
+            s_sq_sum[tid] += s_sq_sum[tid + stride];
+        }
+        barrier();
+    }
+
+    float mean = s_sum[0] / float(hidden_dim);
+    float variance = (s_sq_sum[0] / float(hidden_dim)) - (mean * mean);
+    if (variance < 0.0) variance = 0.0;
+    float inv_std = inversesqrt(variance + eps);
+
+    // Phase 2: Normalize, scale and shift
+    for (uint j = tid; j < hidden_dim; j += 256) {
+        float val = in_data[base_idx + j];
+        float norm_val = (val - mean) * inv_std;
+        float g = gamma[j];
+        float b = beta[j];
+        out_data[base_idx + j] = norm_val * g + b;
+    }
+}

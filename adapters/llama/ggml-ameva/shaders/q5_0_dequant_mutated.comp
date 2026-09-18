@@ -1,0 +1,67 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer BufferSrcQ5 {
+    uint raw_q5[];
+};
+
+layout(std430, binding = 1) writeonly buffer BufferDstF32 {
+    float dst_f32[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint num_blocks;
+    uint byte_offset_src;
+    uint elem_offset_dst;
+} pc;
+
+// Unaligned 32-bit load from byte storage array
+uint load_u32(uint byte_addr) {
+    uint w0 = raw_q5[byte_addr >> 2];
+    uint shift = (byte_addr & 3u) * 8u;
+    if (shift == 0u) {
+        return w0;
+    }
+    uint w1 = raw_q5[(byte_addr >> 2) + 1u];
+    return (w0 >> shift) | (w1 << (32u - shift));
+}
+
+void main() {
+    uint b = gl_GlobalInvocationID.x;
+    if (b >= pc.num_blocks) {
+        return;
+    }
+
+    uint base_byte = pc.byte_offset_src + b * 22u;
+
+    // 1. Unpack scale d (fp16 at base_byte + 0..1)
+    uint d_raw = load_u32(base_byte) & 0xFFFFu;
+    float d = unpackHalf2x16(d_raw).x;
+
+    // 2. High bits qh (uint32 at base_byte + 2..5)
+    uint qh = load_u32(base_byte + 2u);
+
+    // 3. Low nibbles qs (16 bytes at base_byte + 6..21)
+    uint qs_words[4];
+    qs_words[0] = load_u32(base_byte + 6u);
+    qs_words[1] = load_u32(base_byte + 10u);
+    qs_words[2] = load_u32(base_byte + 14u);
+    qs_words[3] = load_u32(base_byte + 18u);
+
+    uint dst_base = pc.elem_offset_dst + b * 32u;
+
+    // Dequantize 32 elements (16 pairs)
+    for (uint j = 0; j < 16u; ++j) {
+        uint qs_j = (qs_words[j >> 2] >> ((j & 3u) * 8u)) & 0xFFu;
+
+        uint xh_0 = ((qh >> (j + 0u)) << 4u) & 0x10u;
+        uint xh_1 = (qh >> (j + 12u)) & 0x10u;
+
+        int x0 = int((qs_j & 0x0Fu) | xh_0) - 16;
+        int x1 = int((qs_j >> 4u) | xh_1) - 16;
+
+        dst_f32[dst_base + j]        = float(x0) * d + 0.25;
+        dst_f32[dst_base + j + 16u]  = float(x1) * d + 0.25;
+    }
+}

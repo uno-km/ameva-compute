@@ -97,8 +97,47 @@ AcResult ac_vk_dispatch(
     AcVkEvent** out_event
 );
 
+/* ========================================================================= */
+/* Vulkan Batch Internal Declarations                                        */
+/* ========================================================================= */
+
+typedef struct AcVkCommandBatch AcVkCommandBatch;
+
+AcResult ac_vk_batch_begin(
+    AcVkContext* ctx,
+    uint32_t max_dispatches,
+    AcVkCommandBatch** out_batch
+);
+
+AcResult ac_vk_batch_dispatch(
+    AcVkCommandBatch* batch,
+    AcVkKernel* kernel,
+    AcVkBuffer** buffers,
+    uint32_t buffer_count,
+    const void* push_constants,
+    size_t push_constants_size,
+    uint32_t group_x,
+    uint32_t group_y,
+    uint32_t group_z,
+    AcVkEvent** out_event
+);
+
+AcResult ac_vk_batch_submit(
+    AcVkCommandBatch* batch,
+    AcVkEvent** out_completion_event
+);
+
+AcResult ac_vk_batch_abort(
+    AcVkCommandBatch* batch
+);
+
+void ac_vk_batch_destroy(
+    AcVkCommandBatch* batch
+);
+
 #ifdef __cplusplus
 }
 #endif
 
 #endif /* AC_DISPATCH_H */
+

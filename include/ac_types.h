@@ -29,6 +29,8 @@ typedef struct AcVkBuffer  AcVkBuffer;
 typedef struct AcVkKernel  AcVkKernel;
 typedef struct AcVkEvent   AcVkEvent;
 
+#include "ac_error.h"
+
 /**
  * @brief Legacy OpenCL Device Context (Maintained for backwards compatibility)
  */
@@ -89,3 +91,4 @@ typedef struct {
 #endif
 
 #endif /* AC_TYPES_H */
+

@@ -17,12 +17,14 @@
 #include <string.h>
 #include <stdint.h>
 #include <math.h>
+#include <atomic>
 #include "../backend/vulkan/ac_vk_sha256.h"
 
 #define AC_MAGIC_CONTEXT 0xAC010001
 #define AC_MAGIC_BUFFER  0xAC010002
 #define AC_MAGIC_KERNEL  0xAC010003
 #define AC_MAGIC_EVENT   0xAC010004
+#define AC_MAGIC_BATCH   0xAC010005
 
 struct AcContext {
     uint32_t magic;
@@ -32,6 +34,7 @@ struct AcContext {
     uint32_t active_child_buffers;
     uint32_t active_child_kernels;
     uint32_t active_child_events;
+    uint32_t active_child_batches;
 };
 
 struct AcBuffer {
@@ -51,6 +54,13 @@ struct AcEvent {
     AcContext* owning_context;
     AcVkEvent* vk_event;
 };
+
+struct AcCommandBatch {
+    uint32_t magic;
+    AcContext* owning_context;
+    AcVkCommandBatch* vk_batch;
+};
+
 
 /* ========================================================================= */
 /* Context Management Implementation                                         */
@@ -105,12 +115,14 @@ AcResult ac_runtime_context_destroy(AcContext* ctx) {
         return AC_ERR_INVALID_CONTEXT;
     }
 
-    /* Strict rejection if any child buffer, kernel, or event is still alive */
+    /* Strict rejection if any child buffer, kernel, event, or batch is still alive */
     if (ctx->active_child_buffers != 0 ||
         ctx->active_child_kernels != 0 ||
-        ctx->active_child_events  != 0) {
+        ctx->active_child_events  != 0 ||
+        ctx->active_child_batches != 0) {
         return AC_ERR_RESOURCE_IN_USE;
     }
+
 
     if (ctx->vk_ctx) {
         AcResult res = ac_vk_context_destroy(ctx->vk_ctx);
@@ -960,3 +972,182 @@ AcResult ac_runtime_event_destroy(AcEvent* event) {
     free(event);
     return AC_SUCCESS;
 }
+
+/* ========================================================================= */
+/* Command Batching Implementation (Backend-Neutral Public API)              */
+/* ========================================================================= */
+
+AcResult ac_runtime_batch_begin(
+    AcContext* context,
+    AcCommandBatch** out_batch
+) {
+    if (out_batch) {
+        *out_batch = NULL;
+    }
+    if (!context || !out_batch) {
+        return AC_ERR_NULL_POINTER;
+    }
+    if (context->magic != AC_MAGIC_CONTEXT) {
+        return AC_ERR_INVALID_CONTEXT;
+    }
+
+    AcVkCommandBatch* vk_batch = NULL;
+    AcResult res = ac_vk_batch_begin(context->vk_ctx, 8, &vk_batch);
+    if (res != AC_SUCCESS) {
+        return res;
+    }
+
+    AcCommandBatch* batch = (AcCommandBatch*)calloc(1, sizeof(AcCommandBatch));
+    if (!batch) {
+        ac_vk_batch_destroy(vk_batch);
+        return AC_ERR_OUT_OF_HOST_MEMORY;
+    }
+
+    batch->magic = AC_MAGIC_BATCH;
+    batch->owning_context = context;
+    batch->vk_batch = vk_batch;
+    context->active_child_batches++;
+
+    *out_batch = batch;
+    return AC_SUCCESS;
+}
+
+AcResult ac_runtime_batch_dispatch(
+    AcCommandBatch* batch,
+    AcKernel* kernel,
+    const AcLaunchDesc* launch,
+    AcEvent** out_event
+) {
+    if (out_event) {
+        *out_event = NULL;
+    }
+    if (!batch || !kernel || !launch) {
+        return AC_ERR_NULL_POINTER;
+    }
+    if (batch->magic != AC_MAGIC_BATCH) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (kernel->magic != AC_MAGIC_KERNEL) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (launch->abi_version != AC_ABI_VERSION || launch->struct_size != sizeof(AcLaunchDesc)) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (launch->kernel != kernel) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (kernel->owning_context != batch->owning_context) {
+        return AC_ERR_CONTEXT_MISMATCH;
+    }
+
+    if (launch->buffer_count > 16) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    AcVkBuffer* vk_bufs[16];
+    for (uint32_t i = 0; i < launch->buffer_count; ++i) {
+        if (!launch->buffers[i] || launch->buffers[i]->magic != AC_MAGIC_BUFFER) {
+            return AC_ERR_NULL_POINTER;
+        }
+        if (launch->buffers[i]->owning_context != batch->owning_context) {
+            return AC_ERR_CONTEXT_MISMATCH;
+        }
+        vk_bufs[i] = launch->buffers[i]->vk_buf;
+    }
+
+    AcVkEvent* vk_event = NULL;
+    AcResult res = ac_vk_batch_dispatch(
+        batch->vk_batch,
+        kernel->vk_kernel,
+        vk_bufs,
+        launch->buffer_count,
+        launch->push_constants,
+        launch->push_constants_size,
+        launch->grid_dim.x,
+        launch->grid_dim.y,
+        launch->grid_dim.z,
+        out_event ? &vk_event : NULL
+    );
+    if (res != AC_SUCCESS) {
+        return res;
+    }
+
+    if (out_event && vk_event) {
+        AcEvent* ev = (AcEvent*)calloc(1, sizeof(AcEvent));
+        if (!ev) {
+            return AC_ERR_OUT_OF_HOST_MEMORY;
+        }
+        ev->magic = AC_MAGIC_EVENT;
+        ev->owning_context = batch->owning_context;
+        ev->vk_event = vk_event;
+        batch->owning_context->active_child_events++;
+        *out_event = ev;
+    }
+
+    return AC_SUCCESS;
+}
+
+AcResult ac_runtime_batch_submit(
+    AcCommandBatch* batch,
+    AcEvent** out_completion_event
+) {
+    if (out_completion_event) {
+        *out_completion_event = NULL;
+    }
+    if (!batch || batch->magic != AC_MAGIC_BATCH) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+
+    AcVkEvent* comp_vk_ev = NULL;
+    AcResult res = ac_vk_batch_submit(batch->vk_batch, out_completion_event ? &comp_vk_ev : NULL);
+    if (res != AC_SUCCESS) {
+        return res;
+    }
+
+    if (out_completion_event && comp_vk_ev) {
+        AcEvent* ev = (AcEvent*)calloc(1, sizeof(AcEvent));
+        if (!ev) {
+            return AC_ERR_OUT_OF_HOST_MEMORY;
+        }
+        ev->magic = AC_MAGIC_EVENT;
+        ev->owning_context = batch->owning_context;
+        ev->vk_event = comp_vk_ev;
+        batch->owning_context->active_child_events++;
+        *out_completion_event = ev;
+    }
+
+    return AC_SUCCESS;
+}
+
+AcResult ac_runtime_batch_abort(
+    AcCommandBatch* batch
+) {
+    if (!batch || batch->magic != AC_MAGIC_BATCH) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    return ac_vk_batch_abort(batch->vk_batch);
+}
+
+void ac_runtime_batch_destroy(
+    AcCommandBatch* batch
+) {
+    if (!batch || batch->magic != AC_MAGIC_BATCH) {
+        return;
+    }
+
+    if (batch->vk_batch) {
+        ac_vk_batch_destroy(batch->vk_batch);
+        batch->vk_batch = NULL;
+    }
+
+    if (batch->owning_context) {
+        if (batch->owning_context->active_child_batches > 0) {
+            batch->owning_context->active_child_batches--;
+        }
+        batch->owning_context = NULL;
+    }
+
+    batch->magic = 0;
+    free(batch);
+}
+
+

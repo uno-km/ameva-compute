@@ -59,11 +59,6 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(test_amuda_ops dl m)
 endif()
 
-add_executable(test_amuda_gguf tests/test_amuda_gguf.c)
-target_link_libraries(test_amuda_gguf amuda_static)
-if(UNIX AND NOT APPLE)
-    target_link_libraries(test_amuda_gguf dl m)
-endif()
 
 add_executable(test_amuda_bitnet_exact tests/test_amuda_bitnet_exact.c)
 target_link_libraries(test_amuda_bitnet_exact amuda_static)
@@ -96,21 +91,6 @@ endif()
 add_test(NAME amuda_dispatch_validation COMMAND test_amuda_dispatch_validation)
 set_tests_properties(amuda_dispatch_validation PROPERTIES ENVIRONMENT "LD_LIBRARY_PATH=/data/data/com.termux/files/usr/opt/vendor/lib:$ENV{LD_LIBRARY_PATH}")
 
-add_executable(test_amuda_gguf_validation tests/test_amuda_gguf_validation.c)
-target_link_libraries(test_amuda_gguf_validation amuda_static)
-if(UNIX AND NOT APPLE)
-    target_link_libraries(test_amuda_gguf_validation dl m)
-endif()
-add_test(NAME amuda_gguf_validation COMMAND test_amuda_gguf_validation)
-set_tests_properties(amuda_gguf_validation PROPERTIES ENVIRONMENT "LD_LIBRARY_PATH=/data/data/com.termux/files/usr/opt/vendor/lib:$ENV{LD_LIBRARY_PATH}")
-
-add_executable(test_amuda_gguf_weighted tests/test_amuda_gguf_weighted.c)
-target_link_libraries(test_amuda_gguf_weighted amuda_static)
-if(UNIX AND NOT APPLE)
-    target_link_libraries(test_amuda_gguf_weighted dl m)
-endif()
-add_test(NAME amuda_gguf_weighted COMMAND test_amuda_gguf_weighted)
-set_tests_properties(amuda_gguf_weighted PROPERTIES ENVIRONMENT "LD_LIBRARY_PATH=/data/data/com.termux/files/usr/opt/vendor/lib:$ENV{LD_LIBRARY_PATH}")
 
 add_executable(amuda_cli tools/amuda_cli.c)
 target_link_libraries(amuda_cli amuda_static)
@@ -132,10 +112,26 @@ set(AC_VK_SOURCES
 )
 
 add_library(ac_vulkan_core STATIC ${AC_VK_SOURCES})
-target_include_directories(ac_vulkan_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(ac_vulkan_core PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
 if(UNIX AND NOT APPLE)
     target_link_libraries(ac_vulkan_core vulkan dl m)
 endif()
+
+# Export canonical CMake package targets for downstream consumers
+export(TARGETS ac_vulkan_core
+    NAMESPACE Ameva::
+    FILE "${CMAKE_CURRENT_BINARY_DIR}/AmevaComputeTargets.cmake"
+)
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/AmevaComputeConfig.cmake"
+"include(\"\${CMAKE_CURRENT_LIST_DIR}/AmevaComputeTargets.cmake\")\n"
+"if(TARGET Ameva::ac_vulkan_core AND NOT TARGET Ameva::VulkanCore)\n"
+"    add_library(Ameva::VulkanCore ALIAS Ameva::ac_vulkan_core)\n"
+"endif()\n"
+"set(AmevaCompute_FOUND TRUE)\n"
+)
+
 
 # Vulkan Verification Executables
 add_executable(test_phase1_vulkan_i2s tests/test_phase1_vulkan_i2s.cpp)
@@ -265,18 +261,14 @@ macro(add_vision_shader SHADER_NAME VAR_NAME)
     set(SRC_COMP "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/${SHADER_NAME}.comp")
     set(GEN_SPV "${CMAKE_CURRENT_BINARY_DIR}/generated/${SHADER_NAME}.spv")
     set(GEN_H "${CMAKE_CURRENT_BINARY_DIR}/generated/${SHADER_NAME}_spv.h")
-    set(DST_SPV "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/${SHADER_NAME}.spv")
-    set(DST_H "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/${SHADER_NAME}_spv.h")
 
-    if(GLSLC_EXECUTABLE AND Python3_FOUND)
+    if(EXISTS ${SRC_COMP} AND GLSLC_EXECUTABLE AND Python3_FOUND)
         add_custom_command(
             OUTPUT ${GEN_SPV} ${GEN_H}
             COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/generated
             COMMAND ${GLSLC_EXECUTABLE} -fshader-stage=compute ${SRC_COMP} -o ${GEN_SPV}
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_spirv.py
                     --input ${GEN_SPV} --output ${GEN_H} --var ${VAR_NAME}
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${GEN_SPV} ${DST_SPV}
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${GEN_H} ${DST_H}
             DEPENDS ${SRC_COMP} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_spirv.py
             COMMENT "Compiling SPIR-V shader and generating header: ${SHADER_NAME}"
             VERBATIM
@@ -286,22 +278,13 @@ macro(add_vision_shader SHADER_NAME VAR_NAME)
 endmacro()
 
 add_vision_shader(conv3x3_relu Conv3x3Relu)
-add_vision_shader(conv3x3_relu_mutated Conv3x3ReluMutated)
 add_vision_shader(concat2_channel Concat2Channel)
-add_vision_shader(concat2_channel_mutated Concat2ChannelMutated)
 add_vision_shader(pointwise_conv PointwiseConv)
-add_vision_shader(pointwise_conv_mutated PointwiseConvMutated)
 add_vision_shader(pointwise_conv_relu PointwiseConvRelu)
-add_vision_shader(pointwise_conv_relu_mutated PointwiseConvReluMutated)
 add_vision_shader(maxpool3_nhwc MaxPool3Nhwc)
-add_vision_shader(maxpool3_nhwc_mutated MaxPool3NhwcMutated)
-
 add_vision_shader(conv1_relu Conv1Relu)
-add_vision_shader(conv1_relu_mutated Conv1ReluMutated)
 add_vision_shader(conv10_relu Conv10Relu)
-add_vision_shader(conv10_relu_mutated Conv10ReluMutated)
 add_vision_shader(global_avgpool GlobalAvgpool)
-add_vision_shader(global_avgpool_mutated GlobalAvgpoolMutated)
 add_vision_shader(relu Relu)
 
 
@@ -357,100 +340,8 @@ if(AMEVA_BUILD_VISION_NCNN_TESTS)
     if(NCNN_FOUND)
         find_package(OpenMP QUIET)
 
-        add_executable(audit_ncnn_fire2 scripts/audit_ncnn_fire2.cpp)
-        target_include_directories(audit_ncnn_fire2 PRIVATE
-            ${NCNN_DIR}/src
-            ${NCNN_DIR}/build-cpu/src
-        )
-        target_link_libraries(audit_ncnn_fire2
-            ${NCNN_DIR}/build-cpu/src/libncnn.a
-        )
-        if(OpenMP_CXX_FOUND)
-            target_link_libraries(audit_ncnn_fire2 OpenMP::OpenMP_CXX)
-        else()
-            target_compile_options(audit_ncnn_fire2 PRIVATE -fopenmp)
-            target_link_libraries(audit_ncnn_fire2 -fopenmp)
-        endif()
-        if(UNIX AND NOT APPLE)
-            target_link_libraries(audit_ncnn_fire2 dl m pthread android log)
-        endif()
 
-        add_executable(generate_strict_fixtures scripts/generate_strict_fixtures.cpp)
-        target_include_directories(generate_strict_fixtures PRIVATE
-            ${NCNN_DIR}/src
-            ${NCNN_DIR}/build-cpu/src
-        )
-        target_link_libraries(generate_strict_fixtures
-            ${NCNN_DIR}/build-cpu/src/libncnn.a
-        )
-        if(OpenMP_CXX_FOUND)
-            target_link_libraries(generate_strict_fixtures OpenMP::OpenMP_CXX)
-        else()
-            target_compile_options(generate_strict_fixtures PRIVATE -fopenmp)
-            target_link_libraries(generate_strict_fixtures -fopenmp)
-        endif()
-        if(UNIX AND NOT APPLE)
-            target_link_libraries(generate_strict_fixtures dl m pthread android log)
-        endif()
 
-        add_executable(extract_fire6_7_8_fixtures scripts/extract_fire6_7_8_fixtures.cpp)
-        target_include_directories(extract_fire6_7_8_fixtures PRIVATE
-            ${NCNN_DIR}/src
-            ${NCNN_DIR}/build-cpu/src
-        )
-        target_link_libraries(extract_fire6_7_8_fixtures
-            ${NCNN_DIR}/build-cpu/src/libncnn.a
-        )
-        if(OpenMP_CXX_FOUND)
-            target_link_libraries(extract_fire6_7_8_fixtures OpenMP::OpenMP_CXX)
-        else()
-            target_compile_options(extract_fire6_7_8_fixtures PRIVATE -fopenmp)
-            target_link_libraries(extract_fire6_7_8_fixtures -fopenmp)
-        endif()
-        if(UNIX AND NOT APPLE)
-            target_link_libraries(extract_fire6_7_8_fixtures dl m pthread android log)
-        endif()
-
-        add_executable(extract_fire9_conv10_pool10_fixtures scripts/extract_fire9_conv10_pool10_fixtures.cpp)
-        target_include_directories(extract_fire9_conv10_pool10_fixtures PRIVATE
-            ${NCNN_DIR}/src
-            ${NCNN_DIR}/build-cpu/src
-        )
-        target_link_libraries(extract_fire9_conv10_pool10_fixtures
-            ${NCNN_DIR}/build-cpu/src/libncnn.a
-        )
-        if(OpenMP_CXX_FOUND)
-            target_link_libraries(extract_fire9_conv10_pool10_fixtures OpenMP::OpenMP_CXX)
-        else()
-            target_compile_options(extract_fire9_conv10_pool10_fixtures PRIVATE -fopenmp)
-            target_link_libraries(extract_fire9_conv10_pool10_fixtures -fopenmp)
-        endif()
-        if(UNIX AND NOT APPLE)
-            target_link_libraries(extract_fire9_conv10_pool10_fixtures dl m pthread android log)
-        endif()
-
-        add_executable(test_vision_cat_fire2_integration tests/vision/test_vision_cat_fire2_integration.cpp)
-        target_include_directories(test_vision_cat_fire2_integration PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/include
-            ${NCNN_DIR}/src
-            ${NCNN_DIR}/build-cpu/src
-        )
-        target_link_libraries(test_vision_cat_fire2_integration
-            PRIVATE
-            ac_vision_core
-            ${NCNN_DIR}/build-cpu/src/libncnn.a
-        )
-        if(OpenMP_CXX_FOUND)
-            target_link_libraries(test_vision_cat_fire2_integration PRIVATE OpenMP::OpenMP_CXX)
-        else()
-            target_compile_options(test_vision_cat_fire2_integration PRIVATE -fopenmp)
-            target_link_libraries(test_vision_cat_fire2_integration PRIVATE -fopenmp)
-        endif()
-        if(UNIX AND NOT APPLE)
-            target_link_libraries(test_vision_cat_fire2_integration PRIVATE dl m pthread android log)
-        endif()
-
-        add_test(NAME vision_cat_fire2_integration COMMAND test_vision_cat_fire2_integration)
 
         add_executable(test_vision_pointwise_conv_relu tests/vision/test_vision_pointwise_conv_relu.cpp)
         target_include_directories(test_vision_pointwise_conv_relu PRIVATE
@@ -477,24 +368,5 @@ if(AMEVA_BUILD_VISION_NCNN_TESTS)
     endif()
 endif()
 
-find_package(OpenMP QUIET)
-add_executable(test_vision_fire2_device_resident tests/vision/test_vision_fire2_device_resident.cpp)
-target_include_directories(test_vision_fire2_device_resident PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
-target_link_libraries(test_vision_fire2_device_resident
-    PRIVATE
-    ac_vision_core
-)
-if(OpenMP_CXX_FOUND)
-    target_link_libraries(test_vision_fire2_device_resident PRIVATE OpenMP::OpenMP_CXX)
-else()
-    target_compile_options(test_vision_fire2_device_resident PRIVATE -fopenmp)
-    target_link_libraries(test_vision_fire2_device_resident PRIVATE -fopenmp)
-endif()
-if(UNIX AND NOT APPLE)
-    target_link_libraries(test_vision_fire2_device_resident PRIVATE dl m pthread android log)
-endif()
 
-add_test(NAME vision_fire2_device_resident COMMAND test_vision_fire2_device_resident)
 

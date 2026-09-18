@@ -17,3 +17,18 @@ __pycache__/
 docs/evidence/vision/vision_source_code_snapshot.md
 
 
+
+# External binary fixtures (tracked by vlm_external_manifest.json)
+tests/fixtures/vlm/*.bin
+
+# Generated logs, patches, wavs, text dumps, and audit evidence
+*.patch
+*.log
+*.txt
+*.wav
+cleanup_candidates.json
+evidence/
+test-audit/
+docs/evidence/
+src/tts/shaders/*.spv
+src/tts/shaders/*_spv.h

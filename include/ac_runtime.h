@@ -24,6 +24,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "ac_base.h"
+#include "ac_error.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -376,8 +377,117 @@ AcResult ac_runtime_event_destroy(
     AcEvent* event
 );
 
+/* ========================================================================= */
+/* Command Batching APIs (AMUDA 2.1.0 Backend-Neutral Batch Architecture)    */
+/* ========================================================================= */
+
+typedef struct AcCommandBatch AcCommandBatch;
+
+/**
+ * @brief Begin a new command batch for recording multiple compute dispatches.
+ *
+ * @param context Owning context.
+ * @param out_batch Output pointer to created command batch.
+ * @return AC_SUCCESS on success, error code on failure.
+ */
+AcResult ac_runtime_batch_begin(
+    AcContext* context,
+    AcCommandBatch** out_batch
+);
+
+/**
+ * @brief Record a compute kernel dispatch into an open command batch.
+ * Retains all buffer and kernel references until batch completion.
+ *
+ * @param batch Open command batch in recording state.
+ * @param kernel Kernel to dispatch.
+ * @param launch Launch descriptor.
+ * @param out_event Optional logical event pointer associated with this dispatch.
+ * @return AC_SUCCESS on success, error code on failure.
+ */
+AcResult ac_runtime_batch_dispatch(
+    AcCommandBatch* batch,
+    AcKernel* kernel,
+    const AcLaunchDesc* launch,
+    AcEvent** out_event
+);
+
+/**
+ * @brief Submit all recorded dispatches in the batch to the hardware compute queue.
+ *
+ * @param batch Recorded command batch.
+ * @param out_completion_event Optional output event signaling completion of the entire batch.
+ * @return AC_SUCCESS on success, error code on failure.
+ */
+AcResult ac_runtime_batch_submit(
+    AcCommandBatch* batch,
+    AcEvent** out_completion_event
+);
+
+/**
+ * @brief Abort an open or unsubmitted batch, releasing all retained resources.
+ *
+ * @param batch Batch to abort.
+ * @return AC_SUCCESS on success, error code on failure.
+ */
+AcResult ac_runtime_batch_abort(
+    AcCommandBatch* batch
+);
+
+/**
+ * @brief Destroy a command batch handle.
+ *
+ * @param batch Batch handle to destroy.
+ */
+void ac_runtime_batch_destroy(
+    AcCommandBatch* batch
+);
+
+/* ========================================================================= */
+/* Error State Management APIs (AMUDA Generation-Based Error Tracking)       */
+/* ========================================================================= */
+
+/**
+ * @brief Record a backend error into the active generation error state.
+ * Implements first-error-wins semantics within the current generation.
+ */
+void ac_runtime_set_error(
+    int32_t error_code,
+    AmevaBackendOpKind op,
+    size_t offset,
+    size_t requested_bytes,
+    size_t capacity_bytes
+);
+
+/**
+ * @brief Retrieve the current generation error state snapshot.
+ */
+AmevaBackendErrorState ac_runtime_get_error_state(void);
+
+/**
+ * @brief Consume and return the last error, clearing first_error if generation matches.
+ */
+int32_t ac_runtime_consume_error(void);
+
+/**
+ * @brief Advance the error tracking generation epoch, resetting first_error.
+ */
+uint64_t ac_runtime_advance_generation(void);
+
+/**
+ * @brief Get current generation epoch.
+ */
+uint64_t ac_runtime_get_generation(void);
+
+/**
+ * @brief Explicitly reset error state.
+ */
+void ac_runtime_reset_error_state(void);
+
 #ifdef __cplusplus
 }
 #endif
 
 #endif /* AC_RUNTIME_H */
+
+
