@@ -1,0 +1,48 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+
+// RoPE (Rotary Position Embedding) for Q and K vectors
+// Each workgroup handles one attention head
+// Grid: (n_heads, 1, 1)
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) buffer QKBuffer {
+    float qk_data[];  // FP32 for RoPE precision (Q and K interleaved)
+};
+
+layout(push_constant) uniform PushConstants {
+    uint head_dim;       // 128 typically
+    uint q_offset;       // byte offset to Q in buffer (in floats)
+    uint k_offset;       // byte offset to K in buffer (in floats)
+    uint pos;            // current token position
+    float theta_base;    // 10000.0 default (RoPE base frequency)
+};
+
+void main() {
+    uint head = gl_WorkGroupID.x;
+    uint pair_idx = gl_LocalInvocationID.x;  // processes pair (2*pair_idx, 2*pair_idx+1)
+
+    if (pair_idx >= head_dim / 2) return;
+
+    // Compute rotation angle: theta = pos / theta_base^(2*pair_idx / head_dim)
+    float freq = 1.0 / pow(theta_base, float(2 * pair_idx) / float(head_dim));
+    float angle = float(pos) * freq;
+    float cos_a = cos(angle);
+    float sin_a = sin(angle);
+
+    // Apply rotation to Q
+    uint q_base = q_offset + head * head_dim;
+    float q0 = qk_data[q_base + 2 * pair_idx];
+    float q1 = qk_data[q_base + 2 * pair_idx + 1];
+    qk_data[q_base + 2 * pair_idx]     = q0 * cos_a - q1 * sin_a;
+    qk_data[q_base + 2 * pair_idx + 1] = q0 * sin_a + q1 * cos_a;
+
+    // Apply rotation to K
+    uint k_base = k_offset + head * head_dim;
+    float k0 = qk_data[k_base + 2 * pair_idx];
+    float k1 = qk_data[k_base + 2 * pair_idx + 1];
+    qk_data[k_base + 2 * pair_idx]     = k0 * cos_a - k1 * sin_a;
+    qk_data[k_base + 2 * pair_idx + 1] = k0 * sin_a + k1 * cos_a;
+}

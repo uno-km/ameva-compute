@@ -1,0 +1,49 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+// Element-wise operations for autograd/training support
+// op_code selects the operation via push constant
+
+layout(set = 0, binding = 0) readonly buffer BufferA {
+    float16_t a_data[];
+};
+
+layout(set = 0, binding = 1) readonly buffer BufferB {
+    float16_t b_data[];
+};
+
+layout(set = 0, binding = 2) writeonly buffer BufferC {
+    float16_t c_data[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint count;
+    uint op_code;   // 0=add, 1=sub, 2=mul, 3=div, 4=max, 5=min
+    float scalar;   // for scalar ops (scale, add_scalar)
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= count) return;
+
+    float a = float(a_data[idx]);
+    float b = float(b_data[idx]);
+    float result;
+
+    switch (op_code) {
+        case 0: result = a + b; break;        // add
+        case 1: result = a - b; break;        // sub
+        case 2: result = a * b; break;        // mul (Hadamard)
+        case 3: result = a / (b + 1e-10); break; // div (safe)
+        case 4: result = max(a, b); break;    // max
+        case 5: result = min(a, b); break;    // min
+        case 6: result = a * scalar; break;   // scale (ignore b)
+        case 7: result = a + scalar; break;   // add_scalar (ignore b)
+        default: result = 0.0; break;
+    }
+
+    c_data[idx] = float16_t(result);
+}

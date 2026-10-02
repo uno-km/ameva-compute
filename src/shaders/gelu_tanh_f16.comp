@@ -1,0 +1,31 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuffer {
+    float16_t in_data[];
+};
+
+layout(set = 0, binding = 1) writeonly buffer OutputBuffer {
+    float16_t out_data[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint count;
+};
+
+const float SQRT_2_OVER_PI = 0.7978845608028654;
+const float COEFF = 0.044715;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= count) return;
+
+    // FP16 load → FP32 compute → FP16 store
+    float x = float(in_data[idx]);
+    float inner = SQRT_2_OVER_PI * (x + COEFF * x * x * x);
+    float val = 0.5 * x * (1.0 + tanh(inner));
+    out_data[idx] = float16_t(val);
+}

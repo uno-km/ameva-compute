@@ -228,7 +228,11 @@ AcResult ac_vk_dispatch(
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
-    vkBeginCommandBuffer(command_buffer, &beginInfo);
+    vk_res = vkBeginCommandBuffer(command_buffer, &beginInfo);
+    if (vk_res != VK_SUCCESS) {
+        ret = AC_ERR_OUT_OF_DEVICE_MEMORY;
+        goto cleanup_query;
+    }
 
     if (has_timestamp) {
         vkCmdResetQueryPool(command_buffer, query_pool, 0, 2);
@@ -244,11 +248,27 @@ AcResult ac_vk_dispatch(
 
     vkCmdDispatch(command_buffer, group_x, group_y, group_z);
 
+    /* Device -> host visibility: shader writes must be made available to HOST_READ before the fence
+       signals (Vulkan spec, host access to device memory). Without it, readback after the fence wait
+       is only correct on drivers that happen to flush caches at submit boundaries. */
+    {
+        VkMemoryBarrier hostBarrier = {};
+        hostBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        hostBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        hostBarrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+                             0, 1, &hostBarrier, 0, NULL, 0, NULL);
+    }
+
     if (has_timestamp) {
         vkCmdWriteTimestamp(command_buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, 1);
     }
 
-    vkEndCommandBuffer(command_buffer);
+    vk_res = vkEndCommandBuffer(command_buffer);
+    if (vk_res != VK_SUCCESS) {
+        ret = AC_ERR_OUT_OF_DEVICE_MEMORY;
+        goto cleanup_query;
+    }
 
     /* 8. Pre-allocate AcVkEvent wrapper before queue submit */
     event = (AcVkEvent*)calloc(1, sizeof(AcVkEvent));

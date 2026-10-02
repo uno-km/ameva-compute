@@ -1,0 +1,36 @@
+#version 450
+
+// ============================================================================
+// AMUDA Kernel: SwiGLU (SiLU × Up) In-Place Activation
+// Ported from termux-bitnet for AMUDA ac_runtime API
+// ============================================================================
+// Math: data[i] = SiLU(gate[i]) * up[i]
+//                = (g / (1 + exp(-g))) * u
+// where gate = data[0..n_ffn-1], up = data[n_ffn..2*n_ffn-1]
+// Result written in-place to data[0..n_ffn-1]
+// ============================================================================
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+// In-place buffer: [gate | up] → [result | up]
+layout(std430, set = 0, binding = 0) buffer SwiGLUBuffer {
+    float data[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint n_ffn;        // FFN hidden dimension
+    uint data_offset;  // word offset into data buffer
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= n_ffn) return;
+
+    uint base = data_offset;
+    float g = data[base + idx];
+    float u = data[base + n_ffn + idx];
+
+    // SiLU(g) = g * sigmoid(g) = g / (1 + exp(-g))
+    float silu = g / (1.0 + exp(-g));
+    data[base + idx] = silu * u;
+}

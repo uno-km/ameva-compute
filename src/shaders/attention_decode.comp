@@ -1,0 +1,117 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+
+// Causal Self-Attention Decode Kernel (Single Query Token)
+// Computes: attn_out = softmax(Q @ K^T / sqrt(d)) @ V
+// Grid: (n_heads, 1, 1) — one workgroup per head
+
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) buffer OutputBuffer {
+    float output_data[];  // Q input (read) and attention output (write), in-place
+};
+
+layout(std430, binding = 1) readonly buffer KVCacheBuffer {
+    float kv_cache[];     // K and V cache for all layers and positions
+};
+
+layout(push_constant) uniform PushConstants {
+    uint head_dim;         // 128 typically
+    uint n_kv_heads;       // number of KV heads (for GQA)
+    uint n_q_heads;        // number of Q heads
+    uint kv_head_stride;   // stride between KV heads in cache
+    uint pos;              // current position (number of past tokens)
+    uint layer_k_offset;   // byte offset to K cache for this layer (in floats)
+    uint layer_v_offset;   // byte offset to V cache for this layer (in floats)
+    uint q_offset;         // offset to Q in output_data (in floats)
+};
+
+shared float s_max;
+shared float s_sum;
+shared float s_scores[2048];  // max context length
+shared float s_acc[128];      // head_dim accumulator
+
+void main() {
+    uint head = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    uint seq_len = pos + 1;
+
+    // GQA: map Q head to KV head
+    uint kv_head = head / (n_q_heads / n_kv_heads);
+
+    float scale = 1.0 / sqrt(float(head_dim));
+
+    // Phase 1: Compute Q @ K^T scores for all past positions
+    // Each thread handles multiple positions
+    float local_max = -3.402823e+38;
+
+    for (uint p = tid; p < seq_len; p += 128) {
+        float dot = 0.0;
+        uint q_base = q_offset + head * head_dim;
+        uint k_base = layer_k_offset + kv_head * kv_head_stride + p * head_dim;
+
+        for (uint d = 0; d < head_dim; d++) {
+            dot += output_data[q_base + d] * kv_cache[k_base + d];
+        }
+        float score = dot * scale;
+        s_scores[p] = score;
+        local_max = max(local_max, score);
+    }
+    barrier();
+
+    // Reduce max across threads
+    if (tid == 0) {
+        s_max = -3.402823e+38;
+    }
+    barrier();
+    // Simple atomic-style max via shared memory
+    // (Mobile GPUs typically lack atomicMax for float)
+    // Use sequential reduction for correctness
+    if (tid == 0) {
+        float m = -3.402823e+38;
+        for (uint p = 0; p < seq_len; p++) {
+            m = max(m, s_scores[p]);
+        }
+        s_max = m;
+    }
+    barrier();
+
+    // Phase 2: exp(score - max) and sum
+    float local_sum = 0.0;
+    for (uint p = tid; p < seq_len; p += 128) {
+        float e = exp(s_scores[p] - s_max);
+        s_scores[p] = e;
+        local_sum += e;
+    }
+    barrier();
+
+    if (tid == 0) {
+        float total = 0.0;
+        for (uint p = 0; p < seq_len; p++) {
+            total += s_scores[p];
+        }
+        s_sum = total;
+    }
+    barrier();
+
+    float inv_sum = 1.0 / (s_sum + 1e-10);
+
+    // Normalize scores
+    for (uint p = tid; p < seq_len; p += 128) {
+        s_scores[p] *= inv_sum;
+    }
+    barrier();
+
+    // Phase 3: Weighted sum of V vectors
+    // Each thread handles one or more dimensions of the output
+    for (uint d = tid; d < head_dim; d += 128) {
+        float acc = 0.0;
+        for (uint p = 0; p < seq_len; p++) {
+            uint v_base = layer_v_offset + kv_head * kv_head_stride + p * head_dim;
+            acc += s_scores[p] * kv_cache[v_base + d];
+        }
+        // Write attention output back to Q position (in-place)
+        output_data[q_offset + head * head_dim + d] = acc;
+    }
+}

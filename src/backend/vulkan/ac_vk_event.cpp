@@ -99,10 +99,24 @@ AcResult ac_vk_event_destroy(AcVkEvent* event) {
 
     VkDevice device = event->owning_context->device;
 
-    /* Guarantee completion before releasing resources */
+    /* Guarantee completion before releasing resources. If the fence is still unsignaled the command buffer is
+     * pending: freeing it, the fence, the query pool or the descriptor pool is undefined behaviour
+     * (VUID-vkFreeCommandBuffers-pCommandBuffers-00047, VUID-vkDestroyFence-fence-01120,
+     *  VUID-vkDestroyDescriptorPool-descriptorPool-00303). On timeout nothing is released and the caller gets
+     * AC_ERR_LAUNCH_TIMEOUT; destroy may be called again later. Never mark an unfinished event as signaled.
+     * Return value contract: AC_SUCCESS <=> the event was released (callers drop their pointer only then). */
     if (!event->is_signaled) {
-        vkWaitForFences(device, 1, &event->fence, VK_TRUE, 5000000000ULL);
-        event->is_signaled = true;
+        VkResult wr = vkWaitForFences(device, 1, &event->fence, VK_TRUE, 5000000000ULL);
+        if (wr == VK_SUCCESS) {
+            event->is_signaled = true;
+        } else if (wr == VK_TIMEOUT) {
+            return AC_ERR_LAUNCH_TIMEOUT;
+        } else if (wr != VK_ERROR_DEVICE_LOST) {
+            /* OUT_OF_HOST/DEVICE_MEMORY: completion unknown, so the work may still be pending */
+            return wr == VK_ERROR_OUT_OF_DEVICE_MEMORY ? AC_ERR_OUT_OF_DEVICE_MEMORY : AC_ERR_OUT_OF_HOST_MEMORY;
+        }
+        /* VK_ERROR_DEVICE_LOST: the lost device executes nothing more, destroying is allowed; the loss itself is
+         * reported by ac_vk_event_wait and by every later submission. */
     }
 
     /* Strictly single resource retirement */

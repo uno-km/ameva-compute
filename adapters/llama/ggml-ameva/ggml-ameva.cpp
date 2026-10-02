@@ -12,6 +12,14 @@
 #include <cmath>
 #include <mutex>
 #include <vector>
+#include <unordered_map>
+
+// Weight GPU staging cache: avoids repeated CPU dequant & buffer allocation per token
+static std::mutex g_weight_cache_mutex;
+static std::unordered_map<const void*, AcBuffer*> g_weight_cache;
+
+// Q4_K dequantization — exported by libggml-base.so
+extern "C" void dequantize_row_q4_K(const void * __restrict x, float * __restrict y, int64_t k);
 
 void ameva_increment_gpu_op_count(void);
 void ameva_increment_q5_0_cpu_dequant_count(void);
@@ -173,6 +181,16 @@ static AcKernel* ameva_get_mul_mat_kernel() {
 
 void ggml_backend_ameva_teardown(void) {
     std::lock_guard<std::mutex> lock(s_mutex);
+    {
+        std::lock_guard<std::mutex> clock(g_weight_cache_mutex);
+        for (auto& pair : g_weight_cache) {
+            if (pair.second) {
+                ac_runtime_buffer_destroy(pair.second);
+                ameva_increment_buffer_destroy_count();
+            }
+        }
+        g_weight_cache.clear();
+    }
     if (s_kernel) {
         ac_runtime_kernel_destroy(s_kernel);
         s_kernel = nullptr;
@@ -252,12 +270,12 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
         struct ggml_tensor* src1 = node->src[1];
         if (!src0 || !src1) return GGML_STATUS_FAILED;
 
-        // Supported: (F32 x F32 -> F32) and (Q5_0 x F32 -> F32)
+        // Supported: (F32 x F32 -> F32), (Q5_0 x F32 -> F32), and (Q4_K x F32 -> F32)
         if (node->type != GGML_TYPE_F32 || src1->type != GGML_TYPE_F32) {
             fprintf(stderr, "ggml-ameva: node %d unsupported dtype combination (FAIL-FAST)\n", i);
             return GGML_STATUS_FAILED;
         }
-        if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_Q5_0) {
+        if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_Q5_0 && src0->type != GGML_TYPE_Q4_K) {
             fprintf(stderr, "ggml-ameva: node %d unsupported src0 dtype %d (FAIL-FAST)\n", i, src0->type);
             return GGML_STATUS_FAILED;
         }
@@ -283,7 +301,7 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
         AcBuffer* temp_src0 = nullptr;
         AcBuffer* temp_src1 = nullptr;
         AcBuffer* temp_dst  = nullptr;
-        bool is_q5_0_staging = (src0->type == GGML_TYPE_Q5_0);
+        bool is_quant_staging = (src0->type == GGML_TYPE_Q5_0 || src0->type == GGML_TYPE_Q4_K);
 
         // Cleanup lambda
         auto cleanup_temps = [&]() {
@@ -291,7 +309,7 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
                 ac_runtime_buffer_destroy(temp_src0);
                 temp_src0 = nullptr;
                 ameva_increment_buffer_destroy_count();
-                if (is_q5_0_staging) {
+                if (is_quant_staging) {
                     ameva_increment_q5_0_staging_free_count();
                 }
             }
@@ -308,52 +326,78 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
         };
 
         // 1. Resolve SRC0
-        if (src0->type == GGML_TYPE_Q5_0) {
-            // Failure Injection: MAP_SRC0_FAIL
-            if (fi == AMEVA_FAIL_MAP_SRC0) {
-                fprintf(stderr, "ggml-ameva [FAILURE_INJECTION]: MAP_SRC0_FAIL triggered\n");
-                return GGML_STATUS_FAILED;
+        if (src0->type == GGML_TYPE_Q5_0 || src0->type == GGML_TYPE_Q4_K) {
+            // Check weight cache first: instant GPU lookup, zero CPU dequant
+            AcBuffer* cached_buf = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(g_weight_cache_mutex);
+                auto it = g_weight_cache.find(src0->data);
+                if (it != g_weight_cache.end()) {
+                    cached_buf = it->second;
+                }
             }
 
-            // Q5_0 CPU Dequantization Staging -> F32
-            ameva_increment_q5_0_cpu_dequant_count();
-            size_t f32_bytes = (size_t)K * N * sizeof(float);
-            AcBufferDesc bdesc = { AC_ABI_VERSION, sizeof(AcBufferDesc), (f32_bytes + 63) & ~63, AC_BUFFER_USAGE_STORAGE, 0 };
-            if (ac_runtime_buffer_create(ctx, &bdesc, &temp_src0) != AC_SUCCESS) {
-                return GGML_STATUS_FAILED;
-            }
-            ameva_increment_buffer_create_count();
-            ameva_increment_q5_0_staging_alloc_count();
-            void* map_ptr = nullptr;
-            AcResult mres = ac_runtime_buffer_get_mapped_ptr(temp_src0, &map_ptr);
-            if (mres != AC_SUCCESS || !map_ptr) {
-                cleanup_temps();
-                return GGML_STATUS_FAILED;
-            }
+            if (cached_buf) {
+                // Cache HIT: Re-use pre-dequantized GPU weight buffer
+                buf_src0 = cached_buf;
+                off_src0 = 0;
+            } else {
+                // Cache MISS: Dequantize once on CPU, upload to GPU, then cache forever
+                if (fi == AMEVA_FAIL_MAP_SRC0) {
+                    fprintf(stderr, "ggml-ameva [FAILURE_INJECTION]: MAP_SRC0_FAIL triggered\n");
+                    return GGML_STATUS_FAILED;
+                }
 
-            size_t q5_row_bytes = (size_t)(K / 32) * 22;
-            const char* q5_src_bytes = (const char*)src0->data;
-            float* f32_dst_ptr = (float*)map_ptr;
+                ameva_increment_q5_0_cpu_dequant_count();
+                size_t f32_bytes = (size_t)K * N * sizeof(float);
+                AcBufferDesc bdesc = { AC_ABI_VERSION, sizeof(AcBufferDesc), (f32_bytes + 63) & ~63, AC_BUFFER_USAGE_STORAGE, 0 };
+                AcBuffer* new_buf = nullptr;
+                if (ac_runtime_buffer_create(ctx, &bdesc, &new_buf) != AC_SUCCESS) {
+                    return GGML_STATUS_FAILED;
+                }
+                ameva_increment_buffer_create_count();
+                ameva_increment_q5_0_staging_alloc_count();
+                void* map_ptr = nullptr;
+                AcResult mres = ac_runtime_buffer_get_mapped_ptr(new_buf, &map_ptr);
+                if (mres != AC_SUCCESS || !map_ptr) {
+                    ac_runtime_buffer_destroy(new_buf);
+                    return GGML_STATUS_FAILED;
+                }
 
-            for (uint32_t row = 0; row < N; ++row) {
-                const ameva_block_q5_0* row_blocks = (const ameva_block_q5_0*)(q5_src_bytes + row * q5_row_bytes);
-                ameva_dequantize_row_q5_0(row_blocks, f32_dst_ptr + row * K, K);
-            }
+                size_t quant_row_bytes = ggml_row_size(src0->type, K);
+                const char* quant_src_bytes = (const char*)src0->data;
+                float* f32_dst_ptr = (float*)map_ptr;
 
-            // Failure Injection: FLUSH_SRC0_FAIL
-            if (fi == AMEVA_FAIL_FLUSH_SRC0) {
-                fprintf(stderr, "ggml-ameva [FAILURE_INJECTION]: FLUSH_SRC0_FAIL triggered\n");
-                cleanup_temps();
-                return GGML_STATUS_FAILED;
-            }
+                if (src0->type == GGML_TYPE_Q5_0) {
+                    for (uint32_t row = 0; row < N; ++row) {
+                        const ameva_block_q5_0* row_blocks = (const ameva_block_q5_0*)(quant_src_bytes + row * quant_row_bytes);
+                        ameva_dequantize_row_q5_0(row_blocks, f32_dst_ptr + row * K, K);
+                    }
+                } else {
+                    for (uint32_t row = 0; row < N; ++row) {
+                        dequantize_row_q4_K(quant_src_bytes + row * quant_row_bytes, f32_dst_ptr + row * K, K);
+                    }
+                }
 
-            AcResult fres = ac_runtime_buffer_flush(temp_src0, 0, f32_bytes);
-            if (fres != AC_SUCCESS) {
-                cleanup_temps();
-                return GGML_STATUS_FAILED;
+                if (fi == AMEVA_FAIL_FLUSH_SRC0) {
+                    fprintf(stderr, "ggml-ameva [FAILURE_INJECTION]: FLUSH_SRC0_FAIL triggered\n");
+                    ac_runtime_buffer_destroy(new_buf);
+                    return GGML_STATUS_FAILED;
+                }
+
+                AcResult fres = ac_runtime_buffer_flush(new_buf, 0, f32_bytes);
+                if (fres != AC_SUCCESS) {
+                    ac_runtime_buffer_destroy(new_buf);
+                    return GGML_STATUS_FAILED;
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(g_weight_cache_mutex);
+                    g_weight_cache[src0->data] = new_buf;
+                }
+                buf_src0 = new_buf;
+                off_src0 = 0;
             }
-            buf_src0 = temp_src0;
-            off_src0 = 0;
         } else {
             // F32 SRC0
             if (fi == AMEVA_FAIL_MAP_SRC0) {
@@ -590,8 +634,6 @@ static const struct ggml_backend_i ggml_backend_ameva_i = {
     /* .free                    = */ ggml_backend_ameva_free,
     /* .set_tensor_async        = */ nullptr,
     /* .get_tensor_async        = */ nullptr,
-    /* .set_tensor_2d_async     = */ nullptr,
-    /* .get_tensor_2d_async     = */ nullptr,
     /* .cpy_tensor_async        = */ nullptr,
     /* .synchronize             = */ ggml_backend_ameva_synchronize,
     /* .graph_plan_create       = */ nullptr,
@@ -601,7 +643,6 @@ static const struct ggml_backend_i ggml_backend_ameva_i = {
     /* .graph_compute           = */ ggml_backend_ameva_graph_compute,
     /* .event_record            = */ nullptr,
     /* .event_wait              = */ nullptr,
-    /* .graph_optimize          = */ nullptr,
 };
 
 ggml_backend_t ggml_backend_ameva_init(size_t dev_num) {

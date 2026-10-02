@@ -1,0 +1,72 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuffer {
+    float16_t in_data[];
+};
+
+layout(set = 0, binding = 1) writeonly buffer OutputBuffer {
+    float16_t out_data[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint num_rows;
+    uint row_size;
+};
+
+// Two-pass online softmax (numerical stability via max subtraction)
+// Reduction in FP32 for precision, IO in FP16 for bandwidth
+shared float s_max[256];
+shared float s_sum[256];
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    if (row >= num_rows) return;
+
+    uint tid = gl_LocalInvocationID.x;
+    uint base = row * row_size;
+
+    // Pass 1: Find max
+    float local_max = -3.402823e+38; // -FLT_MAX
+    for (uint j = tid; j < row_size; j += 256) {
+        float val = float(in_data[base + j]);
+        local_max = max(local_max, val);
+    }
+    s_max[tid] = local_max;
+    barrier();
+
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            s_max[tid] = max(s_max[tid], s_max[tid + stride]);
+        }
+        barrier();
+    }
+    float row_max = s_max[0];
+
+    // Pass 2: Compute exp(x - max) and sum
+    float local_sum = 0.0;
+    for (uint j = tid; j < row_size; j += 256) {
+        float val = exp(float(in_data[base + j]) - row_max);
+        local_sum += val;
+    }
+    s_sum[tid] = local_sum;
+    barrier();
+
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            s_sum[tid] += s_sum[tid + stride];
+        }
+        barrier();
+    }
+    float row_sum = s_sum[0];
+    float inv_sum = 1.0 / (row_sum + 1e-10);
+
+    // Pass 3: Normalize
+    for (uint j = tid; j < row_size; j += 256) {
+        float val = exp(float(in_data[base + j]) - row_max) * inv_sum;
+        out_data[base + j] = float16_t(val);
+    }
+}

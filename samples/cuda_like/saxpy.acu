@@ -1,0 +1,13 @@
+// AMUDA CUDA-like sample 2: y = alpha * x + y  (scalar float parameter + __device__ helper)
+__device__ __forceinline__ float axpy_op(float alpha, float x, float y)
+{
+    return fmaf(alpha, x, y);
+}
+
+__global__ void saxpy(float alpha, const float* x, float* y, unsigned int n)
+{
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        y[i] = axpy_op(alpha, x[i], y[i]);
+    }
+}

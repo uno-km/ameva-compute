@@ -31,8 +31,19 @@ static void ggml_backend_ameva_buffer_free_buffer(ggml_backend_buffer_t buffer) 
 }
 
 static void* ggml_backend_ameva_buffer_get_base(ggml_backend_buffer_t buffer) {
-    if (!buffer || !buffer->context) return nullptr;
+    if (!buffer) {
+        fprintf(stderr, "ggml-ameva-buffer: get_base called with NULL buffer!\n");
+        return nullptr;
+    }
+    if (!buffer->context) {
+        fprintf(stderr, "ggml-ameva-buffer: get_base called with NULL buffer->context! (buffer=%p, size=%zu, buft=%p)\n",
+                buffer, buffer->size, buffer->buft);
+        return nullptr;
+    }
     auto* ctx = (ggml_backend_ameva_buffer_context*)buffer->context;
+    if (!ctx->mapped_ptr) {
+        fprintf(stderr, "ggml-ameva-buffer: get_base called but ctx->mapped_ptr is NULL! (size=%zu)\n", ctx->size);
+    }
     return ctx->mapped_ptr;
 }
 
@@ -141,8 +152,6 @@ static const struct ggml_backend_buffer_i ggml_backend_ameva_buffer_i = {
     /* .memset_tensor   = */ ggml_backend_ameva_buffer_memset_tensor,
     /* .set_tensor      = */ ggml_backend_ameva_buffer_set_tensor,
     /* .get_tensor      = */ ggml_backend_ameva_buffer_get_tensor,
-    /* .set_tensor_2d   = */ nullptr,
-    /* .get_tensor_2d   = */ nullptr,
     /* .cpy_tensor      = */ ggml_backend_ameva_buffer_cpy_tensor,
     /* .clear           = */ ggml_backend_ameva_buffer_clear,
     /* .reset           = */ ggml_backend_ameva_buffer_reset,
@@ -154,8 +163,12 @@ static const char* ggml_backend_ameva_buffer_type_get_name(ggml_backend_buffer_t
 }
 
 static ggml_backend_buffer_t ggml_backend_ameva_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buft, size_t size) {
+    fprintf(stderr, "ggml-ameva-buffer: alloc_buffer called (requested_size=%zu)\n", size);
     AcContext* ctx = ameva_get_ac_context();
-    if (!ctx) return nullptr;
+    if (!ctx) {
+        fprintf(stderr, "ggml-ameva-buffer: alloc_buffer failed - ameva_get_ac_context returned NULL!\n");
+        return nullptr;
+    }
 
     size_t aligned_size = (size + 63) & ~63;
     if (aligned_size < 256) aligned_size = 256;
@@ -179,13 +192,17 @@ static ggml_backend_buffer_t ggml_backend_ameva_buffer_type_alloc_buffer(ggml_ba
     void* mapped_ptr = nullptr;
     res = ac_runtime_buffer_get_mapped_ptr(ac_buf, &mapped_ptr);
     if (res != AC_SUCCESS || !mapped_ptr) {
+        fprintf(stderr, "ggml-ameva: failed to get mapped ptr for AcBuffer size %zu (res=%d, ptr=%p)\n", aligned_size, res, mapped_ptr);
         ac_runtime_buffer_destroy(ac_buf);
         ameva_increment_buffer_destroy_count();
         return nullptr;
     }
 
+    fprintf(stderr, "ggml-ameva-buffer: alloc_buffer SUCCESS (aligned_size=%zu, mapped_ptr=%p)\n", aligned_size, mapped_ptr);
     auto* buf_ctx = new ggml_backend_ameva_buffer_context{ ac_buf, mapped_ptr, aligned_size };
-    return ggml_backend_buffer_init(buft, ggml_backend_ameva_buffer_i, buf_ctx, aligned_size);
+    ggml_backend_buffer_t ret_buf = ggml_backend_buffer_init(buft, ggml_backend_ameva_buffer_i, buf_ctx, aligned_size);
+    fprintf(stderr, "ggml-ameva-buffer: alloc_buffer returned buffer=%p, buf->context=%p\n", ret_buf, ret_buf ? ret_buf->context : nullptr);
+    return ret_buf;
 }
 
 static size_t ggml_backend_ameva_buffer_type_get_alignment(ggml_backend_buffer_type_t buft) {

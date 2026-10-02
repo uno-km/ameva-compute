@@ -1,0 +1,31 @@
+#version 450
+
+// ============================================================================
+// AMUDA Kernel: In-Place Residual Stream Accumulation
+// Ported from termux-bitnet for AMUDA ac_runtime API
+// ============================================================================
+// Math: residual[i] += delta[i]
+// ============================================================================
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) buffer ResidualBuffer {
+    float residual[];
+};
+
+layout(std430, set = 0, binding = 1) readonly buffer DeltaBuffer {
+    float delta[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint count;
+    uint residual_offset;  // word offset into residual buffer
+    uint delta_offset;     // word offset into delta buffer
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= count) return;
+
+    residual[residual_offset + idx] += delta[delta_offset + idx];
+}

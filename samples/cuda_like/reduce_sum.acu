@@ -1,0 +1,25 @@
+// AMUDA CUDA-like sample 4: out[0] += sum(in)
+// shared-memory tree reduction + float atomicAdd on global memory.
+// Launch with block = (BLOCK, 1, 1); out[0] must be zeroed first.
+#define BLOCK 256
+
+__global__ void reduce_sum(const float* in, float* out, int n)
+{
+    __shared__ float sdata[BLOCK];
+    int tid = threadIdx.x;
+    int i = blockIdx.x * (blockDim.x * 2) + threadIdx.x;
+
+    float v = 0.0f;
+    if (i < n) v += in[i];
+    if (i + blockDim.x < n) v += in[i + blockDim.x];
+    sdata[tid] = v;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        __syncthreads();
+    }
+    if (tid == 0) atomicAdd(&out[0], sdata[0]);
+}

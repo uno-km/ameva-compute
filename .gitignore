@@ -32,3 +32,14 @@ test-audit/
 docs/evidence/
 src/tts/shaders/*.spv
 src/tts/shaders/*_spv.h
+
+# Additional Ignores
+.pytest_cache/
+.venv/
+venv/
+.vscode/
+.idea/
+*.o
+*.so
+*.dll
+*.exe

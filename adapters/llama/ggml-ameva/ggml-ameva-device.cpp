@@ -237,7 +237,7 @@ static bool ggml_backend_ameva_device_supports_op(ggml_backend_dev_t dev, const 
     if (op->type != GGML_TYPE_F32 || src1->type != GGML_TYPE_F32) {
         return false;
     }
-    if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_Q5_0) {
+    if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_Q5_0 && src0->type != GGML_TYPE_Q4_K) {
         return false;
     }
 
@@ -272,6 +272,13 @@ static bool ggml_backend_ameva_device_supports_op(ggml_backend_dev_t dev, const 
         }
     }
 
+    // 6b. Q4_K alignment: super-block size is 256 elements
+    if (src0->type == GGML_TYPE_Q4_K) {
+        if (K % 256 != 0) {
+            return false;
+        }
+    }
+
     // 7. F32 row bytes check
     if (ggml_row_size(src1->type, K) != (size_t)K * sizeof(float)) {
         return false;
@@ -287,7 +294,14 @@ static bool ggml_backend_ameva_device_supports_op(ggml_backend_dev_t dev, const 
 
 static bool ggml_backend_ameva_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
     (void)dev;
-    return buft == ggml_backend_ameva_buffer_type(0);
+    // Accept AMEVA native buffers
+    if (buft == ggml_backend_ameva_buffer_type(0)) return true;
+    // Accept CPU host buffers — enables hybrid execution where CPU-resident
+    // tensors (quantized weights) are dequantized on CPU, then GPU matmul
+    // operates on the resulting F32 data via temporary staging buffers.
+    const char* name = ggml_backend_buft_name(buft);
+    if (name && (strcmp(name, "CPU") == 0 || strncmp(name, "CPU", 3) == 0)) return true;
+    return false;
 }
 
 static bool ggml_backend_ameva_device_offload_op(ggml_backend_dev_t dev, const struct ggml_tensor* op) {

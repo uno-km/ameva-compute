@@ -1,0 +1,95 @@
+#version 450
+
+// ============================================================================
+// AMUDA Kernel: BitNet 1.58-bit (i2_s) GEMV
+// Ported from termux-bitnet runtime_gpu for AMUDA ac_runtime API
+// ============================================================================
+// Encoding: 2-bit centered ternary {-1, 0, +1} → stored as {0, 1, 2}
+// Packing: 4 weights per byte, 16 weights per uint32, 128 weights per 32 bytes
+// Layout: 32-way 4-stride interleaved (lane processes 4 weights per block)
+// Reduction: 5-stage shared memory parallel tree (32 → 1)
+// ============================================================================
+
+layout(local_size_x = 32, local_size_y = 4, local_size_z = 1) in;
+
+// Binding 0: Packed 2-bit ternary weights
+layout(std430, set = 0, binding = 0) readonly buffer WeightBuffer {
+    uint raw_weights[];
+};
+
+// Binding 1: Input activation vector (FP32)
+layout(std430, set = 0, binding = 1) readonly buffer ActivationBuffer {
+    float activations[];
+};
+
+// Binding 2: Output dot-product vector (FP32)
+layout(std430, set = 0, binding = 2) writeonly buffer OutputBuffer {
+    float output_vec[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint in_dim;              // Input dimension N (must be multiple of 128)
+    uint out_dim;             // Output dimension M (number of output rows)
+    float dequant_scale;      // Dequantization scale factor
+    uint weight_offset_bytes; // Byte offset into weight buffer (multiple of 4)
+    uint output_offset_words; // Word offset into output buffer
+};
+
+shared float row_shared_sum[4][32];
+
+void main() {
+    uint local_lane = gl_LocalInvocationID.x;  // 0..31
+    uint local_row  = gl_LocalInvocationID.y;  // 0..3
+    uint global_row = gl_WorkGroupID.x * 4 + local_row;
+
+    float acc = 0.0;
+
+    if (global_row < out_dim) {
+        uint num_blocks = in_dim / 128;
+        uint base_word = weight_offset_bytes / 4u;
+        uint row_word_base = base_word + global_row * (num_blocks * 8);
+
+        for (uint b = 0; b < num_blocks; ++b) {
+            uint block_col_base = b * 128;
+
+            // Each lane reads 1 byte (4 weights) from a 32-byte block
+            uint word_idx = row_word_base + (b * 8) + (local_lane / 4);
+            uint byte_shift = (local_lane % 4) * 8;
+            uint packed_word = raw_weights[word_idx];
+            uint byte_val = (packed_word >> byte_shift) & 0xFFu;
+
+            // Unpack 4 ternary weights: 2-bit each, centered (val - 1)
+            float w0 = float((byte_val >> 6) & 0x03u) - 1.0;
+            float w1 = float((byte_val >> 4) & 0x03u) - 1.0;
+            float w2 = float((byte_val >> 2) & 0x03u) - 1.0;
+            float w3 = float(byte_val & 0x03u) - 1.0;
+
+            // 32-stride interleaved activation reads
+            float x0 = activations[block_col_base + 0 * 32 + local_lane];
+            float x1 = activations[block_col_base + 1 * 32 + local_lane];
+            float x2 = activations[block_col_base + 2 * 32 + local_lane];
+            float x3 = activations[block_col_base + 3 * 32 + local_lane];
+
+            acc += (w0 * x0) + (w1 * x1) + (w2 * x2) + (w3 * x3);
+        }
+    }
+
+    // 5-stage parallel tree reduction (32 lanes → 1)
+    row_shared_sum[local_row][local_lane] = acc;
+    barrier();
+
+    if (local_lane < 16) { row_shared_sum[local_row][local_lane] += row_shared_sum[local_row][local_lane + 16]; }
+    barrier();
+    if (local_lane < 8)  { row_shared_sum[local_row][local_lane] += row_shared_sum[local_row][local_lane + 8];  }
+    barrier();
+    if (local_lane < 4)  { row_shared_sum[local_row][local_lane] += row_shared_sum[local_row][local_lane + 4];  }
+    barrier();
+    if (local_lane < 2)  { row_shared_sum[local_row][local_lane] += row_shared_sum[local_row][local_lane + 2];  }
+    barrier();
+    if (local_lane < 1)  { row_shared_sum[local_row][local_lane] += row_shared_sum[local_row][local_lane + 1];  }
+
+    // Master lane writes dequantized result
+    if (local_lane == 0 && global_row < out_dim) {
+        output_vec[output_offset_words + global_row] = row_shared_sum[local_row][0] * dequant_scale;
+    }
+}

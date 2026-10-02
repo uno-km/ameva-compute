@@ -1,0 +1,61 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuffer {
+    float16_t in_data[];
+};
+
+layout(set = 0, binding = 1) readonly buffer WeightBuffer {
+    float16_t weight[];
+};
+
+layout(set = 0, binding = 2) writeonly buffer OutputBuffer {
+    float16_t out_data[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint num_tokens;
+    uint hidden_dim;
+    float eps;
+};
+
+// RMSNorm: out = x * weight / sqrt(mean(x^2) + eps)
+// Used in LLaMA, Qwen, BitNet architectures
+shared float s_sq_sum[256];
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    if (row >= num_tokens) return;
+
+    uint tid = gl_LocalInvocationID.x;
+    uint base = row * hidden_dim;
+
+    // Phase 1: Compute sum of squares (FP32 accumulation)
+    float local_sq_sum = 0.0;
+    for (uint j = tid; j < hidden_dim; j += 256) {
+        float val = float(in_data[base + j]);
+        local_sq_sum += val * val;
+    }
+    s_sq_sum[tid] = local_sq_sum;
+    barrier();
+
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            s_sq_sum[tid] += s_sq_sum[tid + stride];
+        }
+        barrier();
+    }
+
+    float rms = sqrt(s_sq_sum[0] / float(hidden_dim) + eps);
+    float inv_rms = 1.0 / rms;
+
+    // Phase 2: Normalize and scale
+    for (uint j = tid; j < hidden_dim; j += 256) {
+        float val = float(in_data[base + j]);
+        float w = float(weight[j]);
+        out_data[base + j] = float16_t(val * inv_rms * w);
+    }
+}

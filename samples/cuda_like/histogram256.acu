@@ -1,0 +1,28 @@
+// AMUDA CUDA-like sample 5: 256-bin histogram
+// unsigned int atomics on __shared__ and global memory, grid-stride loop.
+#define NBINS 256
+
+__global__ void histogram256(const unsigned int* data, unsigned int* hist, int n)
+{
+    __shared__ unsigned int local_hist[NBINS];
+    int tid = threadIdx.x;
+
+    for (int b = tid; b < NBINS; b += blockDim.x) {
+        local_hist[b] = 0u;
+    }
+    __syncthreads();
+
+    int stride = blockDim.x * gridDim.x;
+    for (int i = blockIdx.x * blockDim.x + tid; i < n; i += stride) {
+        unsigned int v = data[i] & 255u;
+        atomicAdd(&local_hist[v], 1u);
+    }
+    __syncthreads();
+
+    for (int b = tid; b < NBINS; b += blockDim.x) {
+        unsigned int c = local_hist[b];
+        if (c != 0u) {
+            atomicAdd(&hist[b], c);
+        }
+    }
+}

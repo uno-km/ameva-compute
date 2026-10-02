@@ -50,11 +50,13 @@ typedef cl_mem (*fn_clCreateBuffer)(cl_context, cl_bitfield, size_t, void*, cl_i
 typedef void* (*fn_clEnqueueMapBuffer)(cl_command_queue, cl_mem, uint32_t, cl_bitfield, size_t, size_t, uint32_t, const cl_event*, cl_event*, cl_int*);
 typedef cl_int (*fn_clEnqueueUnmapMemObject)(cl_command_queue, cl_mem, void*, uint32_t, const cl_event*, cl_event*);
 typedef cl_int (*fn_clReleaseMemObject)(cl_mem);
+typedef cl_int (*fn_clFinish)(cl_command_queue);
 
 static fn_clCreateBuffer          g_clCreateBuffer = NULL;
 static fn_clEnqueueMapBuffer      g_clEnqueueMapBuffer = NULL;
 static fn_clEnqueueUnmapMemObject g_clEnqueueUnmapMemObject = NULL;
 static fn_clReleaseMemObject      g_clReleaseMemObject = NULL;
+static fn_clFinish                g_clFinish = NULL;
 
 static void ensure_mem_symbols(AcContext* ctx) {
     if (!g_clCreateBuffer && ctx->driver_handle) {
@@ -62,6 +64,7 @@ static void ensure_mem_symbols(AcContext* ctx) {
         g_clEnqueueMapBuffer = (fn_clEnqueueMapBuffer)DLSYM(ctx->driver_handle, "clEnqueueMapBuffer");
         g_clEnqueueUnmapMemObject = (fn_clEnqueueUnmapMemObject)DLSYM(ctx->driver_handle, "clEnqueueUnmapMemObject");
         g_clReleaseMemObject = (fn_clReleaseMemObject)DLSYM(ctx->driver_handle, "clReleaseMemObject");
+        g_clFinish = (fn_clFinish)DLSYM(ctx->driver_handle, "clFinish");
     }
 }
 
@@ -107,11 +110,25 @@ AcResult ac_buffer_alloc(AcContext* ctx, size_t size_bytes, AcBuffer** out_buf) 
         aligned_free_compat(host_ptr);
         return AC_ERR_OUT_OF_DEVICE_MEMORY;
     }
+    /* CL_MEM_USE_HOST_PTR: a map at offset 0 returns host_ptr itself (OpenCL 1.2 5.4.2). ac_buffer_free()
+     * releases buf->host_ptr, so a driver that maps elsewhere would make that free() wrong: refuse it here. */
+    if (mapped != host_ptr) {
+        if (g_clFinish && g_clEnqueueUnmapMemObject &&
+            g_clEnqueueUnmapMemObject((cl_command_queue)ctx->command_queue, native_mem, mapped, 0, NULL, NULL) == CL_SUCCESS &&
+            g_clFinish((cl_command_queue)ctx->command_queue) == CL_SUCCESS) {
+            g_clReleaseMemObject(native_mem);
+            aligned_free_compat(host_ptr);
+        } /* else: the driver may still reference host_ptr; leaking it is the only safe option */
+        return AC_ERR_FEATURE_NOT_SUPPORTED;
+    }
 
     AcBuffer* buf = (AcBuffer*)calloc(1, sizeof(AcBuffer));
     if (!buf) {
-        g_clReleaseMemObject(native_mem);
-        aligned_free_compat(host_ptr);
+        g_clEnqueueUnmapMemObject((cl_command_queue)ctx->command_queue, native_mem, mapped, 0, NULL, NULL);
+        if (g_clFinish && g_clFinish((cl_command_queue)ctx->command_queue) == CL_SUCCESS) {
+            g_clReleaseMemObject(native_mem);
+            aligned_free_compat(host_ptr);
+        }
         return AC_ERR_OUT_OF_HOST_MEMORY;
     }
 
@@ -233,22 +250,37 @@ AcResult ac_buffer_sync_to_host(AcContext* ctx, AcBuffer* buf) {
 
 AcResult ac_buffer_free(AcContext* ctx, AcBuffer* buf) {
     if (!buf) return AC_ERR_NULL_POINTER;
+    if (!ctx) return AC_ERR_INVALID_CONTEXT; /* cannot drain the queue: freeing host memory now would be unsafe */
 
     ensure_mem_symbols(ctx);
-    if (ctx && buf->is_mapped && buf->native_mem && g_clEnqueueUnmapMemObject) {
-        g_clEnqueueUnmapMemObject((cl_command_queue)ctx->command_queue,
-                                  (cl_mem)buf->native_mem,
-                                  buf->host_ptr,
-                                  0, NULL, NULL);
-        buf->is_mapped = false;
-    }
-    if (buf->native_mem && g_clReleaseMemObject) {
+    if (buf->native_mem && (!g_clEnqueueUnmapMemObject || !g_clFinish || !g_clReleaseMemObject))
+        return AC_ERR_DRIVER_SYMBOL_MISSING;
+
+    AcResult result = AC_SUCCESS;
+    if (buf->native_mem) {
+        if (buf->is_mapped) {
+            cl_int err = g_clEnqueueUnmapMemObject((cl_command_queue)ctx->command_queue, (cl_mem)buf->native_mem,
+                                                   buf->host_ptr, 0, NULL, NULL);
+            if (err != CL_SUCCESS) result = AC_ERR_BUFFER_NOT_MAPPED;
+            buf->is_mapped = false;
+        }
+        /* CL_MEM_USE_HOST_PTR memory must stay valid until every command that touches it has finished.
+         * Unmap is non-blocking, and Mali (G68, Android 16) executes it as a deferred copy from host_ptr on a
+         * driver utility thread; freeing host_ptr before that copy ran crashed in mcl_plugin_range_copy
+         * (SEGV_MAPERR, fleet run 20261001-223548). Drain the queue before the memory can be released. */
+        cl_int ferr = g_clFinish((cl_command_queue)ctx->command_queue);
         g_clReleaseMemObject((cl_mem)buf->native_mem);
+        buf->native_mem = NULL;
+        if (ferr != CL_SUCCESS) {
+            /* the queue did not drain: the driver may still read host_ptr, so it is deliberately leaked */
+            free(buf);
+            return AC_ERR_RESOURCE_IN_USE;
+        }
     }
     if (!buf->is_user_allocated && buf->host_ptr) {
         aligned_free_compat(buf->host_ptr);
     }
 
     free(buf);
-    return AC_SUCCESS;
+    return result;
 }

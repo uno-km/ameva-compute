@@ -109,6 +109,7 @@ set(AC_VK_SOURCES
     src/backend/vulkan/ac_vk_event.cpp
     src/backend/vulkan/ac_vk_loader.cpp
     src/runtime/ac_runtime.cpp
+    src/runtime/ac_error.cpp
 )
 
 add_library(ac_vulkan_core STATIC ${AC_VK_SOURCES})
@@ -132,6 +133,26 @@ file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/AmevaComputeConfig.cmake"
 "set(AmevaCompute_FOUND TRUE)\n"
 )
 
+
+# =============================================================================
+# AMUDA Runtime Shared Library (Python ctypes / FFI target)
+# =============================================================================
+add_library(ac_runtime SHARED ${AC_VK_SOURCES})
+set_target_properties(ac_runtime PROPERTIES
+    OUTPUT_NAME ac_runtime
+    POSITION_INDEPENDENT_CODE ON
+    VERSION ${PROJECT_VERSION}
+    SOVERSION 2
+)
+target_include_directories(ac_runtime PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+if(MSVC)
+    set_target_properties(ac_runtime PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+elseif(UNIX AND NOT APPLE)
+    target_link_libraries(ac_runtime PRIVATE vulkan dl m pthread)
+endif()
 
 # Vulkan Verification Executables
 add_executable(test_phase1_vulkan_i2s tests/test_phase1_vulkan_i2s.cpp)

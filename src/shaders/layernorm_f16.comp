@@ -1,0 +1,76 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuffer {
+    float16_t in_data[];
+};
+
+layout(set = 0, binding = 1) readonly buffer GammaBuffer {
+    float16_t gamma[];
+};
+
+layout(set = 0, binding = 2) readonly buffer BetaBuffer {
+    float16_t beta[];
+};
+
+layout(set = 0, binding = 3) writeonly buffer OutputBuffer {
+    float16_t out_data[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint num_tokens;
+    uint hidden_dim;
+    float eps;
+};
+
+// Reduction in FP32 for numerical stability
+shared float s_sum[256];
+shared float s_sq_sum[256];
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    if (row >= num_tokens) return;
+
+    uint tid = gl_LocalInvocationID.x;
+    uint base_idx = row * hidden_dim;
+
+    // Phase 1: Local accumulation (FP16 load → FP32 accumulate)
+    float local_sum = 0.0;
+    float local_sq_sum = 0.0;
+
+    for (uint j = tid; j < hidden_dim; j += 256) {
+        float val = float(in_data[base_idx + j]);
+        local_sum += val;
+        local_sq_sum += val * val;
+    }
+
+    s_sum[tid] = local_sum;
+    s_sq_sum[tid] = local_sq_sum;
+    barrier();
+
+    // Reduction in shared memory
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            s_sum[tid] += s_sum[tid + stride];
+            s_sq_sum[tid] += s_sq_sum[tid + stride];
+        }
+        barrier();
+    }
+
+    float mean = s_sum[0] / float(hidden_dim);
+    float variance = (s_sq_sum[0] / float(hidden_dim)) - (mean * mean);
+    if (variance < 0.0) variance = 0.0;
+    float inv_std = inversesqrt(variance + eps);
+
+    // Phase 2: Normalize, scale and shift (FP32 compute → FP16 store)
+    for (uint j = tid; j < hidden_dim; j += 256) {
+        float val = float(in_data[base_idx + j]);
+        float norm_val = (val - mean) * inv_std;
+        float g = float(gamma[j]);
+        float b = float(beta[j]);
+        out_data[base_idx + j] = float16_t(norm_val * g + b);
+    }
+}
