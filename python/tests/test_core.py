@@ -326,8 +326,8 @@ _has_hardware = False
 try:
     _resolve_library_path()
     _has_hardware = True
-except Exception:
-    pass
+except ac.AmevaDriverNotFoundError:
+    pass  # reported through the skip reason below
 
 hardware = pytest.mark.skipif(
     not _has_hardware,

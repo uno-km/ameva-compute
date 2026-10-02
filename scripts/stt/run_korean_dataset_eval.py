@@ -93,14 +93,11 @@ def run_whisper(audio_path, model_path, use_cpu_only=False):
     for line in raw_lines:
         if line.startswith("[") and "-->" in line:
             transcript_lines.append(line)
+        # a malformed counter line raises ValueError with the offending text instead of leaving the default
         if "AMEVA_DISPATCH_SUCCESS_COUNT=" in line:
-            try:
-                gpu_dispatches = int(line.split("=")[1])
-            except: pass
+            gpu_dispatches = int(line.split("=", 1)[1].strip())
         if "CPU_EXECUTED_MUL_MAT_COUNT=" in line:
-            try:
-                cpu_mulmats = int(line.split("=")[1])
-            except: pass
+            cpu_mulmats = int(line.split("=", 1)[1].strip())
 
     full_transcript = " ".join(transcript_lines)
     clean_text = normalize_ko(full_transcript)

@@ -187,7 +187,7 @@ base_cross = base_jfk["cross_dispatches"]
 base_steps = base_jfk["dec_steps"]
 base_dec = base_jfk["dec_dispatches"]
 base_actual = base_jfk["gpu_dispatches"]
-base_mulmat_per_step = (base_dec // base_steps) if base_steps and base_steps > 0 else 49
+base_mulmat_per_step = (base_dec // base_steps) if base_steps and base_dec is not None else "MISSING"  # no fabricated default (was 49)
 base_expected = base_enc + base_cross + base_dec
 base_reconciled = (base_expected == base_actual)
 base_unattributed = base_actual - base_expected
@@ -199,7 +199,7 @@ small_cross = small_jfk["cross_dispatches"]
 small_steps = small_jfk["dec_steps"]
 small_dec = small_jfk["dec_dispatches"]
 small_actual = small_jfk["gpu_dispatches"]
-small_mulmat_per_step = (small_dec // small_steps) if small_steps and small_steps > 0 else 96
+small_mulmat_per_step = (small_dec // small_steps) if small_steps and small_dec is not None else "MISSING"  # no fabricated default (was 96)
 small_expected = small_enc + small_cross + small_dec
 small_reconciled = (small_expected == small_actual)
 small_unattributed = small_actual - small_expected
@@ -209,12 +209,22 @@ small_k02 = run_whisper(FIXTURES[1][2], MODEL_SMALL, "/data/data/com.termux/file
 _, small_k02_cer = compute_cer(FIXTURES[1][1], small_k02["clean_text"])
 
 print("\n================ AUDIT REPORT OUTPUT ================")
-print(f"CPU_BASELINE_AMEVA_BACKEND_REGISTERED=false")
-print(f"CPU_BASELINE_GPU_DISPATCH_COUNT=0")
+# Aggregated from the parsed runs (None = the key was missing from that run's output). These were constants.
+def _agg(side, key):
+    vals = [korean_results[f][side][key] for f in korean_results]
+    return vals, any(v is None for v in vals)
+
+cpu_reg, cpu_reg_missing = _agg("cpu", "backend_registered")
+cpu_disp, cpu_disp_missing = _agg("cpu", "gpu_dispatches")
+gpu_sel, gpu_sel_missing = _agg("gpu", "backend_selected")
+gpu_disp, gpu_disp_missing = _agg("gpu", "gpu_dispatches")
+gpu_cpu_mm, gpu_cpu_mm_missing = _agg("gpu", "cpu_mulmats")
+print(f"CPU_BASELINE_AMEVA_BACKEND_REGISTERED={'MISSING' if cpu_reg_missing else str(any(cpu_reg)).lower()}")
+print(f"CPU_BASELINE_GPU_DISPATCH_COUNT={'MISSING' if cpu_disp_missing else sum(cpu_disp)}")
 print(f"CPU_BASELINE_TELEMETRY_KEYS_PRESENT={str(all_cpu_telemetry_ok).lower()}")
-print(f"GPU_AMEVA_BACKEND_SELECTED=AMEVA0")
-print(f"GPU_DISPATCH_COUNT_GT_ZERO=true")
-print(f"GPU_CPU_MULMAT_COUNT=0")
+print(f"GPU_AMEVA_BACKEND_SELECTED={'MISSING' if gpu_sel_missing else ','.join(sorted(set(gpu_sel)))}")
+print(f"GPU_DISPATCH_COUNT_GT_ZERO={'MISSING' if gpu_disp_missing else str(all(d > 0 for d in gpu_disp)).lower()}")
+print(f"GPU_CPU_MULMAT_COUNT={'MISSING' if gpu_cpu_mm_missing else sum(gpu_cpu_mm)}")
 print(f"GPU_TELEMETRY_KEYS_PRESENT={str(all_gpu_telemetry_ok).lower()}")
 
 for fid in ["K01", "K02", "K03", "K04", "K05"]:
@@ -235,8 +245,10 @@ print(f"KOREAN_SYNTHETIC_FIXTURE_COUNT=5")
 print(f"SMALL_K02_REFERENCE_TEXT={FIXTURES[1][1]}")
 print(f"SMALL_K02_TRANSCRIPT_TEXT={small_k02['clean_text']}")
 print(f"SMALL_K02_CER={small_k02_cer:.4f}")
-print(f"SMALL_KOREAN_GPU_EXECUTION=PASS")
-print(f"SMALL_KOREAN_ACCURACY=FAIL")
+small_k02_gpu_ok = small_k02["rc"] == 0 and (small_k02["gpu_dispatches"] or 0) > 0
+print(f"SMALL_KOREAN_GPU_EXECUTION={'PASS' if small_k02_gpu_ok else 'FAIL'}")
+# no CER threshold is defined for this fixture, so no pass/fail verdict is printed (it was a constant FAIL)
+print(f"SMALL_KOREAN_ACCURACY=NOT_JUDGED_NO_CER_THRESHOLD")
 
 print(f"BASE_ENCODER_DISPATCH_COUNT={base_enc}")
 print(f"BASE_CROSS_ATTENTION_DISPATCH_COUNT={base_cross}")
@@ -248,7 +260,7 @@ print(f"BASE_ACTUAL_PHYSICAL_DISPATCH_COUNT={base_actual}")
 print(f"BASE_RUNTIME_DISPATCH_RECONCILED={str(base_reconciled).lower()}")
 print(f"BASE_UNATTRIBUTED_DISPATCH_COUNT={base_unattributed}")
 
-print(f"SMALL_UNIQUE_MULMAT_NODE_COUNT=96")
+print(f"SMALL_AMEVA_SCHEDULED_NODE_COUNT={small_jfk['sched_nodes'] if small_jfk['sched_nodes'] is not None else 'MISSING'}")
 print(f"SMALL_ENCODER_DISPATCH_COUNT={small_enc}")
 print(f"SMALL_CROSS_ATTENTION_DISPATCH_COUNT={small_cross}")
 print(f"SMALL_DECODER_STEP_COUNT={small_steps}")

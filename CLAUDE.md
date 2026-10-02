@@ -62,6 +62,17 @@ evidence/poc_cuda_like/<timestamp>/
 
 ## 4. 현재 진행 중인 최우선 과제
 
-- **ggml-ameva S25 어설션 에러 해결**:
-  `llama-cli -m ... --device AMEVA0` 실행 시 `ggml_backend_dev_init(device)`에서 `GGML_ASSERT(device)` 실패 에러 수정.
-  `adapters/llama/ggml-ameva/ggml-ameva-device.cpp`의 디바이스 등록 및 vtable 매핑 로직 점검.
+- **[최우선] Q5_0 native GEMV**: 디코드(M=1) MUL_MAT에서 Q5_0 가중치를 AMEVA 버퍼에서 GPU가 직접 읽는다.
+  현재는 CPU가 F32로 역양자화한 사본(가중치 4배 메모리)을 `ggml_mul_mat_vec.comp`가 읽는다. 목표는 트래픽을 약 4.6배 줄이고 F32 캐시를 없애는 것이다.
+  기준선(S25, qwen2.5-0.5b Q4_K_M, 64토큰): AMEVA GEMV 12.3 t/s, CPU 50.3 t/s.
+  `AMEVA_PROFILE=1`로 단계별 시간을 측정하고, GEMM 경로와 출력이 같은지 확인한다.
+- **[다음] 레이어 단위 GPU 그래프 실행**: 현재는 토큰당 약 138개 MUL_MAT을 각각 동기 대기한다.
+  RMS_NORM, ROPE, softmax, SwiGLU 등을 GPU에 올려 제출 및 대기 횟수를 줄인다(`src/shaders/` 활용).
+
+### 종결 기록: ggml-ameva S25 `GGML_ASSERT(device)` (2026-10-02 종결)
+- 원인: `libggml-ameva.so`가 실행 측 llama.cpp b8471(ggml 0.9.8)보다 새 ggml 헤더로 빌드되었다.
+  ggml-backend-impl.h의 `ggml_backend_i`/`ggml_backend_buffer_i`에 슬롯이 추가되었는데도 `GGML_BACKEND_API_VERSION`은 2 그대로여서 로더가 거르지 못한다.
+  그 결과 `backend->device`가 `iface.event_wait` 슬롯(NULL)에서 읽혔다.
+- 수정: 이름 지정(designated) vtable 초기화, 로드 시점 ABI 탐침(`ameva_abi_check`, 불일치 시 명시적 거부), 장치/버퍼 타입 연결,
+  `scripts/termux/build_ggml_ameva.sh`(정확한 ggml 지정 및 등록 검증).
+- 검증: A35에서 S25 조건 재현(E1 assert), E2–E4(정상 및 양방향 거부), S25 설치본 번인 10/10, 출력 일치.

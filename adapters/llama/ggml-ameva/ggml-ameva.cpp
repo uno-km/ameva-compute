@@ -4,6 +4,7 @@
 #include "ac_runtime.h"
 #include "ac_dispatch.h"
 #include "ggml_mul_mat_spv.h"
+#include "ggml_mul_mat_vec_spv.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -13,6 +14,8 @@
 #include <mutex>
 #include <vector>
 #include <unordered_map>
+#include <atomic>
+#include <ctime>
 
 // Weight GPU staging cache: avoids repeated CPU dequant & buffer allocation per token
 static std::mutex g_weight_cache_mutex;
@@ -107,10 +110,47 @@ static inline void ameva_dequantize_row_q5_0(const ameva_block_q5_0* vx, float* 
 }
 
 // =============================================================================
+// Per-stage timing of graph_compute (AMEVA_PROFILE=1 prints the totals when the plugin unloads)
+// =============================================================================
+enum AmevaStage { ST_SRC0, ST_SRC1, ST_DST, ST_FLUSH, ST_DISPATCH, ST_WAIT, ST_READBACK, ST_CLEANUP, ST_COUNT };
+static const char* const k_stage_names[ST_COUNT] = {
+    "src0 (weight cache/dequant)", "src1 (activation staging)", "dst (output buffer)", "resident flush",
+    "dispatch (record+submit)", "wait (fence)", "readback/invalidate", "cleanup (temp destroy)"};
+static std::atomic<uint64_t> g_stage_ns[ST_COUNT];
+static std::atomic<uint64_t> g_prof_ops{0}, g_prof_graphs{0}, g_prof_temp_src1{0}, g_prof_temp_dst{0},
+    g_prof_src0_miss{0}, g_prof_flush_bytes{0};
+
+static inline uint64_t ameva_now_ns() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static void ameva_profile_report(void) {
+    const char* e = getenv("AMEVA_PROFILE");
+    if (!e || strcmp(e, "1") != 0) return;
+    const uint64_t ops = g_prof_ops.load();
+    uint64_t total = 0;
+    for (int i = 0; i < ST_COUNT; ++i) total += g_stage_ns[i].load();
+    fprintf(stderr, "AMEVA_PROFILE graphs=%llu ops=%llu total_ms=%.1f per_op_us=%.1f temp_src1=%llu temp_dst=%llu "
+                    "src0_cache_miss=%llu resident_flush_MiB=%.1f\n",
+            (unsigned long long)g_prof_graphs.load(), (unsigned long long)ops, total / 1e6,
+            ops ? total / 1e3 / ops : 0.0, (unsigned long long)g_prof_temp_src1.load(),
+            (unsigned long long)g_prof_temp_dst.load(), (unsigned long long)g_prof_src0_miss.load(),
+            g_prof_flush_bytes.load() / 1048576.0);
+    for (int i = 0; i < ST_COUNT; ++i) {
+        const uint64_t ns = g_stage_ns[i].load();
+        fprintf(stderr, "AMEVA_PROFILE stage=\"%s\" total_ms=%.1f share=%.1f%% per_op_us=%.1f\n", k_stage_names[i],
+                ns / 1e6, total ? 100.0 * ns / total : 0.0, ops ? ns / 1e3 / ops : 0.0);
+    }
+}
+
+// =============================================================================
 // Internal AcContext & AcKernel Lifecycle Singletons
 // =============================================================================
 static AcContext* s_ctx = nullptr;
-static AcKernel*  s_kernel = nullptr;
+static AcKernel*  s_kernel = nullptr;     // ggml_mul_mat.comp: tiled GEMM, any M
+static AcKernel*  s_kernel_vec = nullptr; // ggml_mul_mat_vec.comp: M == 1 (decode)
 static std::mutex s_mutex;
 
 AcContext* ameva_get_ac_context() {
@@ -127,9 +167,11 @@ AcContext* ameva_get_ac_context() {
     return s_ctx;
 }
 
-static AcKernel* ameva_get_mul_mat_kernel() {
+// Both kernels share bindings (src0, src1, dst) and push constants (M, K, N, offset_src0/src1/dst).
+static AcKernel* ameva_create_mul_mat_kernel(AcKernel** slot, const char* name, const uint32_t* spv, size_t spv_bytes,
+                                             const char* spv_sha256, uint32_t lx, uint32_t ly) {
     std::lock_guard<std::mutex> lock(s_mutex);
-    if (!s_kernel) {
+    if (!*slot) {
         if (!s_ctx) {
             AcContextDesc cdesc = { AC_ABI_VERSION, sizeof(AcContextDesc), AC_BACKEND_VULKAN, 0 };
             AcResult res = ac_runtime_context_create(&cdesc, &s_ctx);
@@ -147,14 +189,14 @@ static AcKernel* ameva_get_mul_mat_kernel() {
         };
 
         AcKernelRuntimeMetadata meta = {
-            "ggml_mul_mat",
+            name,
             "main",
             3,
             kBindings,
             24, // 6 x uint32: M, K, N, offset_src0, offset_src1, offset_dst
-            { 16, 16, 1 },
+            { lx, ly, 1 },
             0,
-            kGgmlMulMatSpvSha256,
+            spv_sha256,
             0,
             nullptr
         };
@@ -162,21 +204,43 @@ static AcKernel* ameva_get_mul_mat_kernel() {
         AcKernelDesc kdesc = {
             AC_ABI_VERSION,
             sizeof(AcKernelDesc),
-            kGgmlMulMatSpv,
-            kGgmlMulMatSpvByteSize,
+            spv,
+            spv_bytes,
             &meta,
             0,
             nullptr
         };
 
-        AcResult res = ac_runtime_kernel_create(s_ctx, &kdesc, &s_kernel);
+        AcResult res = ac_runtime_kernel_create(s_ctx, &kdesc, slot);
         if (res != AC_SUCCESS) {
-            fprintf(stderr, "ggml-ameva: failed to create mul_mat AcKernel (code %d)\n", res);
+            fprintf(stderr, "ggml-ameva: failed to create %s AcKernel (code %d)\n", name, res);
             return nullptr;
         }
         ameva_increment_kernel_create_count();
     }
-    return s_kernel;
+    return *slot;
+}
+
+static AcKernel* ameva_get_mul_mat_kernel() {
+    return ameva_create_mul_mat_kernel(&s_kernel, "ggml_mul_mat", kGgmlMulMatSpv, kGgmlMulMatSpvByteSize,
+                                       kGgmlMulMatSpvSha256, 16, 16);
+}
+
+static AcKernel* ameva_get_mul_mat_vec_kernel() {
+    return ameva_create_mul_mat_kernel(&s_kernel_vec, "ggml_mul_mat_vec", kGgmlMulMatVecSpv, kGgmlMulMatVecSpvByteSize,
+                                       kGgmlMulMatVecSpvSha256, 64, 1);
+}
+
+// ggml_mul_mat_vec.comp computes 4 rows per workgroup; Vulkan guarantees 65535 workgroups per dimension.
+static constexpr uint32_t kMulMatVecRows = 4;
+
+// AMEVA_MUL_MAT_VEC=0 forces the tiled GEMM for M == 1 as well (A/B measurement); it is never chosen implicitly.
+static bool ameva_mul_mat_vec_enabled() {
+    static const bool enabled = [] {
+        const char* e = getenv("AMEVA_MUL_MAT_VEC");
+        return !(e && strcmp(e, "0") == 0);
+    }();
+    return enabled;
 }
 
 void ggml_backend_ameva_teardown(void) {
@@ -194,6 +258,11 @@ void ggml_backend_ameva_teardown(void) {
     if (s_kernel) {
         ac_runtime_kernel_destroy(s_kernel);
         s_kernel = nullptr;
+        ameva_increment_kernel_destroy_count();
+    }
+    if (s_kernel_vec) {
+        ac_runtime_kernel_destroy(s_kernel_vec);
+        s_kernel_vec = nullptr;
         ameva_increment_kernel_destroy_count();
     }
     if (s_ctx) {
@@ -235,10 +304,6 @@ static void ggml_backend_ameva_free(ggml_backend_t backend) {
     delete backend;
 }
 
-static void ggml_backend_ameva_synchronize(ggml_backend_t backend) {
-    (void)backend;
-}
-
 struct ggml_backend_ameva_buffer_context {
     AcBuffer* ac_buf;
     void* mapped_ptr;
@@ -256,10 +321,12 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
     }
 
     AmevaFailureInjectionPoint fi = ggml_backend_ameva_get_failure_injection();
+    g_prof_graphs.fetch_add(1);
 
     for (int i = 0; i < cgraph->n_nodes; i++) {
         struct ggml_tensor* node = cgraph->nodes[i];
         if (!node) continue;
+        const uint64_t t_node0 = ameva_now_ns();
 
         if (node->op != GGML_OP_MUL_MAT) {
             fprintf(stderr, "ggml-ameva: node %d is unsupported op %d (FAIL-FAST)\n", i, node->op);
@@ -349,6 +416,7 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
                 }
 
                 ameva_increment_q5_0_cpu_dequant_count();
+                g_prof_src0_miss.fetch_add(1);
                 size_t f32_bytes = (size_t)K * N * sizeof(float);
                 AcBufferDesc bdesc = { AC_ABI_VERSION, sizeof(AcBufferDesc), (f32_bytes + 63) & ~63, AC_BUFFER_USAGE_STORAGE, 0 };
                 AcBuffer* new_buf = nullptr;
@@ -437,6 +505,7 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
             }
         }
 
+        const uint64_t t_src0 = ameva_now_ns();
         // 2. Resolve SRC1 (F32 Activation)
         if (fi == AMEVA_FAIL_MAP_SRC1) {
             fprintf(stderr, "ggml-ameva [FAILURE_INJECTION]: MAP_SRC1_FAIL triggered\n");
@@ -479,6 +548,7 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
             off_src1 = 0;
         }
 
+        const uint64_t t_src1 = ameva_now_ns();
         // 3. Resolve DST
         if (fi == AMEVA_FAIL_MAP_DST) {
             fprintf(stderr, "ggml-ameva [FAILURE_INJECTION]: MAP_DST_FAIL triggered\n");
@@ -511,6 +581,7 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
             off_dst = 0;
         }
 
+        const uint64_t t_dst = ameva_now_ns();
         // Failure Injection: OFFSET_OVERFLOW
         if (fi == AMEVA_FAIL_OFFSET_OVERFLOW) {
             fprintf(stderr, "ggml-ameva [FAILURE_INJECTION]: OFFSET_OVERFLOW triggered\n");
@@ -542,17 +613,30 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
             }
         }
 
+        const uint64_t t_flush = ameva_now_ns();
+        if (!temp_src0) g_prof_flush_bytes.fetch_add((uint64_t)K * N * sizeof(float));
+        if (!temp_src1) g_prof_flush_bytes.fetch_add((uint64_t)M * K * sizeof(float));
         // Push constants: M, K, N, off_src0, off_src1, off_dst
         uint32_t push_constants[6] = { M, K, N, off_src0, off_src1, off_dst };
         AcBuffer* bound_bufs[3] = { buf_src0, buf_src1, buf_dst };
 
-        uint32_t grid_x = (N + 15) / 16;
-        uint32_t grid_y = (M + 15) / 16;
+        // decode (M == 1) runs the matrix-vector kernel; it is created on first use and a failure is fatal
+        const bool use_vec = M == 1 && (N + kMulMatVecRows - 1) / kMulMatVecRows <= 65535u && ameva_mul_mat_vec_enabled();
+        AcKernel* op_kernel = kernel;
+        if (use_vec) {
+            op_kernel = ameva_get_mul_mat_vec_kernel();
+            if (!op_kernel) {
+                cleanup_temps();
+                return GGML_STATUS_FAILED;
+            }
+        }
+        uint32_t grid_x = use_vec ? (N + kMulMatVecRows - 1) / kMulMatVecRows : (N + 15) / 16;
+        uint32_t grid_y = use_vec ? 1u : (M + 15) / 16;
 
         AcLaunchDesc ldesc = {
             AC_ABI_VERSION,
             sizeof(AcLaunchDesc),
-            kernel,
+            op_kernel,
             bound_bufs,
             3,
             push_constants,
@@ -577,12 +661,14 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
         if (ev) {
             ameva_increment_event_create_count();
         }
+        const uint64_t t_disp = ameva_now_ns();
 
         // Failure Injection: WAIT_TIMEOUT
         uint64_t wait_timeout_ns = (fi == AMEVA_FAIL_WAIT_TIMEOUT) ? 1ULL : 5000000000ULL;
         AcResult wres = ac_runtime_event_wait(ev, wait_timeout_ns);
         ac_runtime_event_destroy(ev);
         ameva_increment_event_destroy_count();
+        const uint64_t t_wait = ameva_now_ns();
 
         if (wres != AC_SUCCESS) {
             fprintf(stderr, "ggml-ameva: event wait failed with code %d (FAIL-FAST)\n", wres);
@@ -619,7 +705,20 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
             }
         }
 
+        const uint64_t t_rb = ameva_now_ns();
+        if (temp_src1) g_prof_temp_src1.fetch_add(1);
+        if (temp_dst) g_prof_temp_dst.fetch_add(1);
         cleanup_temps();
+        const uint64_t t_end = ameva_now_ns();
+        g_stage_ns[ST_SRC0].fetch_add(t_src0 - t_node0);
+        g_stage_ns[ST_SRC1].fetch_add(t_src1 - t_src0);
+        g_stage_ns[ST_DST].fetch_add(t_dst - t_src1);
+        g_stage_ns[ST_FLUSH].fetch_add(t_flush - t_dst);
+        g_stage_ns[ST_DISPATCH].fetch_add(t_disp - t_flush);
+        g_stage_ns[ST_WAIT].fetch_add(t_wait - t_disp);
+        g_stage_ns[ST_READBACK].fetch_add(t_rb - t_wait);
+        g_stage_ns[ST_CLEANUP].fetch_add(t_end - t_rb);
+        g_prof_ops.fetch_add(1);
 
         // Increment verified execution counters ONLY on verified completion
         ameva_increment_f32_gpu_sgemm_dispatch_count();
@@ -629,37 +728,59 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
     return GGML_STATUS_SUCCESS;
 }
 
+// Designated initializers: see ggml-ameva-device.cpp. synchronize stays NULL (ggml treats it as optional)
+// because graph_compute returns only after every dispatch it issued has completed; there is never pending work.
 static const struct ggml_backend_i ggml_backend_ameva_i = {
-    /* .get_name                = */ ggml_backend_ameva_name,
-    /* .free                    = */ ggml_backend_ameva_free,
-    /* .set_tensor_async        = */ nullptr,
-    /* .get_tensor_async        = */ nullptr,
-    /* .cpy_tensor_async        = */ nullptr,
-    /* .synchronize             = */ ggml_backend_ameva_synchronize,
-    /* .graph_plan_create       = */ nullptr,
-    /* .graph_plan_free         = */ nullptr,
-    /* .graph_plan_update       = */ nullptr,
-    /* .graph_plan_compute      = */ nullptr,
-    /* .graph_compute           = */ ggml_backend_ameva_graph_compute,
-    /* .event_record            = */ nullptr,
-    /* .event_wait              = */ nullptr,
+    .get_name      = ggml_backend_ameva_name,
+    .free          = ggml_backend_ameva_free,
+    .synchronize   = nullptr,
+    .graph_compute = ggml_backend_ameva_graph_compute,
 };
 
-ggml_backend_t ggml_backend_ameva_init(size_t dev_num) {
-    (void)dev_num;
-    auto* ctx = new ggml_backend_ameva_context{ 0 };
+const char* ameva_abi_check(void);             // ggml-ameva-device.cpp
+extern struct ggml_backend_device g_ameva_device; // ggml-ameva-device.cpp
+
+// The backend carries the device it was created for. It used to look the device up by name in the global
+// registry, which yields NULL whenever the backend is created before (or without) registration.
+ggml_backend_t ameva_backend_create(ggml_backend_dev_t dev) {
+    if (const char* why = ameva_abi_check()) {
+        fprintf(stderr, "ggml-ameva: cannot create the AMEVA backend: %s\n", why);
+        return nullptr;
+    }
+    if (dev != &g_ameva_device) {
+        fprintf(stderr, "ggml-ameva: cannot create the AMEVA backend for foreign device %p\n", (void*)dev);
+        return nullptr;
+    }
+    // the plugin destructor does not run when the loader never dlcloses the backend (llama.cpp b8471 on
+    // Android), so the profile report is tied to process exit instead
+    static std::once_flag s_report_once;
+    std::call_once(s_report_once, [] { std::atexit(ameva_profile_report); });
     auto* backend = new ggml_backend{
-        /* .guid    = */ ggml_backend_ameva_guid(),
-        /* .iface   = */ ggml_backend_ameva_i,
-        /* .device  = */ ggml_backend_dev_by_name(GGML_AMEVA_DEVICE_NAME),
-        /* .context = */ ctx,
+        .guid    = ggml_backend_ameva_guid(),
+        .iface   = ggml_backend_ameva_i,
+        .device  = dev,
+        .context = new ggml_backend_ameva_context{ 0 },
     };
     return backend;
+}
+
+ggml_backend_t ggml_backend_ameva_init(size_t dev_num) {
+    if (dev_num != 0) {
+        fprintf(stderr, "ggml-ameva: device %zu does not exist (AMEVA exposes one device, AMEVA0)\n", dev_num);
+        return nullptr;
+    }
+    return ameva_backend_create(&g_ameva_device);
 }
 
 // Dynamic Loader Entrypoints
 extern "C" {
 GGML_BACKEND_API ggml_backend_reg_t ggml_backend_init(void) {
+    // NULL makes the loader print "failed to initialize backend from <path>"; a later --device AMEVA0 then
+    // fails as an unknown device instead of crashing inside the scheduler.
+    if (const char* why = ameva_abi_check()) {
+        fprintf(stderr, "ggml-ameva: refusing to load: %s\n", why);
+        return nullptr;
+    }
     return ggml_backend_ameva_reg();
 }
 

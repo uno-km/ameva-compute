@@ -25,6 +25,7 @@ tests/fixtures/vlm/*.bin
 *.patch
 *.log
 *.txt
+!**/CMakeLists.txt
 *.wav
 cleanup_candidates.json
 evidence/

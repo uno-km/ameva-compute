@@ -1,0 +1,73 @@
+#version 450
+// M == 1 matrix-vector product for decode: dst[n] = dot(src0[n][0..K), src1[0][0..K)), src0 row-major N x K.
+// Same bindings and push constants as ggml_mul_mat.comp, so the host only swaps the pipeline and the grid.
+//
+// ggml_mul_mat.comp is a 16x16 tiled GEMM: for M == 1, 15 of its 16 tile rows are padding, and its src0 tile
+// loads put consecutive invocations K floats apart (one row each), so no load is coalesced. Here each
+// workgroup owns ROWS output rows; its 64 invocations walk K together, so every row is read as consecutive
+// floats across the workgroup, and src1[k] is loaded once for all ROWS rows.
+
+#define WG 64
+#define ROWS 4
+
+layout(local_size_x = WG, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer BufferSrc0 {
+    float src0[];
+};
+
+layout(std430, binding = 1) readonly buffer BufferSrc1 {
+    float src1[];
+};
+
+layout(std430, binding = 2) writeonly buffer BufferDst {
+    float dst[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint M;
+    uint K;
+    uint N;
+    uint offset_src0;
+    uint offset_src1;
+    uint offset_dst;
+} dims;
+
+shared float red[ROWS][WG];
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint n0 = gl_WorkGroupID.x * ROWS;
+
+    float acc[ROWS];
+    uint base[ROWS];
+    for (uint r = 0; r < ROWS; ++r) {
+        acc[r] = 0.0;
+        // rows past N read row n0 again (always in range); their results are never stored
+        base[r] = dims.offset_src0 + min(n0 + r, dims.N - 1) * dims.K;
+    }
+
+    for (uint k = tid; k < dims.K; k += WG) {
+        const float x = src1[dims.offset_src1 + k];
+        for (uint r = 0; r < ROWS; ++r) {
+            acc[r] += src0[base[r] + k] * x;
+        }
+    }
+
+    for (uint r = 0; r < ROWS; ++r) {
+        red[r][tid] = acc[r];
+    }
+    barrier();
+    for (uint s = WG / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            for (uint r = 0; r < ROWS; ++r) {
+                red[r][tid] += red[r][tid + s];
+            }
+        }
+        barrier();
+    }
+
+    if (tid < ROWS && n0 + tid < dims.N) {
+        dst[dims.offset_dst + n0 + tid] = red[tid][0];
+    }
+}

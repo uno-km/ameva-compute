@@ -3968,11 +3968,11 @@ void whisper_free(struct whisper_context * ctx) {
             ggml_backend_buffer_free(buf);
         }
 
+        // whisper_free_state frees this context's AMEVA backends, and each releases its own GPU state.
+        // ameva_backend_teardown_hardware() is process-wide and would also tear down other live contexts.
         whisper_free_state(ctx->state);
 
         delete ctx;
-
-        ameva_backend_teardown_hardware();
     }
 }
 
@@ -4418,7 +4418,6 @@ void whisper_print_timings(struct whisper_context * ctx) {
         WHISPER_LOG_INFO("%s: WHISPER_SCHEDULER_AMEVA_ENC_NODE_COUNT = %d\n", __func__, ctx->state->sched_ameva_enc_node_count);
         WHISPER_LOG_INFO("%s: WHISPER_SCHEDULER_AMEVA_CROSS_NODE_COUNT = %d\n", __func__, ctx->state->sched_ameva_cross_node_count);
         WHISPER_LOG_INFO("%s: WHISPER_SCHEDULER_CPU_NODE_COUNT = %d\n", __func__, ctx->state->sched_cpu_node_count);
-                WHISPER_LOG_INFO("%s: GGML_OP_NONE_MUTATION_COUNT = 0\n", __func__);
         Dl_info dli_w;
         Dl_info dli_g;
         memset(&dli_w, 0, sizeof(dli_w));
@@ -4440,7 +4439,7 @@ void whisper_print_timings(struct whisper_context * ctx) {
             real_silent_fallback += (counters.ameva_dispatch_attempt_count - (counters.ameva_dispatch_success_count + counters.ameva_dispatch_failure_count));
         }
 
-        bool ameva_registered = (getenv("AMEVA_DISABLE_BACKEND") == nullptr);
+        bool ameva_registered = ggml_backend_dev_by_name("AMEVA0") != nullptr;
         bool ameva_selected = ameva_registered && (counters.ameva_dispatch_success_count > 0);
         printf("AMEVA_BACKEND_REGISTERED=%s\n", ameva_registered ? "true" : "false");
         printf("AMEVA_BACKEND_SELECTED=%s\n", ameva_selected ? "AMEVA0" : "false");
@@ -4464,9 +4463,11 @@ void whisper_print_timings(struct whisper_context * ctx) {
         printf("CACHE_MISS_UPLOAD_RECONCILED=%s\n", miss_upload_reconciled ? "true" : "false");
         printf("WEIGHT_CACHE_MISS_UPLOAD_RECONCILED=%s\n", miss_upload_reconciled ? "true" : "false");
         printf("WEIGHT_CACHE_ENTRY_CREATE_COUNT=%llu\n", (unsigned long long)counters.weight_cache_entry_create_count);
-        printf("WEIGHT_CACHE_ENTRY_DESTROY_COUNT=%llu\n", (unsigned long long)counters.weight_cache_entry_create_count);
-        printf("CACHE_ENTRY_LIFECYCLE_BALANCED=true\n");
-        printf("WEIGHT_CACHE_ENTRY_LIFECYCLE_BALANCED=true\n");
+        printf("WEIGHT_CACHE_ENTRY_DESTROY_COUNT=%llu\n", (unsigned long long)counters.weight_cache_entry_destroy_count);
+        // entries live until their backend is freed: at this point (before whisper_free) balance means "no entry created"
+        const bool cache_entries_balanced = counters.weight_cache_entry_create_count == counters.weight_cache_entry_destroy_count;
+        printf("CACHE_ENTRY_LIFECYCLE_BALANCED=%s\n", cache_entries_balanced ? "true" : "false");
+        printf("WEIGHT_CACHE_ENTRY_LIFECYCLE_BALANCED=%s\n", cache_entries_balanced ? "true" : "false");
         printf("WEIGHT_CACHE_HIT_COUNT_PLUS_MISS_COUNT=%llu\n", (unsigned long long)(counters.weight_cache_hit_count + counters.weight_cache_miss_count));
         printf("WEIGHT_CACHE_HIT_COUNT=%llu\n", (unsigned long long)counters.weight_cache_hit_count);
         printf("WEIGHT_CACHE_MISS_COUNT=%llu\n", (unsigned long long)counters.weight_cache_miss_count);
@@ -4495,7 +4496,9 @@ void whisper_print_timings(struct whisper_context * ctx) {
             }
             printf("]\n");
             printf("%s_DECODER_DISPATCH_SUM=%llu\n", hist_prefix, (unsigned long long)total_step_disp);
-            printf("%s_UNATTRIBUTED_DECODER_DISPATCH_COUNT=0\n", hist_prefix);
+            const long long unattributed = (long long)(counters.run_1_decoder_dispatch_count + counters.run_2_decoder_dispatch_count) -
+                                           (long long)total_step_disp;
+            printf("%s_UNATTRIBUTED_DECODER_DISPATCH_COUNT=%lld\n", hist_prefix, unattributed);
             if (!s_autoregressive_step_dispatches.empty()) {
                 printf("%s_DECODER_STEP_0_DISPATCH_COUNT=%u\n", hist_prefix, s_autoregressive_step_dispatches[0]);
                 if (s_autoregressive_step_dispatches.size() > 1) {
@@ -4507,8 +4510,6 @@ void whisper_print_timings(struct whisper_context * ctx) {
                 }
             }
             printf("MODEL_DECODER_BLOCK_COUNT_FROM_METADATA=%d\n", ctx->model.hparams.n_text_layer);
-            printf("CAPTURED_DECODER_BLOCK_COUNT=%d\n", ctx->model.hparams.n_text_layer);
-            printf("BLOCK_COUNT_RECONCILED=true\n");
         }
         printf("RUN_2_ENCODER_DISPATCH_COUNT=%llu\n", (unsigned long long)counters.run_2_encoder_dispatch_count);
         printf("RUN_2_CROSS_DISPATCH_COUNT=%llu\n", (unsigned long long)counters.run_2_cross_dispatch_count);
@@ -4526,9 +4527,11 @@ void whisper_print_timings(struct whisper_context * ctx) {
         printf("INTERNAL_ACTIVATION_UPLOAD_COUNT=%llu\n", (unsigned long long)counters.internal_activation_upload_count);
         printf("INTERNAL_OUTPUT_READBACK_COUNT=%llu\n", (unsigned long long)counters.internal_output_readback_count);
         printf("EVENT_CREATE_DESTROY_COUNT=%llu\n", (unsigned long long)counters.event_create_destroy_count);
-        printf("EXPECTED_GPU_DISPATCH_COUNT=%llu\n", (unsigned long long)counters.ameva_dispatch_success_count);
+        // every dispatch the backend attempted must have succeeded
+        printf("EXPECTED_GPU_DISPATCH_COUNT=%llu\n", (unsigned long long)counters.ameva_dispatch_attempt_count);
         printf("ACTUAL_GPU_DISPATCH_COUNT=%llu\n", (unsigned long long)counters.ameva_dispatch_success_count);
-        printf("DISPATCH_COUNT_RECONCILED=true\n");
+        printf("DISPATCH_COUNT_RECONCILED=%s\n",
+               counters.ameva_dispatch_attempt_count == counters.ameva_dispatch_success_count ? "true" : "false");
         printf("WEIGHT_UPLOAD_TIME_MS=%.3f\n", counters.weight_upload_time_ms);
         printf("ACTIVATION_UPLOAD_TIME_MS=%.3f\n", counters.activation_upload_time_ms);
         printf("DISPATCH_API_TIME_MS=%.3f\n", counters.dispatch_api_time_ms);

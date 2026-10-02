@@ -29,21 +29,17 @@ def parse_output(proc):
     for l in lines:
         if l.startswith("[") and "-->" in l:
             transcripts.append(l)
+        # a malformed counter line raises ValueError with the offending text instead of leaving the default
         if "AMEVA_DISPATCH_SUCCESS_COUNT=" in l:
-            try: gpu_disp = int(l.split("=")[1])
-            except: pass
+            gpu_disp = int(l.split("=", 1)[1].strip())
         if "CPU_EXECUTED_MUL_MAT_COUNT=" in l:
-            try: cpu_mulmat = int(l.split("=")[1])
-            except: pass
+            cpu_mulmat = int(l.split("=", 1)[1].strip())
         if "AMEVA_SCHEDULED_NODE_COUNT=" in l:
-            try: total_nodes = int(l.split("=")[1])
-            except: pass
+            total_nodes = int(l.split("=", 1)[1].strip())
         if "RUN_1_ENCODER_DISPATCH_COUNT=" in l:
-            try: enc_nodes = int(l.split("=")[1])
-            except: pass
+            enc_nodes = int(l.split("=", 1)[1].strip())
         if "RUN_1_CROSS_DISPATCH_COUNT=" in l:
-            try: cross_nodes = int(l.split("=")[1])
-            except: pass
+            cross_nodes = int(l.split("=", 1)[1].strip())
     raw = " ".join(transcripts)
     return {
         "rc": proc.returncode,

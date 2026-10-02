@@ -207,6 +207,10 @@ add_test(NAME amuda_qwen_parity COMMAND test_amuda_qwen_parity)
 # =============================================================================
 # Native AMEVA GGML Backend & Verification Suite
 # =============================================================================
+# LLAMA_CPP_DIR must be the llama.cpp tree whose ggml will load libggml-ameva.so: ggml-backend-impl.h is not
+# ABI-versioned, and headers from another ggml shift every field behind ggml_backend_i/ggml_backend_buffer_i
+# (GGML_ASSERT(device) on Galaxy S25). The plugin refuses to load on a mismatch (ameva_abi_check);
+# scripts/termux/build_ggml_ameva.sh builds against an explicitly given ggml tree and checks the registration.
 set(LLAMA_CPP_DIR "/data/data/com.termux/files/home/BitNet_ms/3rdparty/llama.cpp" CACHE PATH "Path to pinned llama.cpp repository")
 
 set(AMEVA_GGML_SOURCES
@@ -268,6 +272,8 @@ target_link_libraries(ggml-ameva
 if(UNIX AND NOT APPLE)
     target_link_libraries(ggml-ameva vulkan dl m pthread)
 endif()
+# designated initializers for the ggml vtables (C++20)
+set_target_properties(ggml-ameva test_amuda_ggml_backend PROPERTIES CXX_STANDARD 20)
 add_test(NAME amuda_ggml_backend COMMAND test_amuda_ggml_backend)
 
 # =============================================================================

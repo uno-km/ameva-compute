@@ -2,11 +2,13 @@
 #include "ggml-backend-impl.h"
 #include "ac_runtime.h"
 
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
 #include <atomic>
+#include <mutex>
 
 // Diagnostics Counters
 static std::atomic<int64_t> g_ameva_supports_query_count{0};
@@ -168,6 +170,8 @@ AmevaFailureInjectionPoint ggml_backend_ameva_get_failure_injection(void) {
     return (AmevaFailureInjectionPoint)g_ameva_failure_injection.load();
 }
 
+ggml_backend_t ameva_backend_create(ggml_backend_dev_t dev); // ggml-ameva.cpp
+
 static const char* ggml_backend_ameva_device_get_name(ggml_backend_dev_t dev) {
     (void)dev;
     return GGML_AMEVA_DEVICE_NAME;
@@ -178,11 +182,30 @@ static const char* ggml_backend_ameva_device_get_description(ggml_backend_dev_t 
     return GGML_AMEVA_DEVICE_DESCRIPTION;
 }
 
+// UMA: the GPU allocates from system RAM, so system memory is the device memory. MemAvailable (not MemFree)
+// includes reclaimable page cache. Both values are 0 only when /proc/meminfo cannot be read; llama.cpp treats
+// 0/0 as "unknown" and uses host memory instead, and the failure is printed once.
 static void ggml_backend_ameva_device_get_memory(ggml_backend_dev_t dev, size_t* free, size_t* total) {
     (void)dev;
-    // Direct physical VRAM memory querying is unsupported without platform-specific extensions
-    if (free)  *free  = 0;
-    if (total) *total = 0;
+    unsigned long long total_kb = 0, avail_kb = 0;
+    if (FILE* f = fopen("/proc/meminfo", "r")) {
+        char line[128];
+        while (fgets(line, sizeof(line), f)) {
+            unsigned long long v = 0;
+            if (sscanf(line, "MemTotal: %llu kB", &v) == 1) total_kb = v;
+            else if (sscanf(line, "MemAvailable: %llu kB", &v) == 1) avail_kb = v;
+        }
+        fclose(f);
+    }
+    if (total_kb == 0 || avail_kb == 0) {
+        // never report total without free: free=0 with total>0 would make llama.cpp's split points 0/0
+        static std::atomic<bool> warned{false};
+        if (!warned.exchange(true))
+            fprintf(stderr, "ggml-ameva: /proc/meminfo has no MemTotal/MemAvailable; device memory reported as unknown\n");
+        total_kb = avail_kb = 0;
+    }
+    if (free)  *free  = (size_t)(avail_kb * 1024);
+    if (total) *total = (size_t)(total_kb * 1024);
 }
 
 static enum ggml_backend_dev_type ggml_backend_ameva_device_get_type(ggml_backend_dev_t dev) {
@@ -191,10 +214,10 @@ static enum ggml_backend_dev_type ggml_backend_ameva_device_get_type(ggml_backen
 }
 
 static void ggml_backend_ameva_device_get_props(ggml_backend_dev_t dev, struct ggml_backend_dev_props* props) {
-    (void)dev;
     if (!props) return;
     props->name = GGML_AMEVA_DEVICE_NAME;
     props->description = GGML_AMEVA_DEVICE_DESCRIPTION;
+    ggml_backend_ameva_device_get_memory(dev, &props->memory_free, &props->memory_total);
     props->type = GGML_BACKEND_DEVICE_TYPE_GPU;
     props->caps.async = false;
     props->caps.host_buffer = false;
@@ -203,9 +226,8 @@ static void ggml_backend_ameva_device_get_props(ggml_backend_dev_t dev, struct g
 }
 
 static ggml_backend_t ggml_backend_ameva_device_init(ggml_backend_dev_t dev, const char* params) {
-    (void)dev;
     (void)params;
-    return ggml_backend_ameva_init(0);
+    return ameva_backend_create(dev);
 }
 
 static ggml_backend_buffer_type_t ggml_backend_ameva_device_get_buffer_type(ggml_backend_dev_t dev) {
@@ -310,28 +332,19 @@ static bool ggml_backend_ameva_device_offload_op(ggml_backend_dev_t dev, const s
     return false; // Zero unsolicited offload
 }
 
+// Designated initializers throughout: ggml-backend-impl.h inserts members into these vtables between releases,
+// and a positional list silently shifts every later entry into the wrong slot when the headers change.
 static const struct ggml_backend_device_i ggml_backend_ameva_device_i = {
-    /* .get_name             = */ ggml_backend_ameva_device_get_name,
-    /* .get_description      = */ ggml_backend_ameva_device_get_description,
-    /* .get_memory           = */ ggml_backend_ameva_device_get_memory,
-    /* .get_type             = */ ggml_backend_ameva_device_get_type,
-    /* .get_props            = */ ggml_backend_ameva_device_get_props,
-    /* .init_backend         = */ ggml_backend_ameva_device_init,
-    /* .get_buffer_type      = */ ggml_backend_ameva_device_get_buffer_type,
-    /* .get_host_buffer_type = */ nullptr,
-    /* .buffer_from_host_ptr = */ nullptr,
-    /* .supports_op          = */ ggml_backend_ameva_device_supports_op,
-    /* .supports_buft        = */ ggml_backend_ameva_device_supports_buft,
-    /* .offload_op           = */ ggml_backend_ameva_device_offload_op,
-    /* .event_new            = */ nullptr,
-    /* .event_free           = */ nullptr,
-    /* .event_synchronize    = */ nullptr,
-};
-
-static struct ggml_backend_device g_ameva_device = {
-    /* .iface   = */ ggml_backend_ameva_device_i,
-    /* .reg     = */ nullptr,
-    /* .context = */ nullptr,
+    .get_name        = ggml_backend_ameva_device_get_name,
+    .get_description = ggml_backend_ameva_device_get_description,
+    .get_memory      = ggml_backend_ameva_device_get_memory,
+    .get_type        = ggml_backend_ameva_device_get_type,
+    .get_props       = ggml_backend_ameva_device_get_props,
+    .init_backend    = ggml_backend_ameva_device_init,
+    .get_buffer_type = ggml_backend_ameva_device_get_buffer_type,
+    .supports_op     = ggml_backend_ameva_device_supports_op,
+    .supports_buft   = ggml_backend_ameva_device_supports_buft,
+    .offload_op      = ggml_backend_ameva_device_offload_op,
 };
 
 // Backend Registry Interface
@@ -345,32 +358,106 @@ static size_t ggml_backend_ameva_reg_get_device_count(ggml_backend_reg_t reg) {
     return 1;
 }
 
-static ggml_backend_dev_t ggml_backend_ameva_reg_get_device(ggml_backend_reg_t reg, size_t index) {
-    (void)reg;
-    if (index == 0) {
-        g_ameva_device.reg = reg;
-        return &g_ameva_device;
-    }
-    return nullptr;
-}
+static ggml_backend_dev_t ggml_backend_ameva_reg_get_device(ggml_backend_reg_t reg, size_t index);
 
 static const struct ggml_backend_reg_i ggml_backend_ameva_reg_i = {
-    /* .get_name         = */ ggml_backend_ameva_reg_get_name,
-    /* .get_device_count = */ ggml_backend_ameva_reg_get_device_count,
-    /* .get_device       = */ ggml_backend_ameva_reg_get_device,
-    /* .get_proc_address = */ nullptr,
+    .get_name         = ggml_backend_ameva_reg_get_name,
+    .get_device_count = ggml_backend_ameva_reg_get_device_count,
+    .get_device       = ggml_backend_ameva_reg_get_device,
+    .get_proc_address = nullptr,
 };
 
 static struct ggml_backend_reg g_ameva_reg = {
-    /* .api_version = */ GGML_BACKEND_API_VERSION,
-    /* .iface       = */ ggml_backend_ameva_reg_i,
-    /* .context     = */ nullptr,
+    .api_version = GGML_BACKEND_API_VERSION,
+    .iface       = ggml_backend_ameva_reg_i,
+    .context     = nullptr,
 };
+
+// The device is linked to its registry statically: a backend created without going through the registry
+// (ggml_backend_ameva_init) must still report a device whose reg is valid.
+__attribute__((visibility("hidden"))) struct ggml_backend_device g_ameva_device = {
+    .iface   = ggml_backend_ameva_device_i,
+    .reg     = &g_ameva_reg,
+    .context = nullptr,
+};
+
+static ggml_backend_dev_t ggml_backend_ameva_reg_get_device(ggml_backend_reg_t reg, size_t index) {
+    (void)reg;
+    return index == 0 ? &g_ameva_device : nullptr;
+}
+
+// ggml-backend-impl.h is not ABI-versioned: GGML_BACKEND_API_VERSION stayed 2 while ggml_backend_i and
+// ggml_backend_buffer_i each gained two members (set/get_tensor_2d[_async]). A backend compiled against one
+// ggml and loaded by a process running another reads every field behind those vtables at a shifted offset.
+// Galaxy S25: libggml-ameva.so compiled against newer headers, loaded by llama.cpp b8471 (ggml 0.9.8), which
+// read backend->device from the slot of iface.event_wait (NULL) and stopped in GGML_ASSERT(device).
+// Before any AMEVA object reaches libggml-base, check through libggml-base's own accessors that both sides
+// agree on every layout and enum value this backend relies on. Returns NULL when they agree.
+const char* ameva_abi_check(void) {
+    static std::once_flag once;
+    static char msg[320];
+    static const char* result = nullptr;
+    std::call_once(once, [] {
+        const char* what = nullptr;
+
+        struct ggml_backend pb = {};
+        pb.device = &g_ameva_device;
+        struct ggml_backend_buffer_type pbt = {};
+        pbt.device = &g_ameva_device;
+        struct ggml_backend_buffer pbuf = {};
+        pbuf.buft = &pbt;
+        pbuf.size = 0x5A17;
+        struct ggml_backend_device pd = {};
+        pd.reg = &g_ameva_reg;
+
+        if (ggml_backend_get_device(&pb) != &g_ameva_device) {
+            what = "struct ggml_backend (ggml_backend_i member count)";
+        } else if (ggml_backend_buffer_get_size(&pbuf) != 0x5A17 || ggml_backend_buffer_get_type(&pbuf) != &pbt) {
+            what = "struct ggml_backend_buffer (ggml_backend_buffer_i member count)";
+        } else if (ggml_backend_buft_get_device(&pbt) != &g_ameva_device) {
+            what = "struct ggml_backend_buffer_type";
+        } else if (ggml_backend_dev_backend_reg(&pd) != &g_ameva_reg) {
+            what = "struct ggml_backend_device";
+        } else if (strcmp(ggml_op_name(GGML_OP_MUL_MAT), "MUL_MAT") != 0) {
+            what = "enum ggml_op (GGML_OP_MUL_MAT)";
+        } else if (strcmp(ggml_type_name(GGML_TYPE_F32), "f32") != 0 || strcmp(ggml_type_name(GGML_TYPE_Q5_0), "q5_0") != 0 ||
+                   strcmp(ggml_type_name(GGML_TYPE_Q4_K), "q4_K") != 0) {
+            what = "enum ggml_type";
+        } else {
+            // struct ggml_tensor: build a MUL_MAT node with libggml-base and read it back with our layout
+            struct ggml_init_params ip = { 8 * ggml_tensor_overhead(), nullptr, true };
+            struct ggml_context* tctx = ggml_init(ip);
+            if (!tctx) {
+                what = "ggml_init for the tensor layout probe";
+            } else {
+                struct ggml_tensor* a = ggml_new_tensor_2d(tctx, GGML_TYPE_F32, 8, 3);
+                struct ggml_tensor* b = ggml_new_tensor_2d(tctx, GGML_TYPE_F32, 8, 2);
+                struct ggml_tensor* c = ggml_mul_mat(tctx, a, b);
+                if (!c || c->op != GGML_OP_MUL_MAT || c->src[0] != a || c->src[1] != b || c->type != GGML_TYPE_F32 ||
+                    c->ne[0] != 3 || c->ne[1] != 2 || a->nb[1] != 32 || ggml_nbytes(c) != 24)
+                    what = "struct ggml_tensor";
+                ggml_free(tctx);
+            }
+        }
+        if (what) {
+            snprintf(msg, sizeof(msg),
+                     "ABI mismatch with the loaded libggml-base: %s differs from the ggml headers libggml-ameva.so "
+                     "was compiled with (offsetof(ggml_backend, device)=%zu). Rebuild it against the ggml of the "
+                     "llama.cpp build that loads it.", what, offsetof(struct ggml_backend, device));
+            result = msg;
+        }
+    });
+    return result;
+}
 
 ggml_backend_reg_t ggml_backend_ameva_reg(void) {
     return &g_ameva_reg;
 }
 
 void ggml_backend_ameva_register(void) {
+    if (const char* why = ameva_abi_check()) {
+        fprintf(stderr, "ggml-ameva: not registering the AMEVA backend: %s\n", why);
+        return;
+    }
     ggml_backend_register(ggml_backend_ameva_reg());
 }

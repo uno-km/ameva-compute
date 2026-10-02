@@ -1,0 +1,84 @@
+#version 450
+// whisper AMEVA backend: dst = src0^T x src1 with Q5_0 weights read in their raw ggml block format.
+//   binding 0: src0 Q5_0, N rows x K, K % 32 == 0; per row K/32 blocks of 22 bytes
+//              { fp16 d; uint8 qh[4]; uint8 qs[16] } (2-byte packed, so blocks are not 4-byte aligned)
+//   binding 1: src1 F32 activations, M rows x K
+//   binding 2: dst  F32, M rows x N: dst[m*N + n] = sum_k dequant(W)[n][k] * A[m][k]
+//   push constants {M, N, K}; local size 16x16; grid ((N+15)/16, (M+15)/16): x -> n, y -> m
+// Dequantization follows ggml dequantize_row_q5_0:
+//   j < 16 : x = ((qs[j] & 0x0F) | (((qh >> j) << 4) & 0x10)) - 16
+//   j >= 16: x = ((qs[j-16] >> 4) | ((qh >> (j - 4)) & 0x10)) - 16          (qh bit j moved to bit 4)
+//   value = x * d
+// The host allocates the weight buffer rounded up to 4 bytes, so every word read here is inside the buffer.
+// Rewritten 2026-10-02: the binaries pinned before (sha256 cd343cfb..., no source in any branch) were lost.
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer W { uint wq[]; };
+layout(std430, binding = 1) readonly buffer A { float a[]; };
+layout(std430, binding = 2) writeonly buffer D { float d[]; };
+
+layout(push_constant) uniform PC { uint M; uint N; uint K; } pc;
+
+shared float tileA[16][17]; // [m_local][k_local]
+shared float tileW[16][17]; // [n_local][k_local]
+
+uint load_u8(uint byte_addr) {
+    return (wq[byte_addr >> 2] >> ((byte_addr & 3u) * 8u)) & 0xFFu;
+}
+
+// little-endian 32-bit load from an even byte address; the second word read for base+2 lies inside the block
+uint load_u32(uint byte_addr) {
+    const uint wi = byte_addr >> 2;
+    const uint sh = (byte_addr & 3u) * 8u;
+    const uint lo = wq[wi];
+    if (sh == 0u) {
+        return lo;
+    }
+    return (lo >> sh) | (wq[wi + 1u] << (32u - sh));
+}
+
+float load_w(uint n, uint k) {
+    const uint blocks_per_row = pc.K >> 5;
+    const uint base = (n * blocks_per_row + (k >> 5)) * 22u; // even: d never straddles a word
+    const uint j = k & 31u;
+    const uint dw = wq[base >> 2];
+    const float scale = unpackHalf2x16((base & 2u) != 0u ? (dw >> 16u) : (dw & 0xFFFFu)).x;
+    const uint qh = load_u32(base + 2u);
+    const uint jj = j & 15u;
+    const uint qs = load_u8(base + 6u + jj);
+    uint q;
+    if (j < 16u) {
+        q = (qs & 0x0Fu) | (((qh >> j) << 4u) & 0x10u);
+    } else {
+        q = (qs >> 4u) | ((qh >> (j - 4u)) & 0x10u);
+    }
+    return float(int(q) - 16) * scale;
+}
+
+void main() {
+    const uint lx = gl_LocalInvocationID.x;
+    const uint ly = gl_LocalInvocationID.y;
+    const uint n0 = gl_WorkGroupID.x * 16u;
+    const uint m0 = gl_WorkGroupID.y * 16u;
+
+    float acc = 0.0;
+    for (uint k0 = 0u; k0 < pc.K; k0 += 16u) {
+        const uint k = k0 + lx;
+        const uint am = m0 + ly;
+        tileA[ly][lx] = (am < pc.M && k < pc.K) ? a[am * pc.K + k] : 0.0;
+        const uint wn = n0 + ly;
+        tileW[ly][lx] = (wn < pc.N && k < pc.K) ? load_w(wn, k) : 0.0;
+        barrier();
+        for (uint kk = 0u; kk < 16u; ++kk) {
+            acc += tileA[ly][kk] * tileW[lx][kk];
+        }
+        barrier();
+    }
+
+    const uint m = m0 + ly;
+    const uint n = n0 + lx;
+    if (m < pc.M && n < pc.N) {
+        d[m * pc.N + n] = acc;
+    }
+}

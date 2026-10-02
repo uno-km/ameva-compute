@@ -22,7 +22,9 @@ static void ggml_backend_ameva_buffer_free_buffer(ggml_backend_buffer_t buffer) 
     if (!buffer || !buffer->context) return;
     auto* ctx = (ggml_backend_ameva_buffer_context*)buffer->context;
     if (ctx->ac_buf) {
-        ac_runtime_buffer_destroy(ctx->ac_buf);
+        AcResult r = ac_runtime_buffer_destroy(ctx->ac_buf);
+        if (r != AC_SUCCESS)
+            fprintf(stderr, "ggml-ameva-buffer: ac_runtime_buffer_destroy failed (code %d); the GPU allocation leaked\n", r);
         ctx->ac_buf = nullptr;
         ameva_increment_buffer_destroy_count();
     }
@@ -47,87 +49,79 @@ static void* ggml_backend_ameva_buffer_get_base(ggml_backend_buffer_t buffer) {
     return ctx->mapped_ptr;
 }
 
-static enum ggml_status ggml_backend_ameva_buffer_init_tensor(ggml_backend_buffer_t buffer, struct ggml_tensor* tensor) {
-    (void)buffer;
-    (void)tensor;
-    return GGML_STATUS_SUCCESS;
-}
-
 static void ggml_backend_ameva_buffer_memset_tensor(ggml_backend_buffer_t buffer, struct ggml_tensor* tensor, uint8_t value, size_t offset, size_t size) {
+    // The ggml buffer interface has no error return: a write that cannot be completed or made visible to the
+    // GPU aborts, because continuing would compute on data the caller believes was written.
     if (!buffer || !buffer->context || !tensor || !tensor->data) {
-        return;
+        GGML_ABORT("ggml-ameva-buffer: memset_tensor on an unallocated tensor or buffer");
     }
     size_t tensor_nbytes = ggml_nbytes(tensor);
     if (offset > tensor_nbytes || size > tensor_nbytes - offset) {
-        fprintf(stderr, "ggml-ameva-buffer: memset_tensor range violation (offset=%zu, size=%zu, tensor=%zu)\n",
-                offset, size, tensor_nbytes);
-        return;
+        GGML_ABORT("ggml-ameva-buffer: memset_tensor range violation (offset=%zu, size=%zu, tensor=%zu)",
+                   offset, size, tensor_nbytes);
     }
     auto* ctx = (ggml_backend_ameva_buffer_context*)buffer->context;
     char* dst = (char*)tensor->data + offset;
     if (dst < (char*)ctx->mapped_ptr || (size_t)(dst - (char*)ctx->mapped_ptr) > ctx->size || size > ctx->size - (size_t)(dst - (char*)ctx->mapped_ptr)) {
-        fprintf(stderr, "ggml-ameva-buffer: memset_tensor buffer limit violation\n");
-        return;
+        GGML_ABORT("ggml-ameva-buffer: memset_tensor outside the buffer mapping");
     }
     memset(dst, value, size);
     size_t byte_offset = (size_t)(dst - (char*)ctx->mapped_ptr);
     AcResult fres = ac_runtime_buffer_flush(ctx->ac_buf, byte_offset, size);
     if (fres != AC_SUCCESS) {
-        fprintf(stderr, "ggml-ameva-buffer: flush failed in memset_tensor (code %d)\n", fres);
+        GGML_ABORT("ggml-ameva-buffer: flush failed in memset_tensor (code %d)", fres);
     }
 }
 
 static void ggml_backend_ameva_buffer_set_tensor(ggml_backend_buffer_t buffer, struct ggml_tensor* tensor, const void* data, size_t offset, size_t size) {
     if (!buffer || !buffer->context || !tensor || !tensor->data || !data) {
-        return;
+        GGML_ABORT("ggml-ameva-buffer: set_tensor on an unallocated tensor or buffer, or from NULL");
     }
     size_t tensor_nbytes = ggml_nbytes(tensor);
     if (offset > tensor_nbytes || size > tensor_nbytes - offset) {
-        fprintf(stderr, "ggml-ameva-buffer: set_tensor range violation (offset=%zu, size=%zu, tensor=%zu)\n",
-                offset, size, tensor_nbytes);
-        return;
+        GGML_ABORT("ggml-ameva-buffer: set_tensor range violation (offset=%zu, size=%zu, tensor=%zu)",
+                   offset, size, tensor_nbytes);
     }
     auto* ctx = (ggml_backend_ameva_buffer_context*)buffer->context;
     char* dst = (char*)tensor->data + offset;
     if (dst < (char*)ctx->mapped_ptr || (size_t)(dst - (char*)ctx->mapped_ptr) > ctx->size || size > ctx->size - (size_t)(dst - (char*)ctx->mapped_ptr)) {
-        fprintf(stderr, "ggml-ameva-buffer: set_tensor buffer limit violation\n");
-        return;
+        GGML_ABORT("ggml-ameva-buffer: set_tensor outside the buffer mapping");
     }
     memcpy(dst, data, size);
     size_t byte_offset = (size_t)(dst - (char*)ctx->mapped_ptr);
     AcResult fres = ac_runtime_buffer_flush(ctx->ac_buf, byte_offset, size);
     if (fres != AC_SUCCESS) {
-        fprintf(stderr, "ggml-ameva-buffer: flush failed in set_tensor (code %d)\n", fres);
+        GGML_ABORT("ggml-ameva-buffer: flush failed in set_tensor (code %d)", fres);
     }
 }
 
 static void ggml_backend_ameva_buffer_get_tensor(ggml_backend_buffer_t buffer, const struct ggml_tensor* tensor, void* data, size_t offset, size_t size) {
     if (!buffer || !buffer->context || !tensor || !tensor->data || !data) {
-        return;
+        GGML_ABORT("ggml-ameva-buffer: get_tensor on an unallocated tensor or buffer, or into NULL");
     }
     size_t tensor_nbytes = ggml_nbytes(tensor);
     if (offset > tensor_nbytes || size > tensor_nbytes - offset) {
-        fprintf(stderr, "ggml-ameva-buffer: get_tensor range violation (offset=%zu, size=%zu, tensor=%zu)\n",
-                offset, size, tensor_nbytes);
-        return;
+        GGML_ABORT("ggml-ameva-buffer: get_tensor range violation (offset=%zu, size=%zu, tensor=%zu)",
+                   offset, size, tensor_nbytes);
     }
     auto* ctx = (ggml_backend_ameva_buffer_context*)buffer->context;
     const char* src = (const char*)tensor->data + offset;
     if (src < (const char*)ctx->mapped_ptr || (size_t)(src - (const char*)ctx->mapped_ptr) > ctx->size || size > ctx->size - (size_t)(src - (const char*)ctx->mapped_ptr)) {
-        fprintf(stderr, "ggml-ameva-buffer: get_tensor buffer limit violation\n");
-        return;
+        GGML_ABORT("ggml-ameva-buffer: get_tensor outside the buffer mapping");
     }
     size_t byte_offset = (size_t)(src - (const char*)ctx->mapped_ptr);
     AcResult ires = ac_runtime_buffer_invalidate(ctx->ac_buf, byte_offset, size);
     if (ires != AC_SUCCESS) {
-        fprintf(stderr, "ggml-ameva-buffer: invalidate failed in get_tensor (code %d)\n", ires);
+        GGML_ABORT("ggml-ameva-buffer: invalidate failed in get_tensor (code %d)", ires);
     }
     memcpy(data, src, size);
 }
 
 static bool ggml_backend_ameva_buffer_cpy_tensor(ggml_backend_buffer_t buffer, const struct ggml_tensor* src, struct ggml_tensor* dst) {
     (void)buffer;
-    if (src && dst && src->data && dst->data) {
+    // src->data is a CPU address only for host buffers; for any other buffer it must not be read here.
+    // false tells ggml to copy through the host.
+    if (src && dst && src->data && dst->data && src->buffer && ggml_backend_buffer_is_host(src->buffer)) {
         ggml_backend_tensor_set(dst, src->data, 0, ggml_nbytes(src));
         return true;
     }
@@ -135,26 +129,29 @@ static bool ggml_backend_ameva_buffer_cpy_tensor(ggml_backend_buffer_t buffer, c
 }
 
 static void ggml_backend_ameva_buffer_clear(ggml_backend_buffer_t buffer, uint8_t value) {
-    if (!buffer || !buffer->context) return;
+    if (!buffer || !buffer->context) {
+        GGML_ABORT("ggml-ameva-buffer: clear on a buffer without context");
+    }
     auto* ctx = (ggml_backend_ameva_buffer_context*)buffer->context;
     memset(ctx->mapped_ptr, value, buffer->size);
-    ac_runtime_buffer_flush(ctx->ac_buf, 0, buffer->size);
+    AcResult fres = ac_runtime_buffer_flush(ctx->ac_buf, 0, buffer->size);
+    if (fres != AC_SUCCESS) {
+        GGML_ABORT("ggml-ameva-buffer: flush failed in clear (code %d)", fres);
+    }
 }
 
-static void ggml_backend_ameva_buffer_reset(ggml_backend_buffer_t buffer) {
-    (void)buffer;
-}
-
+// Designated initializers (see ggml-ameva-device.cpp). init_tensor and reset are optional in ggml and left NULL:
+// tensors in a flat, host-mapped Vulkan buffer need no per-tensor setup and the buffer keeps no state to reset.
 static const struct ggml_backend_buffer_i ggml_backend_ameva_buffer_i = {
-    /* .free_buffer     = */ ggml_backend_ameva_buffer_free_buffer,
-    /* .get_base        = */ ggml_backend_ameva_buffer_get_base,
-    /* .init_tensor     = */ ggml_backend_ameva_buffer_init_tensor,
-    /* .memset_tensor   = */ ggml_backend_ameva_buffer_memset_tensor,
-    /* .set_tensor      = */ ggml_backend_ameva_buffer_set_tensor,
-    /* .get_tensor      = */ ggml_backend_ameva_buffer_get_tensor,
-    /* .cpy_tensor      = */ ggml_backend_ameva_buffer_cpy_tensor,
-    /* .clear           = */ ggml_backend_ameva_buffer_clear,
-    /* .reset           = */ ggml_backend_ameva_buffer_reset,
+    .free_buffer   = ggml_backend_ameva_buffer_free_buffer,
+    .get_base      = ggml_backend_ameva_buffer_get_base,
+    .init_tensor   = nullptr,
+    .memset_tensor = ggml_backend_ameva_buffer_memset_tensor,
+    .set_tensor    = ggml_backend_ameva_buffer_set_tensor,
+    .get_tensor    = ggml_backend_ameva_buffer_get_tensor,
+    .cpy_tensor    = ggml_backend_ameva_buffer_cpy_tensor,
+    .clear         = ggml_backend_ameva_buffer_clear,
+    .reset         = nullptr,
 };
 
 static const char* ggml_backend_ameva_buffer_type_get_name(ggml_backend_buffer_type_t buft) {
@@ -227,21 +224,28 @@ static bool ggml_backend_ameva_buffer_type_is_host(ggml_backend_buffer_type_t bu
 }
 
 static const struct ggml_backend_buffer_type_i ggml_backend_ameva_buffer_type_i = {
-    /* .get_name       = */ ggml_backend_ameva_buffer_type_get_name,
-    /* .alloc_buffer   = */ ggml_backend_ameva_buffer_type_alloc_buffer,
-    /* .get_alignment  = */ ggml_backend_ameva_buffer_type_get_alignment,
-    /* .get_max_size   = */ ggml_backend_ameva_buffer_type_get_max_size,
-    /* .get_alloc_size = */ ggml_backend_ameva_buffer_type_get_alloc_size,
-    /* .is_host        = */ ggml_backend_ameva_buffer_type_is_host,
+    .get_name       = ggml_backend_ameva_buffer_type_get_name,
+    .alloc_buffer   = ggml_backend_ameva_buffer_type_alloc_buffer,
+    .get_alignment  = ggml_backend_ameva_buffer_type_get_alignment,
+    .get_max_size   = ggml_backend_ameva_buffer_type_get_max_size,
+    .get_alloc_size = ggml_backend_ameva_buffer_type_get_alloc_size,
+    .is_host        = ggml_backend_ameva_buffer_type_is_host,
 };
 
+extern struct ggml_backend_device g_ameva_device; // ggml-ameva-device.cpp
+
+// .device links the buffer type to AMEVA0; ggml and llama.cpp attribute buffers to a device through it
+// (scheduler, memory accounting). It was NULL, so AMEVA allocations belonged to no device.
 static struct ggml_backend_buffer_type g_ameva_buft = {
-    /* .iface   = */ ggml_backend_ameva_buffer_type_i,
-    /* .device  = */ nullptr,
-    /* .context = */ nullptr,
+    .iface   = ggml_backend_ameva_buffer_type_i,
+    .device  = &g_ameva_device,
+    .context = nullptr,
 };
 
 ggml_backend_buffer_type_t ggml_backend_ameva_buffer_type(size_t dev_num) {
-    (void)dev_num;
+    if (dev_num != 0) {
+        fprintf(stderr, "ggml-ameva-buffer: device %zu does not exist (AMEVA exposes one device)\n", dev_num);
+        return nullptr;
+    }
     return &g_ameva_buft;
 }

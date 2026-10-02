@@ -72,8 +72,8 @@ def load_cache():
         try:
             with open(CACHE_FILE, "r") as f:
                 return json.load(f)
-        except Exception:
-            pass
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"CACHE_IGNORED={CACHE_FILE}: {type(e).__name__}: {e} (all tests run fresh)", file=sys.stderr)
     return {}
 
 def save_cache(cache):
@@ -82,8 +82,8 @@ def save_cache(cache):
     try:
         with open(CACHE_FILE, "w") as f:
             json.dump(cache, f, indent=2)
-    except Exception:
-        pass
+    except OSError as e:
+        print(f"CACHE_NOT_SAVED={CACHE_FILE}: {e}", file=sys.stderr)
 
 def run_test(name, env_overrides, model=MODEL_TURBO, expect_fail=False, extra_args=None, allow_cache=True):
     global cached_count, fresh_count
@@ -372,9 +372,12 @@ uploads_run2 = require_int(r_all, "WEIGHT_UPLOAD_COUNT_SECOND_RUN")
 
 require_exact("Q5_0_CONTRACT_ALL", "CACHE_LOOKUP_RECONCILED", "true" if (hits + misses == actual_dispatch) else "false", "true")
 require_exact("Q5_0_CONTRACT_ALL", "CACHE_MISS_UPLOAD_RECONCILED", "true" if (misses == uploads_run1 + uploads_run2) else "false", "true")
-require_exact("Q5_0_CONTRACT_ALL", "CACHE_ENTRY_LIFECYCLE_BALANCED", r_all.get("CACHE_ENTRY_LIFECYCLE_BALANCED"), "true")
 require_exact("Q5_0_CONTRACT_ALL", "WEIGHT_CACHE_ENTRY_CREATE_COUNT", r_all.get("WEIGHT_CACHE_ENTRY_CREATE_COUNT"), "232")
-require_exact("Q5_0_CONTRACT_ALL", "WEIGHT_CACHE_ENTRY_DESTROY_COUNT", r_all.get("WEIGHT_CACHE_ENTRY_DESTROY_COUNT"), "232")
+# whisper-cli prints these counters before whisper_free, while every cache entry is still alive: the honest
+# invariant at that point is "nothing evicted yet". Lifecycle balance needs a post-teardown observation
+# (tests/stt/test_repeat_formal_backend.cpp prints one); whisper.cpp used to print create as destroy and "true".
+require_exact("Q5_0_CONTRACT_ALL", "WEIGHT_CACHE_ENTRY_DESTROY_COUNT", r_all.get("WEIGHT_CACHE_ENTRY_DESTROY_COUNT"), "0")
+print("WEIGHT_CACHE_ENTRY_LIFECYCLE_BALANCED=NOT_OBSERVABLE_BEFORE_TEARDOWN")
 require_exact("Q5_0_CONTRACT_ALL", "CACHE_KEY_ALIAS_COUNT", r_all.get("CACHE_KEY_ALIAS_COUNT"), "0")
 require_exact("Q5_0_CONTRACT_ALL", "WEIGHT_CACHE_HASH_ALGORITHM", r_all.get("WEIGHT_CACHE_HASH_ALGORITHM"), "SHA256_FULL_PAYLOAD")
 require_exact("Q5_0_CONTRACT_ALL", "SPARSE_FINGERPRINT_USED", r_all.get("SPARSE_FINGERPRINT_USED"), "false")
@@ -383,9 +386,13 @@ require_exact("Q5_0_CONTRACT_ALL", "CACHE_COLLISION_PAYLOAD_RECHECK", r_all.get(
 # P0-3: Exact Cache Hit Ratio & Reupload Accounting
 hit_ratio = (float(hits) / float(actual_dispatch)) * 100.0 if actual_dispatch > 0 else 0.0
 print(f"WEIGHT_CACHE_HIT_RATIO={hit_ratio:.2f}_PERCENT")
-print(f"UNIQUE_WEIGHT_UPLOAD_ONCE=true")
-print(f"REPEATED_WEIGHT_REUPLOAD_COUNT=0")
-print(f"REUSED_WEIGHT_REUPLOAD_COUNT=0")
+# every miss uploads a weight and creates one cache entry: misses beyond the entries created are re-uploads
+# of a weight that was already cached (these three lines were constants before)
+entries_created = require_int(r_all, "WEIGHT_CACHE_ENTRY_CREATE_COUNT")
+reuploads = misses - entries_created
+print(f"UNIQUE_WEIGHT_UPLOAD_ONCE={'true' if reuploads == 0 else 'false'}")
+print(f"REPEATED_WEIGHT_REUPLOAD_COUNT={reuploads}")
+print(f"REUSED_WEIGHT_REUPLOAD_COUNT={reuploads}")
 
 # Granular Checks: Multi-Run Runtime Graph-Kind & Telemetry Reconciliation (P0-1)
 r_multi = results["multi_run"]
@@ -417,8 +424,10 @@ require_exact("FAULT_INJECTION", "AMEVA_FAIL_CLOSED_REASON", r_fault.get('AMEVA_
 
 has_stage_reached = "AMEVA_FAIL_CLOSED_REASON=INJECTED_DISPATCH_FAILURE" in r_fault['output']
 require_exact("FAULT_INJECTION", "FAULT_STAGE_REACHED", "true" if has_stage_reached else "false", "true")
-require_exact("FAULT_INJECTION", "DISPATCH_AFTER_FAULT_COUNT", "0", "0")
-require_exact("FAULT_INJECTION", "CPU_EXECUTION_AFTER_FAULT_COUNT", "0", "0")
+# Not observable here: the process exits with code 10 without printing counters after the fault, and comparing
+# the literal "0" with "0" (as before) verified nothing.
+print("DISPATCH_AFTER_FAULT_COUNT=NOT_MEASURED")
+print("CPU_EXECUTION_AFTER_FAULT_COUNT=NOT_MEASURED")
 
 transcript_exposed = len(r_fault.get("TRANSCRIPTION", "").strip()) > 0
 require_exact("FAULT_INJECTION", "PARTIAL_TRANSCRIPT_EXPOSED", "true" if transcript_exposed else "false", "false")
@@ -428,10 +437,13 @@ require_exact("FAULT_INJECTION", "FAILURE_REASON_MATCH", "true" if reason_match 
 
 print(f"FAULT_ABORT_TIME_SECONDS={r_fault.get('wall_time_s', 0.0):.2f}")
 print("FAULT_ABORT_TIME_POLICY_DIAGNOSTIC_ONLY=true")
-print("BACKEND_EXIT_CALL_COUNT=0")
-print("BACKEND_ABORT_CALL_COUNT=0")
-print("FAULT_RESOURCE_LIFECYCLE_BALANCED=true")
-print("FAULT_TERMINATING_SIGNAL=0")
+# subprocess reports death by signal N as returncode -N
+fault_rc = r_fault['exit_code']
+print(f"FAULT_TERMINATING_SIGNAL={-fault_rc if isinstance(fault_rc, int) and fault_rc < 0 else 0}")
+# No counter for these exists in the fault run's output; they were printed as constants before.
+print("BACKEND_EXIT_CALL_COUNT=NOT_MEASURED")
+print("BACKEND_ABORT_CALL_COUNT=NOT_MEASURED")
+print("FAULT_RESOURCE_LIFECYCLE_BALANCED=NOT_MEASURED")
 print(f"ASSERTION_PASS [FAULT_INJECTION] Clean fail-closed exit code 10 with structural evidence and no data exposure")
 
 # Performance Ground Truth Telemetry (P0-1 & P0-2)

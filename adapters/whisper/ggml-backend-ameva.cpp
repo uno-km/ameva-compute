@@ -8,7 +8,7 @@
 #include "../../third_party/whisper.cpp/ggml/src/ggml-backend-impl.h"
 
 #include "ac_types.h"
-#include "ac_runtime.h"
+#include "ac_error.h" // error-state API; ac_runtime.h would clash with ac_types.h (AcContext etc.)
 #include "ac_context.h"
 #include "ac_buffer.h"
 #include "ac_kernel.h"
@@ -21,6 +21,7 @@
 #include <time.h>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <fstream>
 #include <mutex>
 #include <new>
@@ -38,9 +39,11 @@ static AmevaBackendCounters g_counters = {};
 static std::mutex s_counters_mutex;
 static bool s_bounds_violation = false;
 
-// Production Verified SPIR-V SHA-256 Hashes
-static const char * const kF16SpirvSha256 = "4200b2b5b64c6dea074da0f1ca2dbdbe5705d55089406bbad37772a852e3d9a3";
-static const char * const kQ50SpirvSha256 = "cd343cfba670707f61ddeaff9556d6e262c75f344bff38dca23a7bd93bd720fd";
+// SHA-256 of src/shaders/stt/matmul_{f16,q5_0}_f32.spv (glslangValidator 16.5.0, --target-env vulkan1.0), rewritten
+// and re-pinned 2026-10-02. The previous pins (f16 4200b2b5..., q5_0 cd343cfb...) belonged to binaries whose
+// source was in no branch and whose files were on none of the reachable devices.
+static const char * const kF16SpirvSha256 = "63ab1fecca95ef16bc1387881421d900a134c5769861bb61c548bb6f85539e50";
+static const char * const kQ50SpirvSha256 = "343fd4b667135404fbe552965b59c33c1c4a37f6488f304264bccea407485829";
 
 static const size_t INITIAL_BUF_CAP = 32 * 1024 * 1024; // 32 MB
 
@@ -125,6 +128,10 @@ struct ameva_backend_context {
 static struct ameva_backend_context * s_cached_test_ctx = nullptr;
 static std::mutex s_test_ctx_mutex;
 
+// Every live backend context, so ameva_backend_teardown_hardware() can reach all AMEVA GPU state in the process.
+static std::unordered_set<struct ameva_backend_context *> s_live_ctxs;
+static std::mutex s_live_ctx_mutex;
+
 void ameva_backend_clear_test_cache(void) {
     std::lock_guard<std::mutex> lock(s_test_ctx_mutex);
     if (s_cached_test_ctx) {
@@ -141,10 +148,20 @@ void ameva_backend_clear_test_cache(void) {
 
 static char s_graph_kind[32] = "UNKNOWN";
 
+// Inference scope (ameva_backend_begin/end_inference). Run 1 and every later run are counted separately.
+static uint32_t s_current_inference_id = 1;
+static uint32_t s_inference_run_count = 0;
+// whisper.cpp tags each decoder evaluation with set_graph_kind("DECODER"): decoder passes per run [run 1, run 2+]
+static uint64_t s_decoder_pass_count[2] = {0, 0};
+
 void ameva_backend_set_graph_kind(const char * kind) {
     if (kind) {
         strncpy(s_graph_kind, kind, sizeof(s_graph_kind) - 1);
         s_graph_kind[sizeof(s_graph_kind) - 1] = '\0';
+        if (strcmp(kind, "DECODER") == 0) {
+            std::lock_guard<std::mutex> lk(s_counters_mutex);
+            s_decoder_pass_count[s_current_inference_id <= 1 ? 0 : 1]++;
+        }
     }
 }
 
@@ -458,12 +475,26 @@ static void teardown_backend_context(struct ameva_backend_context * ctx) {
     ctx->initialized = false;
 }
 
+// Releases all AMEVA GPU state in the process: pipeline, buffers and weight cache of every live backend context,
+// and the shared context of ameva_backend_run_cached_gpu_matmul. Live backends stay valid; their next
+// graph_compute re-initializes the hardware pipeline (teardown_backend_context clears ctx->initialized).
+// Backends release their own state in ameva_backend_free, so ordinary shutdown does not need this call.
 void ameva_backend_teardown_hardware(void) {
-    // Retained for backward-compatibility API
+    {
+        std::lock_guard<std::mutex> lock(s_live_ctx_mutex);
+        for (struct ameva_backend_context * ctx : s_live_ctxs) {
+            teardown_backend_context(ctx);
+        }
+    }
+    std::lock_guard<std::mutex> lock(s_test_ctx_mutex);
+    if (s_cached_test_ctx) {
+        teardown_backend_context(s_cached_test_ctx);
+        delete s_cached_test_ctx;
+        s_cached_test_ctx = nullptr;
+    }
+    std::lock_guard<std::mutex> lk(s_diag_mutex);
+    s_cache_diagnostics.entry_count = 0;
 }
-
-static uint32_t s_current_inference_id = 1;
-static uint32_t s_inference_run_count = 0;
 
 static bool execute_vulkan_matmul(struct ameva_backend_context * ctx, struct ggml_tensor * t, uint32_t graph_run_id, uint64_t dispatch_index, int node_index) {
     if (!ctx || !t || !ctx->vk_ctx || !ctx->buf_w || !ctx->buf_a || !ctx->buf_o) {
@@ -595,7 +626,8 @@ static bool execute_vulkan_matmul(struct ameva_backend_context * ctx, struct ggm
             }
         }
         AcVkBuffer * new_weight_buf = nullptr;
-        AcResult res_w = ac_vk_buffer_create(ctx->vk_ctx, weight_bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &new_weight_buf);
+        // rounded up to 4 bytes: Q5_0 rows are 22-byte blocks and matmul_q5_0_f32.comp reads whole 32-bit words
+        AcResult res_w = ac_vk_buffer_create(ctx->vk_ctx, (weight_bytes + 3) & ~(size_t)3, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &new_weight_buf);
         if (res_w != AC_SUCCESS || !new_weight_buf) {
             fprintf(stderr, "[AMEVA_BACKEND] FATAL: ac_vk_buffer_create for cached weight failed: %d\n", res_w);
             return false;
@@ -694,12 +726,18 @@ static bool execute_vulkan_matmul(struct ameva_backend_context * ctx, struct ggm
         std::lock_guard<std::mutex> lk(s_counters_mutex);
         g_counters.dispatch_api_time_ms += (td1 - td0);
         g_counters.event_create_count++;
+        // ac_vk_dispatch allocates, records and submits one command buffer with one completion fence per call
+        g_counters.graph_command_buffer_count++;
+        g_counters.graph_completion_event_count++;
     }
 
     // 4. Wait on GPU event with timing telemetry
     if (fail_stage && strcmp(fail_stage, "wait") == 0) {
         fprintf(stderr, "[AMEVA_FAIL_INJECTION] AMEVA_FAIL_CLOSED_REASON=INJECTED_WAIT_FAILURE\n");
         ac_vk_event_destroy(event);
+        std::lock_guard<std::mutex> lk(s_counters_mutex);
+        g_counters.event_destroy_count++;
+        g_counters.event_create_destroy_count++;
         return false;
     }
     double te0 = ameva_get_time_ms();
@@ -711,6 +749,7 @@ static bool execute_vulkan_matmul(struct ameva_backend_context * ctx, struct ggm
         g_counters.event_destroy_count++;
         g_counters.event_create_destroy_count++;
         g_counters.event_wait_time_ms += (te1 - te0);
+        g_counters.node_level_event_wait_count++; // the host waits for every node's dispatch before the next one
     }
     if (res != AC_SUCCESS) {
         fprintf(stderr, "[AMEVA_BACKEND] FATAL: ac_vk_event_wait failed with code %d\n", res);
@@ -958,6 +997,10 @@ static void ameva_backend_free(ggml_backend_t backend) {
     if (backend) {
         if (backend->context) {
             struct ameva_backend_context * ctx = (struct ameva_backend_context *)backend->context;
+            {
+                std::lock_guard<std::mutex> lock(s_live_ctx_mutex);
+                s_live_ctxs.erase(ctx);
+            }
             teardown_backend_context(ctx);
             delete ctx;
             backend->context = NULL;
@@ -1056,11 +1099,6 @@ static enum ggml_status ameva_backend_graph_compute(ggml_backend_t backend, stru
                         g_counters.run_2_decoder_dispatch_count++;
                     }
                 }
-                if (s_current_inference_id > 1) {
-                    g_counters.run_2_context_forward_pass_count = 3;
-                    g_counters.run_2_context_matmuls_per_pass = 16;
-                    g_counters.run_2_context_dispatch_count = 48;
-                }
             }
         } else {
             // Fail-Fast if an unsupported node was scheduled to AMEVA backend
@@ -1121,6 +1159,10 @@ ggml_backend_t ggml_backend_ameva_init(const char * params) {
     backend->iface = ameva_backend_i;
     backend->device = ggml_backend_ameva_device();
     backend->context = ctx;
+    {
+        std::lock_guard<std::mutex> lock(s_live_ctx_mutex);
+        s_live_ctxs.insert(ctx);
+    }
 
     return backend;
 }
@@ -1416,28 +1458,50 @@ void ameva_backend_reset_counters(void) {
     g_counters.run_2_context_forward_pass_count = 0;
     g_counters.run_2_context_matmuls_per_pass = 0;
     g_counters.run_2_context_dispatch_count = 0;
-    g_counters.graph_command_buffer_count = 1;
-    g_counters.graph_completion_event_count = 1;
+    g_counters.graph_command_buffer_count = 0;
+    g_counters.graph_completion_event_count = 0;
     g_counters.node_level_event_wait_count = 0;
     strcpy(s_graph_kind, "UNKNOWN");
     s_bounds_violation = false;
     s_current_inference_id = 1;
     s_inference_run_count = 0;
+    s_decoder_pass_count[0] = s_decoder_pass_count[1] = 0;
 }
 
 void ameva_backend_begin_inference(ggml_backend_t backend, uint32_t inference_id) {
     (void)backend;
+    std::lock_guard<std::mutex> lk(s_counters_mutex);
     s_current_inference_id = (inference_id == 0) ? 1 : inference_id;
     if (s_current_inference_id > s_inference_run_count) {
         s_inference_run_count = s_current_inference_id;
     }
-    std::lock_guard<std::mutex> lk(s_counters_mutex);
     g_counters.inference_run_count = s_inference_run_count;
 }
 
+// Closes the scope opened by begin_inference and derives the run-2 "context" telemetry from measured counts:
+// decoder passes run 2+ executed beyond run 1, times the dispatches one decoder pass issued. When the passes
+// are not uniform the decomposition is undefined; it is then left at 0 and the reason is printed.
 void ameva_backend_end_inference(ggml_backend_t backend, uint32_t inference_id) {
     (void)backend;
-    (void)inference_id;
+    std::lock_guard<std::mutex> lk(s_counters_mutex);
+    const uint32_t id = (inference_id == 0) ? 1 : inference_id;
+    if (id != s_current_inference_id) {
+        fprintf(stderr, "[AMEVA_BACKEND] ERROR: end_inference(%u) does not close the open inference %u; "
+                        "per-run telemetry after this point is misattributed\n", id, s_current_inference_id);
+    }
+    if (s_current_inference_id <= 1) return;
+    const uint64_t p1 = s_decoder_pass_count[0], p2 = s_decoder_pass_count[1];
+    const uint64_t d1 = g_counters.run_1_decoder_dispatch_count, d2 = g_counters.run_2_decoder_dispatch_count;
+    const bool uniform = p1 > 0 && p2 > 0 && d1 % p1 == 0 && d2 % p2 == 0 && d1 / p1 == d2 / p2;
+    if (!uniform) {
+        fprintf(stderr, "[AMEVA_BACKEND] run-2 context decomposition undefined: decoder passes are not uniform "
+                        "(run 1: %llu dispatches / %llu passes, run 2+: %llu / %llu)\n",
+                (unsigned long long)d1, (unsigned long long)p1, (unsigned long long)d2, (unsigned long long)p2);
+    }
+    g_counters.run_2_context_forward_pass_count = (uniform && p2 > p1) ? p2 - p1 : 0;
+    g_counters.run_2_context_matmuls_per_pass = uniform ? d2 / p2 : 0;
+    g_counters.run_2_context_dispatch_count =
+        g_counters.run_2_context_forward_pass_count * g_counters.run_2_context_matmuls_per_pass;
 }
 
 void ameva_backend_register(void) {
@@ -1536,7 +1600,8 @@ bool ameva_backend_run_cached_gpu_matmul(
         g_counters.weight_cache_hit_count++;
     } else {
         AcVkBuffer * new_weight_buf = nullptr;
-        AcResult res_w = ac_vk_buffer_create(ctx->vk_ctx, weight_bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &new_weight_buf);
+        // rounded up to 4 bytes: Q5_0 rows are 22-byte blocks and matmul_q5_0_f32.comp reads whole 32-bit words
+        AcResult res_w = ac_vk_buffer_create(ctx->vk_ctx, (weight_bytes + 3) & ~(size_t)3, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &new_weight_buf);
         if (res_w != AC_SUCCESS || !new_weight_buf) {
             return false;
         }

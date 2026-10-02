@@ -1,0 +1,53 @@
+#version 450
+// whisper AMEVA backend (adapters/whisper/ggml-backend-ameva.cpp): dst = src0^T x src1 in ggml MUL_MAT terms.
+//   binding 0: src0 F16 weights, raw ggml layout, N rows x K (two halves per uint, row-major)
+//   binding 1: src1 F32 activations, M rows x K
+//   binding 2: dst  F32, M rows x N: dst[m*N + n] = sum_k W[n][k] * A[m][k]
+//   push constants {M, N, K}; local size 16x16; grid ((N+15)/16, (M+15)/16): x -> n, y -> m
+// Both tiles are loaded with consecutive invocations reading consecutive k (coalesced); tileW is padded to
+// avoid shared-memory bank conflicts when read along k.
+// Rewritten 2026-10-02: the binaries pinned before (sha256 4200b2b5..., no source in any branch) were lost.
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer W { uint w[]; };
+layout(std430, binding = 1) readonly buffer A { float a[]; };
+layout(std430, binding = 2) writeonly buffer D { float d[]; };
+
+layout(push_constant) uniform PC { uint M; uint N; uint K; } pc;
+
+shared float tileA[16][17]; // [m_local][k_local]
+shared float tileW[16][17]; // [n_local][k_local]
+
+float load_w(uint n, uint k) {
+    const uint e = n * pc.K + k;
+    const vec2 h = unpackHalf2x16(w[e >> 1]);
+    return (e & 1u) == 0u ? h.x : h.y;
+}
+
+void main() {
+    const uint lx = gl_LocalInvocationID.x;
+    const uint ly = gl_LocalInvocationID.y;
+    const uint n0 = gl_WorkGroupID.x * 16u;
+    const uint m0 = gl_WorkGroupID.y * 16u;
+
+    float acc = 0.0;
+    for (uint k0 = 0u; k0 < pc.K; k0 += 16u) {
+        const uint k = k0 + lx;
+        const uint am = m0 + ly;
+        tileA[ly][lx] = (am < pc.M && k < pc.K) ? a[am * pc.K + k] : 0.0;
+        const uint wn = n0 + ly;
+        tileW[ly][lx] = (wn < pc.N && k < pc.K) ? load_w(wn, k) : 0.0;
+        barrier();
+        for (uint kk = 0u; kk < 16u; ++kk) {
+            acc += tileA[ly][kk] * tileW[lx][kk];
+        }
+        barrier();
+    }
+
+    const uint m = m0 + ly;
+    const uint n = n0 + lx;
+    if (m < pc.M && n < pc.N) {
+        d[m * pc.N + n] = acc;
+    }
+}

@@ -1,9 +1,10 @@
 #!/data/data/com.termux/files/usr/bin/bash
 set -u
 
-LOGFILE="$HOME/s25_stress_bake.log"
-MODEL="$HOME/.cache/termux-llamacpp/models/qwen2.5-0.5b-instruct-q4_k_m.gguf"
-LIB="$PREFIX/lib/libggml-ameva.so"
+LOGFILE="${LOGFILE:-$HOME/s25_stress_bake.log}"
+MODEL="${MODEL:-$HOME/.cache/termux-llamacpp/models/qwen2.5-0.5b-instruct-q4_k_m.gguf}"
+LIB="${LIB:-$PREFIX/lib/libggml-ameva.so}"
+ROUNDS="${ROUNDS:-50}"
 
 echo "==========================================================" | tee -a "$LOGFILE"
 echo "  S25 AMEVA Vulkan Overnight Burn-in Test Started        " | tee -a "$LOGFILE"
@@ -27,16 +28,18 @@ PROMPTS=(
 TOTAL_PASS=0
 TOTAL_FAIL=0
 
-for round in $(seq 1 50); do
+for round in $(seq 1 "$ROUNDS"); do
     IDX=$(( (round - 1) % ${#PROMPTS[@]} ))
     PROMPT="${PROMPTS[$IDX]}"
     
     echo "" | tee -a "$LOGFILE"
-    echo "--- [Round $round / 50] $(date +%H:%M:%S) ---" | tee -a "$LOGFILE"
+    echo "--- [Round $round / $ROUNDS] $(date +%H:%M:%S) ---" | tee -a "$LOGFILE"
     echo "Prompt: \"$PROMPT\"" | tee -a "$LOGFILE"
     
     MEM_BEFORE=$(free -m | awk '/Mem:/ {print $3}')
     
+    # -st and stdin from /dev/null: llama-cli b8471 is a chat UI that otherwise waits at its "> " prompt after the
+    # reply, and every round ended in the 45 s timeout (31/31 rc=124 on 2026-10-02) regardless of the backend.
     OUT=$(GGML_BACKEND_PATH="$LIB" timeout 45 llama-cli \
         -m "$MODEL" \
         -p "$PROMPT" \
@@ -44,7 +47,8 @@ for round in $(seq 1 50); do
         --device AMEVA0 \
         -ngl 99 \
         -fit off \
-        --no-display-prompt 2>&1)
+        -st \
+        --no-display-prompt < /dev/null 2>&1)
     
     RC=$?
     MEM_AFTER=$(free -m | awk '/Mem:/ {print $3}')

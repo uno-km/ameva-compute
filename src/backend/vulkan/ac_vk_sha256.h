@@ -89,6 +89,13 @@ static inline void ac_sha256_final(AcSha256Ctx *ctx, uint8_t hash[]) {
     }
 }
 
+static inline void ac_vk_sha256_hash(const void * data, size_t len, uint8_t out[32]) {
+    AcSha256Ctx ctx;
+    ac_sha256_init(&ctx);
+    ac_sha256_update(&ctx, (const uint8_t *)data, len);
+    ac_sha256_final(&ctx, out);
+}
+
 static inline void ac_sha256_compute_hex(const uint8_t * data, size_t len, char hex_out[65]) {
     AcSha256Ctx ctx;
     uint8_t hash[32];

@@ -55,7 +55,8 @@ try:
                 srt_parse_pass = False
         else:
             srt_parse_pass = False
-except Exception:
+except Exception as e:
+    print(f"SRT_PARSE_ERROR={type(e).__name__}: {e}")
     srt_parse_pass = False
 norm_srt = normalize(" ".join(srt_segments))
 sha_srt = hashlib.sha256(norm_srt.encode("utf-8")).hexdigest()
@@ -75,7 +76,8 @@ try:
                 vtt_segments.append(" ".join(lines[1:]))
             elif len(lines) >= 3 and "-->" in lines[1]:
                 vtt_segments.append(" ".join(lines[2:]))
-except Exception:
+except Exception as e:
+    print(f"VTT_PARSE_ERROR={type(e).__name__}: {e}")
     vtt_parse_pass = False
 norm_vtt = normalize(" ".join(vtt_segments))
 sha_vtt = hashlib.sha256(norm_vtt.encode("utf-8")).hexdigest()
@@ -96,7 +98,8 @@ try:
                 json_parse_pass = False
     else:
         json_parse_pass = False
-except Exception:
+except Exception as e:
+    print(f"JSON_PARSE_ERROR={type(e).__name__}: {e}")
     json_parse_pass = False
 norm_json = normalize(" ".join(json_segments))
 sha_json = hashlib.sha256(norm_json.encode("utf-8")).hexdigest()

@@ -29,8 +29,12 @@ $outDir = Join-Path $root "evidence\poc_cuda_like\$stamp"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
 $pkg = Join-Path $env:TEMP "amuda-poc-$stamp.tar.gz"
+# Windows bsdtar by full path: launched from Git Bash, a bare 'tar' resolves to GNU tar, which reads the
+# "C:" of the archive path as a remote host ("Cannot connect to C: resolve failed").
+$tarExe = Join-Path $env:SystemRoot 'System32\tar.exe'
+if (-not (Test-Path $tarExe)) { Write-Host "Windows tar not found at $tarExe"; exit 2 }
 Push-Location $root
-tar -czf $pkg include src/amuda_rt src/backend src/runtime src/amuda tools/amudacc samples/cuda_like scripts/termux
+& $tarExe -czf $pkg include src/amuda_rt src/backend src/runtime src/amuda tools/amudacc samples/cuda_like scripts/termux
 $tarExit = $LASTEXITCODE
 Pop-Location
 if ($tarExit -ne 0) { Write-Host "tar failed ($tarExit)"; exit 2 }

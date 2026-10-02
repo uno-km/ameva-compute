@@ -26,7 +26,8 @@ def get_local_git_commit(repo_dir):
             cwd=repo_dir, capture_output=True, text=True, check=True
         )
         return res.stdout.strip()
-    except Exception:
+    except (OSError, subprocess.CalledProcessError) as e:
+        print(f"[remote_exec] local git commit unavailable ({e}); recorded as UNKNOWN", file=sys.stderr)
         return "UNKNOWN"
 
 def execute_remote(
