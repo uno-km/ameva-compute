@@ -1,0 +1,15 @@
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index fc9bc8f..d58d9cd 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -6097,6 +6097,10 @@ static vk_device ggml_vk_get_device(size_t idx) {
+             .setPEnabledExtensionNames(device_extensions);
+         device_create_info.setPNext(&device_features2);
+         device->device = device->physical_device.createDevice(device_create_info);
++        VULKAN_HPP_DEFAULT_DISPATCHER.init(device->device);
++        if (!VULKAN_HPP_DEFAULT_DISPATCHER.vkGetBufferDeviceAddress) {
++            device->buffer_device_address = false;
++        }
+ 
+         // Queues
+         ggml_vk_create_queue(device, device->compute_queue, compute_queue_family_index, 0, { vk::PipelineStageFlagBits::eComputeShader | vk::PipelineStageFlagBits::eTransfer }, false);

@@ -41,6 +41,14 @@ AcResult ac_vk_event_wait(AcVkEvent* event, uint64_t timeout_ns) {
     if (!event) {
         return AC_ERR_NULL_POINTER;
     }
+
+    const char* fail_stage = getenv("AMEVA_RUNTIME_FAIL_STAGE");
+    if (!fail_stage) fail_stage = getenv("AMEVA_BACKEND_FAIL_STAGE");
+    if (fail_stage && strcmp(fail_stage, "wait") == 0) {
+        fprintf(stderr, "[AMEVA_RUNTIME_FAIL_INJECTION] Simulated failure at stage: wait\n");
+        return AC_ERR_LAUNCH_TIMEOUT;
+    }
+
     /* Idempotent double-wait */
     if (event->is_signaled) {
         ac_vk_event_retire_resources(event);

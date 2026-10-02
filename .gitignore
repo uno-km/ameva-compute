@@ -5,6 +5,8 @@ build-*
 # Generated consolidated audits
 ameva_compute_consolidated.md
 *.md.tmp
+*consolidated.md
+docs/evidence/stt/*consolidated.md
 
 # Sensitive transcript and internal execution dumps
 chronological_test_*
@@ -16,10 +18,10 @@ __pycache__/
 *.pyc
 docs/evidence/vision/vision_source_code_snapshot.md
 
-
-
-# External binary fixtures (tracked by vlm_external_manifest.json)
+# External binary fixtures
 tests/fixtures/vlm/*.bin
+tests/fixtures/stt/*.wav
+models/*.bin
 
 # Generated logs, patches, wavs, text dumps, and audit evidence
 *.patch
@@ -44,3 +46,4 @@ venv/
 *.so
 *.dll
 *.exe
+.cache/

@@ -1,0 +1,61 @@
+================================================================================
+AMEVA COMPUTE - STT A53 REPEAT 20-ITERATION RAW EVIDENCE LOG
+================================================================================
+COMMAND: /data/data/com.termux/files/home/test_repeat_mixed_encoder
+SOURCE_COMMIT: fea3c77b26affbe19346c0adbe3aca140ab72c29 (third_party/whisper.cpp hook) + 837e4540436232b9c7f631499bfc09c0217e0fea (adapters/whisper/ggml-ameva)
+BINARY_SHA256: a4a3f8538df03a03c5cd001669f7c44bb4f807ad48b8f67c403e3be4e5929456
+MODEL_SHA256: be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21
+START_TIMESTAMP: 2026-09-11T04:17:03.437957+00:00
+END_TIMESTAMP: 2026-09-11T04:19:05.771733+00:00
+PROCESS_EXIT_CODE: 0
+[STDOUT]
+=== [REPEAT STABILITY TEST RESULTS] ===
+ITERATIONS=20
+EXPECTED_AMEVA_OPS=20
+ACTUAL_AMEVA_OPS=20
+GRAPH_MUTATION_LEAK_COUNT=0
+OUTPUT_PARITY_FAILURES=0
+CONTEXT_CREATE_COUNT=1
+KERNEL_CREATE_COUNT=1
+RSS_BEFORE_KB=176008
+RSS_AFTER_KB=176308
+RSS_DELTA_KB=300
+REPEAT_TEST_RESULT=PASS
+[STDERR]
+whisper_init_from_file_with_params_no_state: loading model from '/data/data/com.termux/files/home/ameva-models/stt/ggml-tiny.bin'
+whisper_init_with_params_no_state: use gpu    = 0
+whisper_init_with_params_no_state: flash attn = 1
+whisper_init_with_params_no_state: gpu_device = 0
+whisper_init_with_params_no_state: dtw        = 0
+whisper_init_with_params_no_state: devices    = 1
+whisper_init_with_params_no_state: backends   = 1
+whisper_model_load: loading model
+whisper_model_load: n_vocab       = 51865
+whisper_model_load: n_audio_ctx   = 1500
+whisper_model_load: n_audio_state = 384
+whisper_model_load: n_audio_head  = 6
+whisper_model_load: n_audio_layer = 4
+whisper_model_load: n_text_ctx    = 448
+whisper_model_load: n_text_state  = 384
+whisper_model_load: n_text_head   = 6
+whisper_model_load: n_text_layer  = 4
+whisper_model_load: n_mels        = 80
+whisper_model_load: ftype         = 1
+whisper_model_load: qntvr         = 0
+whisper_model_load: type          = 1 (tiny)
+whisper_model_load: adding 1608 extra tokens
+whisper_model_load: n_langs       = 99
+whisper_model_load:          CPU total size =    77.11 MB
+whisper_model_load: model size    =   77.11 MB
+whisper_backend_init_gpu: no GPU found
+whisper_init_state: kv self size  =    3.15 MB
+whisper_init_state: kv cross size =    9.44 MB
+whisper_init_state: kv pad  size  =    2.36 MB
+whisper_init_state: compute buffer (conv)   =   13.21 MB
+whisper_init_state: compute buffer (encode) =   17.72 MB
+whisper_init_state: compute buffer (cross)  =    3.89 MB
+whisper_init_state: compute buffer (decode) =   95.91 MB
+[AMEVA_STT] Initializing AMEVA Vulkan hardware backend...
+[AMEVA_STT] Physical Device: Mali-G68 (Driver: 0x08001000)
+[AMEVA_STT] AMEVA Vulkan hardware pipeline initialized successfully.
+================================================================================
