@@ -29,6 +29,15 @@ struct AcVkContext {
     uint32_t active_child_kernels;
     uint32_t submission_outstanding_count;
     uint32_t timestamp_valid_bits;
+    /* Vulkan 1.1 properties not in VkPhysicalDeviceLimits (0 when the driver does not report them) */
+    uint64_t max_memory_allocation_size;
+    uint32_t subgroup_size;
+    /* Descriptor sets keyed by (set layout, bound buffer ranges), shared by every dispatch path of this context.
+       Owned by ac_vk_dispatch.cpp; NULL until the first dispatch. */
+    void* desc_cache;
+    /* Command batches between begin and submit/abort: the descriptor cache is only trimmed when this and
+       submission_outstanding_count are both 0. */
+    uint32_t recording_batches;
 };
 
 /**
@@ -49,6 +58,15 @@ AcResult ac_vk_context_create(AcVkContext** out_ctx);
  * @return AC_SUCCESS on success, error code on failure.
  */
 AcResult ac_vk_context_destroy(AcVkContext* ctx);
+
+/**
+ * @brief Descriptor set cache maintenance (implemented in ac_vk_dispatch.cpp).
+ * The purge functions free every cached set that references the buffer / uses the layout; callers invoke them
+ * only after the object has no outstanding submission (its destroy already enforces that).
+ */
+void ac_vk_desc_cache_purge_buffer(AcVkContext* ctx, VkBuffer buffer);
+void ac_vk_desc_cache_purge_layout(AcVkContext* ctx, VkDescriptorSetLayout layout);
+void ac_vk_desc_cache_destroy(AcVkContext* ctx);
 
 #ifdef __cplusplus
 }

@@ -1,0 +1,372 @@
+#version 450
+// AMEVA QMM: ggml MUL_MAT (dst = src0^T x src1) with src0 read in its raw ggml storage format.
+//
+// One source, one variant per weight type (compile with -DTYPE_<T>) and per activation-column tile (-DNCOLS=1|8).
+// Every type is normalised to "units" of 32 consecutive weights: legacy blocks are one unit, k-quant super-blocks
+// (256 weights) are eight. decode_unit() turns one unit into 32 floats with exactly the arithmetic of ggml's
+// dequantize_row_<type> (ggml-quants.c), working on whole 32-bit words: nibble masks, bit spreading and
+// sign-extending bitfield extracts instead of per-byte loops. The shared main loop then dots the unit with
+// NCOLS activation rows, so a decoded unit is reused NCOLS times (prompt processing).
+//
+//   binding 0: src0, raw bytes; row n at offset_src0 + n * (K / BLOCK_ELEMS) * BLOCK_BYTES (offset in BYTES, % 4 == 0)
+//   binding 1: src1 F32 read as vec4: row m at offset_src1 + m*stride_src1 floats (both multiples of 4 floats)
+//   binding 2: dst F32: dst[offset_dst + m*stride_dst + n]
+//   push constants: M, K, N, offset_src0 (bytes), offset_src1, offset_dst, stride_src1, stride_dst (floats);
+//   K % BLOCK_ELEMS == 0. N may be a slice of the weight rows (the host splits weights larger than one binding:
+//   it binds the slice's first row and points offset_dst at the slice's first column).
+//   grid ((N + 3) / 4, (M + NCOLS - 1) / NCOLS): a workgroup owns 4 output rows x NCOLS activation rows.
+//   64 invocations = 4 rows x 16 lanes; the lanes of a row stride its units, so neighbouring lanes read
+//   neighbouring units (coalesced) and the 16 partial sums are reduced in shared memory (no subgroup features,
+//   so the same SPIR-V runs on Adreno (wave 64/128) and Mali (warp 16)).
+//
+// Block layouts (ggml-common.h), byte offsets inside one block:
+//   F32  [0..128)  32 x f32                  F16/BF16 [0..64) 32 x 16-bit
+//   Q4_0 d@0 qs[16]@2              (18)      Q4_1 d@0 m@2 qs[16]@4          (20)
+//   Q5_0 d@0 qh[4]@2 qs[16]@6      (22)      Q5_1 d@0 m@2 qh[4]@4 qs[16]@8  (24)
+//   Q8_0 d@0 qs[32] int8@2         (34)
+//   Q2_K scales[16]@0 qs[64]@16 d@80 dmin@82                    (84,  256 weights)
+//   Q3_K hmask[32]@0 qs[64]@32 scales[12]@96 d@108              (110, 256 weights)
+//   Q4_K d@0 dmin@2 scales[12]@4 qs[128]@16                     (144, 256 weights)
+//   Q5_K d@0 dmin@2 scales[12]@4 qh[32]@16 qs[128]@48           (176, 256 weights)
+//   Q6_K ql[128]@0 qh[64]@128 scales[16] int8@192 d@208         (210, 256 weights)
+//   IQ4_NL d@0 qs[16]@2                                         (18)
+//   IQ4_XS d@0 scales_h@2 scales_l[4]@4 qs[128]@8               (136, 256 weights)
+// Every field starts at an even offset and every block size is even, so all multi-byte reads are at even
+// addresses: ld32 needs at most two words, 16-bit fields never straddle a word.
+
+#ifndef NCOLS
+#define NCOLS 1
+#endif
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer Src0 { uint wq[]; };
+layout(std430, binding = 1) readonly buffer Src1 { vec4 a4[]; };
+layout(std430, binding = 2) writeonly buffer Dst { float dst[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint M;
+    uint K;
+    uint N;
+    uint offset_src0;
+    uint offset_src1;
+    uint offset_dst;
+    uint stride_src1;
+    uint stride_dst;
+} pc;
+
+#define ROWS 4u
+#define LANES 16u
+shared float red[NCOLS * 64];
+
+uint g_last; // last addressable word of binding 0
+
+// Word index clamped to the binding: a clamped word only ever feeds bytes outside the block being decoded.
+uint ldw(uint wi) { return wq[min(wi, g_last)]; }
+// 32-bit little-endian load at an even byte address
+uint ld32(uint a) {
+    const uint wi = a >> 2u;
+    if ((a & 2u) == 0u) {
+        return ldw(wi);
+    }
+    return (ldw(wi) >> 16u) | (ldw(wi + 1u) << 16u);
+}
+uint ld16(uint a) { return (ldw(a >> 2u) >> ((a & 2u) * 8u)) & 0xFFFFu; }
+float ldh(uint a) { return unpackHalf2x16(ld16(a)).x; }
+uint byte_of(uint w, uint k) { return (w >> (8u * k)) & 0xFFu; }
+vec4 u8x4(uint w) { return vec4(uvec4(w, w >> 8u, w >> 16u, w >> 24u) & 0xFFu); }
+vec4 s8x4(uint w) {
+    const int x = int(w);
+    return vec4(bitfieldExtract(x, 0, 8), bitfieldExtract(x, 8, 8), bitfieldExtract(x, 16, 8), bitfieldExtract(x, 24, 8));
+}
+// bit k (k = 0..3) of x moved to bit 4 of byte k
+uint spread4(uint x) { return ((x & 1u) << 4u) | ((x & 2u) << 11u) | ((x & 4u) << 18u) | ((x & 8u) << 25u); }
+
+#if defined(TYPE_F32)
+#define BLOCK_ELEMS 32u
+#define BLOCK_BYTES 128u
+void decode_unit(uint blk, uint ui, out vec4 w[8]) {
+    const uint wi = blk >> 2u;
+    for (uint i = 0u; i < 8u; ++i) {
+        w[i] = uintBitsToFloat(uvec4(ldw(wi + 4u * i), ldw(wi + 4u * i + 1u), ldw(wi + 4u * i + 2u), ldw(wi + 4u * i + 3u)));
+    }
+}
+#elif defined(TYPE_F16)
+#define BLOCK_ELEMS 32u
+#define BLOCK_BYTES 64u
+void decode_unit(uint blk, uint ui, out vec4 w[8]) {
+    const uint wi = blk >> 2u;
+    for (uint i = 0u; i < 8u; ++i) {
+        w[i] = vec4(unpackHalf2x16(ldw(wi + 2u * i)), unpackHalf2x16(ldw(wi + 2u * i + 1u)));
+    }
+}
+#elif defined(TYPE_BF16)
+#define BLOCK_ELEMS 32u
+#define BLOCK_BYTES 64u
+void decode_unit(uint blk, uint ui, out vec4 w[8]) {
+    const uint wi = blk >> 2u;
+    for (uint i = 0u; i < 8u; ++i) {
+        const uint x = ldw(wi + 2u * i), y = ldw(wi + 2u * i + 1u);
+        w[i] = uintBitsToFloat(uvec4(x << 16u, x & 0xFFFF0000u, y << 16u, y & 0xFFFF0000u));
+    }
+}
+#elif defined(TYPE_Q4_0)
+#define BLOCK_ELEMS 32u
+#define BLOCK_BYTES 18u
+// y[j] = ((qs[j] & 0xF) - 8) * d, y[j+16] = ((qs[j] >> 4) - 8) * d
+void decode_unit(uint blk, uint ui, out vec4 w[8]) {
+    const float d = ldh(blk);
+    for (uint i = 0u; i < 4u; ++i) {
+        const uint q = ld32(blk + 2u + 4u * i);
+        w[i] = (u8x4(q & 0x0F0F0F0Fu) - 8.0) * d;
+        w[i + 4u] = (u8x4((q >> 4u) & 0x0F0F0F0Fu) - 8.0) * d;
+    }
+}
+#elif defined(TYPE_Q4_1)
+#define BLOCK_ELEMS 32u
+#define BLOCK_BYTES 20u
+// y[j] = (qs[j] & 0xF) * d + m, y[j+16] = (qs[j] >> 4) * d + m
+void decode_unit(uint blk, uint ui, out vec4 w[8]) {
+    const float d = ldh(blk), m = ldh(blk + 2u);
+    for (uint i = 0u; i < 4u; ++i) {
+        const uint q = ld32(blk + 4u + 4u * i);
+        w[i] = u8x4(q & 0x0F0F0F0Fu) * d + m;
+        w[i + 4u] = u8x4((q >> 4u) & 0x0F0F0F0Fu) * d + m;
+    }
+}
+#elif defined(TYPE_Q5_0)
+#define BLOCK_ELEMS 32u
+#define BLOCK_BYTES 22u
+// x = nibble | (qh bit j << 4); y = (x - 16) * d
+void decode_unit(uint blk, uint ui, out vec4 w[8]) {
+    const float d = ldh(blk);
+    const uint qh = ld32(blk + 2u);
+    for (uint i = 0u; i < 4u; ++i) {
+        const uint q = ld32(blk + 6u + 4u * i);
+        w[i] = (u8x4((q & 0x0F0F0F0Fu) | spread4(qh >> (4u * i))) - 16.0) * d;
+        w[i + 4u] = (u8x4(((q >> 4u) & 0x0F0F0F0Fu) | spread4(qh >> (16u + 4u * i))) - 16.0) * d;
+    }
+}
+#elif defined(TYPE_Q5_1)
+#define BLOCK_ELEMS 32u
+#define BLOCK_BYTES 24u
+// x = nibble | (qh bit j << 4); y = x * d + m
+void decode_unit(uint blk, uint ui, out vec4 w[8]) {
+    const float d = ldh(blk), m = ldh(blk + 2u);
+    const uint qh = ld32(blk + 4u);
+    for (uint i = 0u; i < 4u; ++i) {
+        const uint q = ld32(blk + 8u + 4u * i);
+        w[i] = u8x4((q & 0x0F0F0F0Fu) | spread4(qh >> (4u * i))) * d + m;
+        w[i + 4u] = u8x4(((q >> 4u) & 0x0F0F0F0Fu) | spread4(qh >> (16u + 4u * i))) * d + m;
+    }
+}
+#elif defined(TYPE_Q8_0)
+#define BLOCK_ELEMS 32u
+#define BLOCK_BYTES 34u
+// y = int8 qs[j] * d
+void decode_unit(uint blk, uint ui, out vec4 w[8]) {
+    const float d = ldh(blk);
+    for (uint i = 0u; i < 8u; ++i) {
+        w[i] = s8x4(ld32(blk + 2u + 4u * i)) * d;
+    }
+}
+#elif defined(TYPE_Q2_K)
+#define BLOCK_ELEMS 256u
+#define BLOCK_BYTES 84u
+// unit u: half h = u/4 (qs[32h..32h+32)), shift 2*(u%4); weights 0..15 use scales[8h+2j], 16..31 scales[8h+2j+1]
+// y = d * (sc & 0xF) * ((q >> shift) & 3) - dmin * (sc >> 4)
+void decode_unit(uint blk, uint ui, out vec4 w[8]) {
+    const float d = ldh(blk + 80u), dmin = ldh(blk + 82u);
+    const uint h = ui >> 2u, j = ui & 3u;
+    const uint sc2 = ld16(blk + 8u * h + 2u * j);
+    const uint s0 = sc2 & 0xFFu, s1 = sc2 >> 8u;
+    const float dl0 = d * float(s0 & 0xFu), ml0 = dmin * float(s0 >> 4u);
+    const float dl1 = d * float(s1 & 0xFu), ml1 = dmin * float(s1 >> 4u);
+    for (uint i = 0u; i < 8u; ++i) {
+        const vec4 q = u8x4((ld32(blk + 16u + 32u * h + 4u * i) >> (2u * j)) & 0x03030303u);
+        w[i] = (i < 4u) ? q * dl0 - ml0 : q * dl1 - ml1;
+    }
+}
+#elif defined(TYPE_Q3_K)
+#define BLOCK_ELEMS 256u
+#define BLOCK_BYTES 110u
+// 16 six-bit scales unpacked from 12 bytes (ggml dequantize_row_q3_K kmask1/kmask2 shuffle), minus 32.
+// unit u: h = u/4, j = u%4: q = (qs[32h + l] >> 2j) & 3, hbit = hmask[l] bit (4h + j); y = d * scale * (q - 4 + 4*hbit)
+void decode_unit(uint blk, uint ui, out vec4 w[8]) {
+    const float d = ldh(blk + 108u);
+    const uint h = ui >> 2u, j = ui & 3u;
+    const uint a0 = ld32(blk + 96u), a1 = ld32(blk + 100u), t = ld32(blk + 104u);
+    const uint si = 8u * h + 2u * j;
+    uint S;
+    switch (si >> 2u) {
+        case 0u: S = (a0 & 0x0F0F0F0Fu) | (((t >> 0u) & 0x03030303u) << 4u); break;
+        case 1u: S = (a1 & 0x0F0F0F0Fu) | (((t >> 2u) & 0x03030303u) << 4u); break;
+        case 2u: S = ((a0 >> 4u) & 0x0F0F0F0Fu) | (((t >> 4u) & 0x03030303u) << 4u); break;
+        default: S = ((a1 >> 4u) & 0x0F0F0F0Fu) | (((t >> 6u) & 0x03030303u) << 4u); break;
+    }
+    const float dl0 = d * float(int(byte_of(S, si & 3u)) - 32);
+    const float dl1 = d * float(int(byte_of(S, (si & 3u) + 1u)) - 32);
+    for (uint i = 0u; i < 8u; ++i) {
+        const uint q = (ld32(blk + 32u + 32u * h + 4u * i) >> (2u * j)) & 0x03030303u;
+        const uint hb = (ld32(blk + 4u * i) >> (4u * h + j)) & 0x01010101u;
+        const vec4 v = u8x4(q | (hb << 2u)) - 4.0;
+        w[i] = v * ((i < 4u) ? dl0 : dl1);
+    }
+}
+#elif defined(TYPE_Q4_K) || defined(TYPE_Q5_K)
+#define BLOCK_ELEMS 256u
+#if defined(TYPE_Q4_K)
+#define BLOCK_BYTES 144u
+#define QS_OFFSET 16u
+#else
+#define BLOCK_BYTES 176u
+#define QS_OFFSET 48u
+#endif
+// get_scale_min_k4(u): 6-bit scale and min of unit u from scales[12]
+// unit u: q bytes qs[32*(u/2) + l], low nibble for even u, high for odd; Q5_K adds qh[l] bit u as bit 4
+// y = d * sc * q - dmin * mn
+void decode_unit(uint blk, uint ui, out vec4 w[8]) {
+    const float d = ldh(blk), dmin = ldh(blk + 2u);
+    const uint s0 = ld32(blk + 4u), s1 = ld32(blk + 8u), s2 = ld32(blk + 12u);
+    uint sc, mn;
+    if (ui < 4u) {
+        sc = byte_of(s0, ui) & 63u;
+        mn = byte_of(s1, ui) & 63u;
+    } else {
+        sc = (byte_of(s2, ui - 4u) & 0xFu) | ((byte_of(s0, ui - 4u) >> 6u) << 4u);
+        mn = (byte_of(s2, ui - 4u) >> 4u) | ((byte_of(s1, ui - 4u) >> 6u) << 4u);
+    }
+    const float dl = d * float(sc), ml = dmin * float(mn);
+    const uint qb = blk + QS_OFFSET + 32u * (ui >> 1u);
+    const uint sh = 4u * (ui & 1u);
+    for (uint i = 0u; i < 8u; ++i) {
+        uint q = (ld32(qb + 4u * i) >> sh) & 0x0F0F0F0Fu;
+#if defined(TYPE_Q5_K)
+        q |= ((ld32(blk + 16u + 4u * i) >> ui) & 0x01010101u) << 4u;
+#endif
+        w[i] = u8x4(q) * dl - ml;
+    }
+}
+#elif defined(TYPE_Q6_K)
+#define BLOCK_ELEMS 256u
+#define BLOCK_BYTES 210u
+// unit u: h = u/4, t = u%4: q = nibble (t/2) of ql[64h + 32(t%2) + l] | ((qh[32h + l] >> 2t) & 3) << 4
+// y = d * scales[8h + 2t + (l >= 16)] * (q - 32), scales are int8
+void decode_unit(uint blk, uint ui, out vec4 w[8]) {
+    const float d = ldh(blk + 208u);
+    const uint h = ui >> 2u, t = ui & 3u;
+    const int sc2 = int(ld16(blk + 192u + 8u * h + 2u * t));
+    const float dl0 = d * float(bitfieldExtract(sc2, 0, 8));
+    const float dl1 = d * float(bitfieldExtract(sc2, 8, 8));
+    const uint qlb = blk + 64u * h + 32u * (t & 1u);
+    const uint sh = 4u * (t >> 1u);
+    for (uint i = 0u; i < 8u; ++i) {
+        const uint lo = (ld32(qlb + 4u * i) >> sh) & 0x0F0F0F0Fu;
+        const uint hi = ((ld32(blk + 128u + 32u * h + 4u * i) >> (2u * t)) & 0x03030303u) << 4u;
+        w[i] = (u8x4(lo | hi) - 32.0) * ((i < 4u) ? dl0 : dl1);
+    }
+}
+#elif defined(TYPE_IQ4_NL) || defined(TYPE_IQ4_XS)
+// Non-linear 4-bit codebook kvalues_iq4nl (ggml-common.h), held in shared memory: the nibble is a dynamic index.
+#define KV_LUT
+shared float s_kv[16];
+// signed byte i of the codebook {-127,-104,-83,-65, -49,-35,-22,-10, 1,13,25,38, 53,69,89,113}
+float kv_init(uint i) {
+    const uint w = (i < 8u) ? ((i < 4u) ? 0xBFAD9881u : 0xF6EADDCFu) : ((i < 12u) ? 0x26190D01u : 0x71594535u);
+    return float(bitfieldExtract(int(w), int(8u * (i & 3u)), 8));
+}
+// codebook values of the low nibbles of the 4 bytes of q
+vec4 kv4(uint q) { return vec4(s_kv[q & 0xFu], s_kv[(q >> 8u) & 0xFu], s_kv[(q >> 16u) & 0xFu], s_kv[(q >> 24u) & 0xFu]); }
+#if defined(TYPE_IQ4_NL)
+#define BLOCK_ELEMS 32u
+#define BLOCK_BYTES 18u
+// y[j] = d * kvalues[qs[j] & 0xF], y[j+16] = d * kvalues[qs[j] >> 4]
+void decode_unit(uint blk, uint ui, out vec4 w[8]) {
+    const float d = ldh(blk);
+    for (uint i = 0u; i < 4u; ++i) {
+        const uint q = ld32(blk + 2u + 4u * i);
+        w[i] = kv4(q) * d;
+        w[i + 4u] = kv4(q >> 4u) * d;
+    }
+}
+#else
+#define BLOCK_ELEMS 256u
+#define BLOCK_BYTES 136u
+// unit ib: ls = ((scales_l[ib/2] >> 4*(ib%2)) & 0xF) | (((scales_h >> 2*ib) & 3) << 4), dl = d * (ls - 32)
+// y[j] = dl * kvalues[qs[16ib + j] & 0xF], y[j+16] = dl * kvalues[qs[16ib + j] >> 4]
+void decode_unit(uint blk, uint ui, out vec4 w[8]) {
+    const float d = ldh(blk);
+    const uint ls = ((ld32(blk + 4u) >> (4u * ui)) & 0xFu) | (((ld16(blk + 2u) >> (2u * ui)) & 3u) << 4u);
+    const float dl = d * float(int(ls) - 32);
+    const uint qb = blk + 8u + 16u * ui;
+    for (uint i = 0u; i < 4u; ++i) {
+        const uint q = ld32(qb + 4u * i);
+        w[i] = kv4(q) * dl;
+        w[i + 4u] = kv4(q >> 4u) * dl;
+    }
+}
+#endif
+#else
+#error "define one TYPE_<T>"
+#endif
+
+#define UNITS_PER_BLOCK (BLOCK_ELEMS / 32u)
+
+void main() {
+    g_last = uint(wq.length()) - 1u;
+    const uint tid = gl_LocalInvocationID.x;
+    const uint r = tid / LANES;
+    const uint lane = tid % LANES;
+    const uint n = gl_WorkGroupID.x * ROWS + r;
+    const uint m0 = gl_WorkGroupID.y * uint(NCOLS);
+#if defined(KV_LUT)
+    if (tid < 16u) {
+        s_kv[tid] = kv_init(tid);
+    }
+    barrier();
+#endif
+
+    float acc[NCOLS];
+    for (uint c = 0u; c < uint(NCOLS); ++c) {
+        acc[c] = 0.0;
+    }
+
+    if (n < pc.N) {
+        const uint row = pc.offset_src0 + n * (pc.K / BLOCK_ELEMS) * BLOCK_BYTES;
+        const uint units = pc.K >> 5u;
+        for (uint u = lane; u < units; u += LANES) {
+            vec4 w[8];
+            decode_unit(row + (u / UNITS_PER_BLOCK) * BLOCK_BYTES, u % UNITS_PER_BLOCK, w);
+            for (uint c = 0u; c < uint(NCOLS); ++c) {
+                if (m0 + c < pc.M) {
+                    const uint a = (pc.offset_src1 + (m0 + c) * pc.stride_src1 + 32u * u) >> 2u;
+                    float s = 0.0;
+                    for (uint i = 0u; i < 8u; ++i) {
+                        s += dot(w[i], a4[a + i]);
+                    }
+                    acc[c] += s;
+                }
+            }
+        }
+    }
+
+    for (uint c = 0u; c < uint(NCOLS); ++c) {
+        red[c * 64u + tid] = acc[c];
+    }
+    barrier();
+    for (uint st = LANES / 2u; st > 0u; st >>= 1u) {
+        if (lane < st) {
+            for (uint c = 0u; c < uint(NCOLS); ++c) {
+                red[c * 64u + tid] += red[c * 64u + tid + st];
+            }
+        }
+        barrier();
+    }
+    if (lane == 0u && n < pc.N) {
+        for (uint c = 0u; c < uint(NCOLS); ++c) {
+            if (m0 + c < pc.M) {
+                dst[pc.offset_dst + (m0 + c) * pc.stride_dst + n] = red[c * 64u + tid];
+            }
+        }
+    }
+}

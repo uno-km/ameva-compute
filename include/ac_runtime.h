@@ -436,11 +436,143 @@ AcResult ac_runtime_batch_abort(
 
 /**
  * @brief Destroy a command batch handle.
+ * A recording batch is aborted. A submitted batch and the events obtained from it share one submission: the
+ * fence and command buffer are released with the last of them, after the GPU finished, in any destruction order.
  *
  * @param batch Batch handle to destroy.
  */
 void ac_runtime_batch_destroy(
     AcCommandBatch* batch
+);
+
+/* ========================================================================= */
+/* Graph Batches (AMUDA 2.2 additions; descriptor layouts of 2.1 unchanged)  */
+/* ========================================================================= */
+
+/** Upper bound for AcBatchDesc.max_dispatches. */
+#define AC_BATCH_MAX_DISPATCHES 65536u
+/** No automatic hazard analysis: the caller inserts ac_runtime_batch_barrier() between dependent dispatches. */
+#define AC_BATCH_FLAG_EXPLICIT_BARRIERS (1u << 0)
+/** Record GPU timestamps around the batch; read them from the completion event (ac_runtime_event_get_timing). */
+#define AC_BATCH_FLAG_TIMESTAMPS        (1u << 1)
+/** Also record a GPU timestamp after every dispatch (profiling); read with ac_runtime_batch_get_dispatch_times.
+ *  Begin fails with AC_ERR_FEATURE_NOT_SUPPORTED when the queue has no timestamps. */
+#define AC_BATCH_FLAG_DISPATCH_TIMESTAMPS (1u << 2)
+
+typedef struct {
+    uint32_t abi_version;    /* Must match AC_ABI_VERSION */
+    uint32_t struct_size;    /* Must match sizeof(AcBatchDesc) */
+    uint32_t max_dispatches; /* 1 .. AC_BATCH_MAX_DISPATCHES */
+    uint32_t flags;          /* AC_BATCH_FLAG_* (unknown bits rejected) */
+} AcBatchDesc;
+
+/**
+ * @brief One buffer range bound to one kernel binding.
+ * offset: multiple of AcDeviceLimits.min_storage_buffer_offset_alignment.
+ * range:  > 0, offset + range <= buffer size, range <= AcDeviceLimits.max_storage_buffer_range.
+ */
+typedef struct {
+    AcBuffer* buffer;
+    uint64_t offset;
+    uint64_t range;
+} AcBufferBinding;
+
+typedef struct {
+    uint32_t abi_version;     /* Set by the caller: AC_ABI_VERSION */
+    uint32_t struct_size;     /* Set by the caller: sizeof(AcBatchStats) */
+    uint32_t dispatches;
+    uint32_t barriers;        /* barriers recorded (explicit, or inserted by the automatic analysis) */
+    uint32_t elided_barriers; /* automatic analysis only: dispatches recorded without a barrier */
+    uint32_t flushes;         /* intermediate submissions made by ac_runtime_batch_flush */
+    uint64_t descriptor_cache_hits;
+    uint64_t descriptor_cache_misses;
+} AcBatchStats;
+
+typedef struct {
+    uint32_t abi_version;     /* Set by the caller: AC_ABI_VERSION */
+    uint32_t struct_size;     /* Set by the caller: sizeof(AcDeviceLimits) */
+    uint64_t max_storage_buffer_range;
+    uint64_t min_storage_buffer_offset_alignment;
+    uint64_t max_memory_allocation_size; /* 0: not reported by the driver */
+    uint32_t max_compute_workgroup_count[3];
+    uint32_t max_compute_workgroup_size[3];
+    uint32_t max_compute_workgroup_invocations;
+    uint32_t max_compute_shared_memory_size;
+    uint32_t max_push_constants_size;
+    uint32_t subgroup_size;              /* 0: not reported by the driver */
+    uint32_t timestamps_supported;
+    float timestamp_period_ns;
+} AcDeviceLimits;
+
+/**
+ * @brief Report the device limits that govern buffer binding and dispatch geometry.
+ */
+AcResult ac_runtime_context_get_limits(
+    const AcContext* ctx,
+    AcDeviceLimits* out_limits
+);
+
+/**
+ * @brief Begin a batch with an explicit capacity and mode (see AC_BATCH_FLAG_*).
+ */
+AcResult ac_runtime_batch_begin_ex(
+    AcContext* context,
+    const AcBatchDesc* desc,
+    AcCommandBatch** out_batch
+);
+
+/**
+ * @brief Record a dispatch that binds buffer ranges instead of whole buffers.
+ * binding_count must equal the kernel's binding count; descriptor sets are cached per context, so a range
+ * combination recorded again (in this or a later batch) costs no descriptor allocation.
+ */
+AcResult ac_runtime_batch_dispatch_bindings(
+    AcCommandBatch* batch,
+    AcKernel* kernel,
+    const AcBufferBinding* bindings,
+    uint32_t binding_count,
+    const void* push_constants,
+    size_t push_constants_size,
+    AcDim3 grid_dim
+);
+
+/**
+ * @brief Record a full compute-to-compute memory barrier.
+ */
+AcResult ac_runtime_batch_barrier(
+    AcCommandBatch* batch
+);
+
+/**
+ * @brief Submit the dispatches recorded so far and keep recording into the same batch.
+ * Bounds the GPU time of each submission (mobile drivers reset the GPU when a single submission runs for seconds) and
+ * lets the GPU start while the rest is recorded. Order and visibility are those of one submission: barriers recorded
+ * later cover the flushed commands, and the completion event of ac_runtime_batch_submit signals after all of them.
+ * A no-op when nothing was recorded since the previous flush. On failure the batch is aborted (destroy it).
+ */
+AcResult ac_runtime_batch_flush(
+    AcCommandBatch* batch
+);
+
+/**
+ * @brief GPU time of every dispatch of a completed batch begun with AC_BATCH_FLAG_DISPATCH_TIMESTAMPS.
+ * out_ns[i] is the time from the end of dispatch i-1 (or the batch start) to the end of dispatch i, in ns; dispatches
+ * recorded without a barrier in between may overlap, and the overlap is attributed to the later one.
+ * Requires the completion event to have been waited on (AC_ERR_DEVICE_BUSY otherwise) and capacity >= dispatches.
+ */
+AcResult ac_runtime_batch_get_dispatch_times(
+    const AcCommandBatch* batch,
+    uint64_t* out_ns,
+    uint32_t capacity,
+    uint32_t* out_count
+);
+
+/**
+ * @brief Recording statistics of a batch (valid in any state).
+ */
+AcResult ac_runtime_batch_get_stats(
+    const AcCommandBatch* batch,
+    AcBatchStats* out_stats
 );
 
 /* ========================================================================= */

@@ -180,6 +180,9 @@ AcResult ac_vk_buffer_destroy(AcVkBuffer* buf) {
 
     VkDevice device = buf->owning_context->device;
 
+    /* cached descriptor sets that reference this buffer must go before the buffer does */
+    ac_vk_desc_cache_purge_buffer(buf->owning_context, buf->buffer);
+
     if (buf->mapped_ptr) {
         vkUnmapMemory(device, buf->memory);
         buf->mapped_ptr = NULL;

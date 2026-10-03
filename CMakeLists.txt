@@ -217,6 +217,7 @@ set(AMEVA_GGML_SOURCES
     adapters/llama/ggml-ameva/ggml-ameva.cpp
     adapters/llama/ggml-ameva/ggml-ameva-buffer.cpp
     adapters/llama/ggml-ameva/ggml-ameva-device.cpp
+    adapters/llama/ggml-ameva/ggml-ameva-repack.cpp
 )
 
 if(DEFINED GGML_AMEVA_BUILD_COMMIT)

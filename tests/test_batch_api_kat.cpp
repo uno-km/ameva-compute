@@ -2,16 +2,14 @@
  * @file test_batch_api_kat.cpp
  * @brief Phase B1 Known-Answer-Test (KAT) & Verification Suite for Vulkan Command Batching
  *
- * Verifies:
- *   1. BATCH_2_DISPATCH_KAT: 2-dispatch dependency with automatic compute-to-compute barrier
- *   2. BATCH_8_DISPATCH_KAT: 8-dispatch chain in a single submission
- *   3. BATCH_BARRIER_ELISION_GATE: Barrier elision on disjoint buffer dispatches
- *   4. Lifecycle Invariants:
- *      - DESCRIPTOR_RECYCLE_BEFORE_FENCE_COUNT = 0
- *      - BUFFER_RELEASE_BEFORE_FENCE_COUNT = 0
- *      - KERNEL_RELEASE_BEFORE_FENCE_COUNT = 0
- *      - LIVE_BATCH_RESOURCE_COUNT_AFTER_WAIT = 0
+ * Verifies (legacy ac_runtime_batch_begin / ac_runtime_batch_dispatch, automatic hazard analysis):
+ *   1. BATCH_2_DISPATCH_KAT: 2-dispatch dependency, numerical result and exactly one automatic barrier
+ *   2. BATCH_BARRIER_ELISION_GATE: no barrier between dispatches with disjoint outputs (checked via batch stats)
+ *   3. BATCH_8_DISPATCH_KAT: 8-dispatch chain in a single submission
+ *   4. Context destruction is rejected while a batch is open and succeeds after everything is released
  *   5. Two-tier failure injection: Child process exits with RC=10 upon batch failure
+ * The graph batch API (begin_ex, range bindings, explicit barriers, ownership order) is covered by
+ * tests/test_batch_graph_kat.cpp.
  */
 
 #include <stdio.h>
@@ -195,6 +193,17 @@ int main(int argc, char** argv) {
     };
     CHECK_AC(ac_runtime_batch_dispatch(batch2, kernel, &ldesc2, nullptr));
 
+    // the automatic analysis must have put exactly one barrier between the dependent dispatches
+    AcBatchStats st2 = {};
+    st2.abi_version = AC_ABI_VERSION;
+    st2.struct_size = sizeof(st2);
+    CHECK_AC(ac_runtime_batch_get_stats(batch2, &st2));
+    printf("  -> dispatches=%u barriers=%u elided=%u\n", st2.dispatches, st2.barriers, st2.elided_barriers);
+    if (st2.dispatches != 2 || st2.barriers != 1) {
+        printf("  -> FAIL: expected 2 dispatches separated by 1 barrier\n");
+        return 1;
+    }
+
     AcEvent* comp_ev2 = nullptr;
     CHECK_AC(ac_runtime_batch_submit(batch2, &comp_ev2));
     CHECK_AC(ac_runtime_event_wait(comp_ev2, 5000000000ULL));
@@ -239,6 +248,16 @@ int main(int argc, char** argv) {
         AC_ABI_VERSION, sizeof(AcLaunchDesc), kernel, bufs_disjoint, 3, pc1, sizeof(pc1), { 1, 1, 1 }
     };
     CHECK_AC(ac_runtime_batch_dispatch(batch_elide, kernel, &ldesc_disjoint, nullptr));
+
+    AcBatchStats st_el = {};
+    st_el.abi_version = AC_ABI_VERSION;
+    st_el.struct_size = sizeof(st_el);
+    CHECK_AC(ac_runtime_batch_get_stats(batch_elide, &st_el));
+    printf("  -> dispatches=%u barriers=%u elided=%u\n", st_el.dispatches, st_el.barriers, st_el.elided_barriers);
+    if (st_el.barriers != 0 || st_el.elided_barriers != 2) {
+        printf("  -> FAIL: disjoint outputs must not be separated by a barrier\n");
+        return 1;
+    }
 
     AcEvent* comp_ev_elide = nullptr;
     CHECK_AC(ac_runtime_batch_submit(batch_elide, &comp_ev_elide));
@@ -308,34 +327,14 @@ int main(int argc, char** argv) {
     CHECK_AC(ac_runtime_context_destroy(ctx));
     printf("  -> Context clean destroy after all batches retired: PASS\n");
 
-    printf("\n=== ALL PHASE B1 KAT GATES PASSED ===\n");
-    printf("BATCH_2_DISPATCH_KAT=PASS\n");
-    printf("BATCH_8_DISPATCH_KAT=PASS\n");
-    printf("BATCH_DEPENDENCY_VISIBILITY_GATE=PASS\n");
-    printf("BATCH_BARRIER_ELISION_GATE=PASS\n");
-    printf("DESCRIPTOR_RECYCLE_BEFORE_FENCE_COUNT=0\n");
-    printf("BUFFER_RELEASE_BEFORE_FENCE_COUNT=0\n");
-    printf("KERNEL_RELEASE_BEFORE_FENCE_COUNT=0\n");
-    printf("LIVE_BATCH_RESOURCE_COUNT_AFTER_WAIT=0\n");
-    printf("PUBLIC_BATCH_API_BACKEND_NEUTRAL=true\n");
-    printf("LEGACY_DISPATCH_SEMANTICS_UNCHANGED=true\n");
-    printf("BATCH_MAX_DISPATCHES=8\n");
-
-    printf("\n=== KAT TEST ORACLE & AUDIT HISTORY ===\n");
-    printf("KAT_REFERENCE_ORACLE_INITIAL_DEFECT=true\n");
-    printf("KAT_REFERENCE_ORACLE_FIXED=true\n");
-    printf("KAT_REFERENCE_FORMULA=B @ A.T (Shader: src1 @ src0.T)\n");
-    printf("SHADER_FORMULA=src1 @ src0.T (binding 1: src1, binding 0: src0)\n");
-    printf("KAT_MUTATION_ORACLE_REVALIDATED=true\n");
-
-    printf("\n=== EXTENDED RESOURCE LIFECYCLE INVARIANTS ===\n");
-    printf("COMMAND_BUFFER_RESET_BEFORE_FENCE_COUNT=0\n");
-    printf("COMMAND_POOL_RESET_BEFORE_FENCE_COUNT=0\n");
-    printf("EVENT_DESTROY_BEFORE_COMPLETION_COUNT=0\n");
-    printf("BATCH_ABORT_LIVE_RESOURCE_COUNT_AFTER_CLEANUP=0\n");
-    printf("BATCH_SUBMIT_FAILURE_LIVE_RESOURCE_COUNT_AFTER_CLEANUP=0\n");
-    printf("BATCH_WAIT_FAILURE_LIVE_RESOURCE_COUNT_AFTER_CLEANUP=0\n");
-    printf("FAILED_BATCH_LIVE_RESOURCE_COUNT_AFTER_CLEANUP=0\n");
+    // Only what this run checked is reported. (Earlier revisions printed a list of "=0"/"=true" invariants here
+    // that no code measured.)
+    printf("\n=== PHASE B1 KAT RESULTS (each verified above) ===\n");
+    printf("BATCH_2_DISPATCH_KAT=PASS (numerical result, 1 automatic barrier)\n");
+    printf("BATCH_BARRIER_ELISION_GATE=PASS (0 barriers between disjoint outputs)\n");
+    printf("BATCH_8_DISPATCH_KAT=PASS (8 dispatches, one submission)\n");
+    printf("BATCH_CONTEXT_DESTROY_WHILE_OPEN=REJECTED (AC_ERR_RESOURCE_IN_USE)\n");
+    printf("BATCH_CONTEXT_DESTROY_AFTER_RELEASE=PASS\n");
 
     return 0;
 }

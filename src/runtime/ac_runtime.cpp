@@ -1150,4 +1150,169 @@ void ac_runtime_batch_destroy(
     free(batch);
 }
 
+/* ========================================================================= */
+/* Graph Batch Additions                                                     */
+/* ========================================================================= */
+
+AcResult ac_runtime_context_get_limits(const AcContext* ctx, AcDeviceLimits* out_limits) {
+    if (!ctx || ctx->magic != AC_MAGIC_CONTEXT || !ctx->vk_ctx) {
+        return AC_ERR_INVALID_CONTEXT;
+    }
+    if (!out_limits) {
+        return AC_ERR_NULL_POINTER;
+    }
+    if (out_limits->abi_version != AC_ABI_VERSION || out_limits->struct_size != sizeof(AcDeviceLimits)) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    const AcVkContext* vk = ctx->vk_ctx;
+    const VkPhysicalDeviceLimits* l = &vk->device_properties.limits;
+    out_limits->max_storage_buffer_range = l->maxStorageBufferRange;
+    out_limits->min_storage_buffer_offset_alignment = l->minStorageBufferOffsetAlignment;
+    out_limits->max_memory_allocation_size = vk->max_memory_allocation_size;
+    for (int i = 0; i < 3; ++i) {
+        out_limits->max_compute_workgroup_count[i] = l->maxComputeWorkGroupCount[i];
+        out_limits->max_compute_workgroup_size[i] = l->maxComputeWorkGroupSize[i];
+    }
+    out_limits->max_compute_workgroup_invocations = l->maxComputeWorkGroupInvocations;
+    out_limits->max_compute_shared_memory_size = l->maxComputeSharedMemorySize;
+    out_limits->max_push_constants_size = l->maxPushConstantsSize;
+    out_limits->subgroup_size = vk->subgroup_size;
+    out_limits->timestamps_supported = (l->timestampComputeAndGraphics && vk->timestamp_valid_bits > 0) ? 1u : 0u;
+    out_limits->timestamp_period_ns = l->timestampPeriod;
+    return AC_SUCCESS;
+}
+
+AcResult ac_runtime_batch_begin_ex(
+    AcContext* context,
+    const AcBatchDesc* desc,
+    AcCommandBatch** out_batch
+) {
+    if (out_batch) {
+        *out_batch = NULL;
+    }
+    if (!context || !desc || !out_batch) {
+        return AC_ERR_NULL_POINTER;
+    }
+    if (context->magic != AC_MAGIC_CONTEXT) {
+        return AC_ERR_INVALID_CONTEXT;
+    }
+    if (desc->abi_version != AC_ABI_VERSION || desc->struct_size != sizeof(AcBatchDesc)) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (desc->max_dispatches == 0 || desc->max_dispatches > AC_BATCH_MAX_DISPATCHES) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (desc->flags & ~(AC_BATCH_FLAG_EXPLICIT_BARRIERS | AC_BATCH_FLAG_TIMESTAMPS | AC_BATCH_FLAG_DISPATCH_TIMESTAMPS)) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    uint32_t vk_flags = 0;
+    if (desc->flags & AC_BATCH_FLAG_EXPLICIT_BARRIERS) vk_flags |= AC_VK_BATCH_FLAG_EXPLICIT_BARRIERS;
+    if (desc->flags & AC_BATCH_FLAG_TIMESTAMPS) vk_flags |= AC_VK_BATCH_FLAG_TIMESTAMPS;
+    if (desc->flags & AC_BATCH_FLAG_DISPATCH_TIMESTAMPS) vk_flags |= AC_VK_BATCH_FLAG_DISPATCH_TIMESTAMPS;
+
+    AcVkCommandBatch* vk_batch = NULL;
+    AcResult res = ac_vk_batch_begin_ex(context->vk_ctx, desc->max_dispatches, vk_flags, &vk_batch);
+    if (res != AC_SUCCESS) {
+        return res;
+    }
+    AcCommandBatch* batch = (AcCommandBatch*)calloc(1, sizeof(AcCommandBatch));
+    if (!batch) {
+        ac_vk_batch_destroy(vk_batch);
+        return AC_ERR_OUT_OF_HOST_MEMORY;
+    }
+    batch->magic = AC_MAGIC_BATCH;
+    batch->owning_context = context;
+    batch->vk_batch = vk_batch;
+    context->active_child_batches++;
+    *out_batch = batch;
+    return AC_SUCCESS;
+}
+
+AcResult ac_runtime_batch_dispatch_bindings(
+    AcCommandBatch* batch,
+    AcKernel* kernel,
+    const AcBufferBinding* bindings,
+    uint32_t binding_count,
+    const void* push_constants,
+    size_t push_constants_size,
+    AcDim3 grid_dim
+) {
+    if (!batch || !kernel || (binding_count > 0 && !bindings)) {
+        return AC_ERR_NULL_POINTER;
+    }
+    if (batch->magic != AC_MAGIC_BATCH || kernel->magic != AC_MAGIC_KERNEL || !kernel->vk_kernel) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (kernel->owning_context != batch->owning_context) {
+        return AC_ERR_CONTEXT_MISMATCH;
+    }
+    if (binding_count > 16) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (push_constants_size > 128 || (push_constants_size > 0 && !push_constants)) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    AcVkBuffer* vk_bufs[16];
+    uint64_t offsets[16];
+    uint64_t ranges[16];
+    for (uint32_t i = 0; i < binding_count; ++i) {
+        const AcBuffer* b = bindings[i].buffer;
+        if (!b || b->magic != AC_MAGIC_BUFFER || !b->vk_buf) {
+            return AC_ERR_NULL_POINTER;
+        }
+        if (b->owning_context != batch->owning_context) {
+            return AC_ERR_CONTEXT_MISMATCH;
+        }
+        vk_bufs[i] = b->vk_buf;
+        offsets[i] = bindings[i].offset;
+        ranges[i] = bindings[i].range;
+    }
+    return ac_vk_batch_dispatch_ranges(batch->vk_batch, kernel->vk_kernel, vk_bufs, offsets, ranges, binding_count,
+                                       push_constants, push_constants_size, grid_dim.x, grid_dim.y, grid_dim.z);
+}
+
+AcResult ac_runtime_batch_barrier(AcCommandBatch* batch) {
+    if (!batch || batch->magic != AC_MAGIC_BATCH) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    return ac_vk_batch_barrier(batch->vk_batch);
+}
+
+AcResult ac_runtime_batch_flush(AcCommandBatch* batch) {
+    if (!batch || batch->magic != AC_MAGIC_BATCH) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    return ac_vk_batch_flush(batch->vk_batch);
+}
+
+AcResult ac_runtime_batch_get_dispatch_times(const AcCommandBatch* batch, uint64_t* out_ns, uint32_t capacity,
+                                             uint32_t* out_count) {
+    if (out_count) {
+        *out_count = 0;
+    }
+    if (!batch || batch->magic != AC_MAGIC_BATCH) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    return ac_vk_batch_get_dispatch_times(batch->vk_batch, out_ns, capacity, out_count);
+}
+
+AcResult ac_runtime_batch_get_stats(const AcCommandBatch* batch, AcBatchStats* out_stats) {
+    if (!batch || batch->magic != AC_MAGIC_BATCH) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (!out_stats) {
+        return AC_ERR_NULL_POINTER;
+    }
+    if (out_stats->abi_version != AC_ABI_VERSION || out_stats->struct_size != sizeof(AcBatchStats)) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    out_stats->dispatches = ac_vk_batch_get_dispatch_count(batch->vk_batch);
+    out_stats->barriers = ac_vk_batch_get_inserted_barriers(batch->vk_batch);
+    out_stats->elided_barriers = ac_vk_batch_get_elided_barriers(batch->vk_batch);
+    out_stats->flushes = ac_vk_batch_get_flush_count(batch->vk_batch);
+    ac_vk_batch_get_cache_stats(batch->vk_batch, &out_stats->descriptor_cache_hits,
+                                &out_stats->descriptor_cache_misses);
+    return AC_SUCCESS;
+}
+
 

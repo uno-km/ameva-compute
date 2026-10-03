@@ -1,4 +1,5 @@
 #include "ggml-ameva.h"
+#include "ggml-ameva-impl.h"
 #include "ggml-backend-impl.h"
 #include "ac_runtime.h"
 
@@ -26,6 +27,9 @@ static std::atomic<int64_t> g_ameva_event_create_count{0};
 static std::atomic<int64_t> g_ameva_event_destroy_count{0};
 static std::atomic<int64_t> g_ameva_q5_0_staging_alloc_count{0};
 static std::atomic<int64_t> g_ameva_q5_0_staging_free_count{0};
+static std::atomic<int64_t> g_ameva_repacked_tensor_count{0};
+static std::atomic<int64_t> g_ameva_repacked_bytes{0};
+static std::atomic<int64_t> g_ameva_qmv_mul_mat_count{0};
 static std::atomic<int>     g_ameva_failure_injection{0};
 
 #ifndef GGML_AMEVA_BUILD_COMMIT
@@ -96,6 +100,18 @@ int64_t ggml_backend_ameva_get_q5_0_staging_free_count(void) {
     return g_ameva_q5_0_staging_free_count.load();
 }
 
+int64_t ggml_backend_ameva_get_repacked_tensor_count(void) {
+    return g_ameva_repacked_tensor_count.load();
+}
+
+int64_t ggml_backend_ameva_get_repacked_bytes(void) {
+    return g_ameva_repacked_bytes.load();
+}
+
+int64_t ggml_backend_ameva_get_qmv_mul_mat_count(void) {
+    return g_ameva_qmv_mul_mat_count.load();
+}
+
 void ggml_backend_ameva_reset_counters(void) {
     g_ameva_supports_query_count.store(0);
     g_ameva_supported_op_count.store(0);
@@ -108,6 +124,8 @@ void ggml_backend_ameva_reset_counters(void) {
     g_ameva_event_destroy_count.store(0);
     g_ameva_q5_0_staging_alloc_count.store(0);
     g_ameva_q5_0_staging_free_count.store(0);
+    g_ameva_qmv_mul_mat_count.store(0);
+    // the repacked tensor and byte counts describe stored weights, not activity, and are not reset
 }
 
 void ameva_increment_gpu_op_count(void) {
@@ -120,6 +138,19 @@ void ameva_increment_q5_0_cpu_dequant_count(void) {
 
 void ameva_increment_f32_gpu_sgemm_dispatch_count(void) {
     g_ameva_f32_gpu_sgemm_dispatch_count.fetch_add(1);
+}
+
+void ameva_count_mul_mat(int64_t n) {
+    g_ameva_f32_gpu_sgemm_dispatch_count.fetch_add(n);
+}
+
+void ameva_count_qmv_mul_mat(int64_t n) {
+    g_ameva_qmv_mul_mat_count.fetch_add(n);
+}
+
+void ameva_count_repacked_tensor(uint64_t bytes) {
+    g_ameva_repacked_tensor_count.fetch_add(1);
+    g_ameva_repacked_bytes.fetch_add((int64_t)bytes);
 }
 
 void ameva_increment_context_create_count(void) {
@@ -235,95 +266,30 @@ static ggml_backend_buffer_type_t ggml_backend_ameva_device_get_buffer_type(ggml
     return ggml_backend_ameva_buffer_type(0);
 }
 
-// STRICT CONTRACT: Supports F32xF32->F32 and Q5_0xF32->F32 2D contiguous non-batched MatMul
+const char* ameva_op_unsupported_reason(const struct ggml_tensor* op); // ggml-ameva.cpp
+void ameva_audit_decline(const struct ggml_tensor* op, const char* why); // ggml-ameva.cpp
+
+// One contract for planning and execution: graph_compute rejects exactly what this rejects. Metadata-only nodes
+// (graph inputs, views) are accepted: they compute nothing on any backend, and declining them made the scheduler
+// put views on the CPU between AMEVA nodes (extra splits) and made ggml's test-backend-ops skip every case, because
+// it asks about each tensor of a test graph, inputs included.
 static bool ggml_backend_ameva_device_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor* op) {
     (void)dev;
     g_ameva_supports_query_count.fetch_add(1);
-    if (!op) return false;
-
-    // 1. Must be GGML_OP_MUL_MAT
-    if (op->op != GGML_OP_MUL_MAT) {
+    if (const char* why = ameva_op_unsupported_reason(op)) {
+        ameva_audit_decline(op, why);
         return false;
     }
-
-    const struct ggml_tensor* src0 = op->src[0];
-    const struct ggml_tensor* src1 = op->src[1];
-    if (!src0 || !src1) {
-        return false;
-    }
-
-    // 2. Strict DTYPE check:
-    // Supported:
-    // (SRC0 = F32, SRC1 = F32, DST = F32)
-    // (SRC0 = Q5_0, SRC1 = F32, DST = F32)
-    if (op->type != GGML_TYPE_F32 || src1->type != GGML_TYPE_F32) {
-        return false;
-    }
-    if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_Q5_0 && src0->type != GGML_TYPE_Q4_K) {
-        return false;
-    }
-
-    // 3. CONTIGUOUS_ONLY = true
-    if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(src1) || !ggml_is_contiguous(op)) {
-        return false;
-    }
-
-    // 4. BATCH_DIMENSIONS_SUPPORTED = false (ne[2] == 1 && ne[3] == 1)
-    if (op->ne[2] != 1 || op->ne[3] != 1 ||
-        src0->ne[2] != 1 || src0->ne[3] != 1 ||
-        src1->ne[2] != 1 || src1->ne[3] != 1) {
-        return false;
-    }
-
-    // 5. Inner dimension match: K dimension must match
-    if (src0->ne[0] != src1->ne[0]) {
-        return false;
-    }
-
-    int64_t K = src0->ne[0];
-    int64_t N = src0->ne[1];
-
-    // 6. Q5_0 alignment and shape contract checks
-    if (src0->type == GGML_TYPE_Q5_0) {
-        if (K % 32 != 0) {
-            return false;
-        }
-        size_t expected_q5_row_bytes = (size_t)(K / 32) * 22;
-        if (ggml_row_size(src0->type, K) != expected_q5_row_bytes) {
-            return false;
-        }
-    }
-
-    // 6b. Q4_K alignment: super-block size is 256 elements
-    if (src0->type == GGML_TYPE_Q4_K) {
-        if (K % 256 != 0) {
-            return false;
-        }
-    }
-
-    // 7. F32 row bytes check
-    if (ggml_row_size(src1->type, K) != (size_t)K * sizeof(float)) {
-        return false;
-    }
-    if (ggml_row_size(op->type, N) != (size_t)N * sizeof(float)) {
-        return false;
-    }
-
-    // Approved: increment supported op count
     g_ameva_supported_op_count.fetch_add(1);
     return true;
 }
 
+// AMEVA buffers only. The kernels bind Vulkan buffers; a tensor in host memory of another backend cannot be bound,
+// so the scheduler must copy such inputs into AMEVA buffers before a split runs (which it does exactly when this
+// returns false). The previous engine accepted plain "CPU" buffers and staged them itself, one copy per node.
 static bool ggml_backend_ameva_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
     (void)dev;
-    // Accept AMEVA native buffers
-    if (buft == ggml_backend_ameva_buffer_type(0)) return true;
-    // Accept CPU host buffers — enables hybrid execution where CPU-resident
-    // tensors (quantized weights) are dequantized on CPU, then GPU matmul
-    // operates on the resulting F32 data via temporary staging buffers.
-    const char* name = ggml_backend_buft_name(buft);
-    if (name && (strcmp(name, "CPU") == 0 || strncmp(name, "CPU", 3) == 0)) return true;
-    return false;
+    return buft == ggml_backend_ameva_buffer_type(0);
 }
 
 static bool ggml_backend_ameva_device_offload_op(ggml_backend_dev_t dev, const struct ggml_tensor* op) {
@@ -418,12 +384,25 @@ const char* ameva_abi_check(void) {
             what = "struct ggml_backend_buffer_type";
         } else if (ggml_backend_dev_backend_reg(&pd) != &g_ameva_reg) {
             what = "struct ggml_backend_device";
-        } else if (strcmp(ggml_op_name(GGML_OP_MUL_MAT), "MUL_MAT") != 0) {
-            what = "enum ggml_op (GGML_OP_MUL_MAT)";
-        } else if (strcmp(ggml_type_name(GGML_TYPE_F32), "f32") != 0 || strcmp(ggml_type_name(GGML_TYPE_Q5_0), "q5_0") != 0 ||
-                   strcmp(ggml_type_name(GGML_TYPE_Q4_K), "q4_K") != 0) {
-            what = "enum ggml_type";
-        } else {
+        }
+        // every enum value the graph engine switches on must mean the same op/type in the loaded libggml-base
+        static const struct { enum ggml_op op; const char* name; } kOps[] = {
+            {GGML_OP_NONE, "NONE"}, {GGML_OP_DUP, "DUP"}, {GGML_OP_ADD, "ADD"}, {GGML_OP_SUB, "SUB"},
+            {GGML_OP_MUL, "MUL"}, {GGML_OP_DIV, "DIV"}, {GGML_OP_RMS_NORM, "RMS_NORM"}, {GGML_OP_MUL_MAT, "MUL_MAT"},
+            {GGML_OP_SCALE, "SCALE"}, {GGML_OP_CPY, "CPY"}, {GGML_OP_CONT, "CONT"}, {GGML_OP_RESHAPE, "RESHAPE"},
+            {GGML_OP_VIEW, "VIEW"}, {GGML_OP_PERMUTE, "PERMUTE"}, {GGML_OP_TRANSPOSE, "TRANSPOSE"},
+            {GGML_OP_GET_ROWS, "GET_ROWS"}, {GGML_OP_SET_ROWS, "SET_ROWS"}, {GGML_OP_ROPE, "ROPE"},
+            {GGML_OP_FLASH_ATTN_EXT, "FLASH_ATTN_EXT"}, {GGML_OP_UNARY, "UNARY"}, {GGML_OP_GLU, "GLU"}};
+        static const struct { enum ggml_type type; const char* name; } kTypes[] = {
+            {GGML_TYPE_F32, "f32"}, {GGML_TYPE_F16, "f16"}, {GGML_TYPE_I32, "i32"}, {GGML_TYPE_I64, "i64"},
+            {GGML_TYPE_Q5_0, "q5_0"}, {GGML_TYPE_Q4_K, "q4_K"}};
+        for (const auto& o : kOps) {
+            if (!what && strcmp(ggml_op_name(o.op), o.name) != 0) what = "enum ggml_op";
+        }
+        for (const auto& t : kTypes) {
+            if (!what && strcmp(ggml_type_name(t.type), t.name) != 0) what = "enum ggml_type";
+        }
+        if (!what) {
             // struct ggml_tensor: build a MUL_MAT node with libggml-base and read it back with our layout
             struct ggml_init_params ip = { 8 * ggml_tensor_overhead(), nullptr, true };
             struct ggml_context* tctx = ggml_init(ip);

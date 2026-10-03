@@ -1,0 +1,46 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// AMEVA CPY / CONT / DUP between f32 and f16 tensors of any strides and shapes with the same element count.
+// Element k of the source in row-major order of its own shape goes to element k of the destination in row-major
+// order of the destination shape (ggml_compute_forward_dup semantics).
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+
+layout(std430, binding = 0) readonly buffer A { uint a[]; };
+layout(std430, binding = 1) buffer D { uint d[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint a_ne0, a_ne1, a_ne2, a_ne3;
+    uint a_off, a_s0, a_s1, a_s2;
+    uint a_s3, d_ne0, d_ne1, d_ne2;
+    uint d_off, d_s0, d_s1, d_s2;
+    uint d_s3, src_f16, dst_f16;
+} pc;
+
+void main() {
+    const uint k = ameva_linear_id();
+    if (k >= pc.a_ne0 * pc.a_ne1 * pc.a_ne2 * pc.a_ne3) return;
+    uint t = k;
+    const uint a0 = t % pc.a_ne0;
+    t /= pc.a_ne0;
+    const uint a1 = t % pc.a_ne1;
+    t /= pc.a_ne1;
+    const uint a2 = t % pc.a_ne2;
+    const uint a3 = t / pc.a_ne2;
+    t = k;
+    const uint b0 = t % pc.d_ne0;
+    t /= pc.d_ne0;
+    const uint b1 = t % pc.d_ne1;
+    t /= pc.d_ne1;
+    const uint b2 = t % pc.d_ne2;
+    const uint b3 = t / pc.d_ne2;
+    const uint si = pc.a_off + a0 * pc.a_s0 + a1 * pc.a_s1 + a2 * pc.a_s2 + a3 * pc.a_s3;
+    const uint di = pc.d_off + b0 * pc.d_s0 + b1 * pc.d_s1 + b2 * pc.d_s2 + b3 * pc.d_s3;
+    const float v = pc.src_f16 != 0u ? AMEVA_LOAD_F16(a, si) : uintBitsToFloat(a[si]);
+    if (pc.dst_f16 != 0u) {
+        AMEVA_STORE_F16(d, di, v);
+    } else {
+        d[di] = floatBitsToUint(v);
+    }
+}

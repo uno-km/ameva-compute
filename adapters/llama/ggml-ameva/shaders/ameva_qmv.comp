@@ -1,0 +1,136 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : require
+// AMEVA QMV: ggml MUL_MAT (dst = src0^T x src1) with src0 stored in the AMEVA repacked layout (ggml-ameva-repack.h).
+// Region Q holds the low quant bits of every 32-weight unit in canonical order, region H the high bits, region S the
+// ggml scale bytes of every block. A unit's quants are one aligned 8/16/32-byte load (the ggml block layout needs 4..9
+// unaligned 32-bit loads), and the dequantized values are exactly those of ggml's dequantize_row_<type>.
+//
+// Variants: -DTYPE_<T>, -DROWS=<weight rows per lane group>, -DCOLS=<activation rows per workgroup>.
+//   COLS == 1 (token generation): the 8 activation vec4 of a unit stay in registers and serve ROWS weight rows.
+//   COLS  > 1 (prompt): every decoded unit is dotted with COLS activation rows read from memory.
+// Work split: the 64 invocations of a workgroup form 64/tpr groups of tpr lanes (tpr = 16, 32 or 64, chosen by the
+// host from K). A group owns ROWS consecutive weight rows; its lanes stride over the units of those rows, so
+// neighbouring lanes read neighbouring units, and the partial sums are reduced in shared memory (no subgroup
+// operations: subgroup sizes differ between Adreno and Mali).
+// Per unit the lane computes s = sum_i dot(w[i], a[i]) and adds s to its accumulator, as ameva_qmm does.
+//
+//   binding 0: Q, binding 1: H (any range when the type has no high bits), binding 2: S as 32-bit words,
+//   binding 3: src1 F32 as vec4, binding 4: dst F32
+//   push: M, K, N (weight rows of this dispatch), q_off, h_off (in Q / H vector elements), s_off (bytes, even),
+//         a_off, d_off, s1, sd (floats; a_off and s1 multiples of 4), tpr
+//   grid: (ceil(N / (ROWS * 64 / tpr)), ceil(M / COLS))
+
+#ifndef ROWS
+#define ROWS 4
+#endif
+#ifndef COLS
+#define COLS 1
+#endif
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+
+#include "ameva_qdecode.glsl"
+
+layout(std430, binding = 3) readonly buffer BufA { vec4 a4[]; };
+layout(std430, binding = 4) writeonly buffer BufD { float dst[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint M, K, N, q_off;
+    uint h_off, s_off, a_off, d_off;
+    uint s1, sd, tpr;
+} pc;
+
+shared float red[ROWS * COLS * 64];
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    qdecode_init(tid);
+    const uint tpr = pc.tpr;
+    const uint g = tid / tpr;
+    const uint lane = tid - g * tpr;
+    const uint row0 = (gl_WorkGroupID.x * (64u / tpr) + g) * uint(ROWS);
+    const uint col0 = gl_WorkGroupID.y * uint(COLS);
+    const uint U = pc.K >> 5u;
+    const uint s_row = (pc.K / BLOCK_ELEMS) * SB;
+
+    float acc[ROWS * COLS];
+    [[unroll]] for (uint k = 0u; k < uint(ROWS * COLS); ++k) {
+        acc[k] = 0.0;
+    }
+
+#if COLS == 1
+    for (uint u = lane; u < U; u += tpr) {
+        const uint b = u / UPB;
+        const uint j = u - b * UPB;
+        vec4 a[8];
+        const uint ab = (pc.a_off + col0 * pc.s1 + 32u * u) >> 2u;
+        [[unroll]] for (uint i = 0u; i < 8u; ++i) {
+            a[i] = a4[ab + i];
+        }
+        [[unroll]] for (uint r = 0u; r < uint(ROWS); ++r) {
+            const uint n = row0 + r;
+            if (n < pc.N) {
+                vec4 w[8];
+                decode(pc.q_off + (n * U + u) * QPER, pc.h_off + n * U + u, pc.s_off + n * s_row + b * SB, j, w);
+                float s = 0.0;
+                [[unroll]] for (uint i = 0u; i < 8u; ++i) {
+                    s += dot(w[i], a[i]);
+                }
+                acc[r] += s;
+            }
+        }
+    }
+#else
+    // One weight row per lane group and its bounds test outside the unit loop: with the test inside (as in the
+    // token-generation loop above) the Mali-G68 compiler produced code that ran this loop at half the speed.
+#if ROWS != 1
+#error "COLS > 1 takes one weight row per lane group"
+#endif
+    if (row0 < pc.N) {
+        for (uint u = lane; u < U; u += tpr) {
+            const uint b = u / UPB;
+            vec4 w[8];
+            decode(pc.q_off + (row0 * U + u) * QPER, pc.h_off + row0 * U + u, pc.s_off + row0 * s_row + b * SB,
+                   u - b * UPB, w);
+            [[unroll]] for (uint c = 0u; c < uint(COLS); ++c) {
+                if (col0 + c < pc.M) {
+                    const uint ab = (pc.a_off + (col0 + c) * pc.s1 + 32u * u) >> 2u;
+                    float s = 0.0;
+                    [[unroll]] for (uint i = 0u; i < 8u; ++i) {
+                        s += dot(w[i], a4[ab + i]);
+                    }
+                    acc[c] += s;
+                }
+            }
+        }
+    }
+#endif
+
+    [[unroll]] for (uint k = 0u; k < uint(ROWS * COLS); ++k) {
+        red[k * 64u + tid] = acc[k];
+    }
+    barrier();
+    for (uint st = tpr >> 1u; st > 0u; st >>= 1u) {
+        if (lane < st) {
+            [[unroll]] for (uint k = 0u; k < uint(ROWS * COLS); ++k) {
+                red[k * 64u + tid] += red[k * 64u + tid + st];
+            }
+        }
+        barrier();
+    }
+    if (lane == 0u) {
+        [[unroll]] for (uint r = 0u; r < uint(ROWS); ++r) {
+            const uint n = row0 + r;
+            if (n < pc.N) {
+                [[unroll]] for (uint c = 0u; c < uint(COLS); ++c) {
+                    if (col0 + c < pc.M) {
+                        dst[pc.d_off + (col0 + c) * pc.sd + n] = red[(r * uint(COLS) + c) * 64u + tid];
+                    }
+                }
+            }
+        }
+    }
+}

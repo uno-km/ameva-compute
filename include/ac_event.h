@@ -41,7 +41,23 @@ struct AcVkEvent {
     AcVkKernel* bound_kernel;
     AcVkBuffer** bound_buffers;
     uint32_t bound_buffer_count;
+    /* Events of a command batch (completion event, per-dispatch logical events) own none of the Vulkan objects
+       above: they hold a reference on the batch's submission, which owns the fence, command buffer, query pool and
+       resource retention and is released with its last reference (batch or event). NULL for a single dispatch. */
+    struct AcVkSubmission* shared;
 };
+
+/* Shared batch submissions (implemented in ac_vk_dispatch.cpp) */
+struct AcVkSubmission;
+/* AC_ERR_INVALID_ARGUMENT if the batch was never submitted (still recording, or aborted) */
+AcResult ac_vk_submission_wait(struct AcVkSubmission* submission, uint64_t timeout_ns);
+bool ac_vk_submission_is_signaled(const struct AcVkSubmission* submission);
+bool ac_vk_submission_is_submitted(const struct AcVkSubmission* submission);
+void ac_vk_submission_get_timing(const struct AcVkSubmission* submission, uint64_t* out_wall_latency_ns,
+                                 uint64_t* out_gpu_duration_ns, bool* out_has_timestamps);
+/* Drops one reference; the last one releases the Vulkan objects. A submitted, unsignaled submission is waited for
+   first; if that wait fails the objects are deliberately leaked (freeing pending work is undefined behaviour). */
+void ac_vk_submission_release(struct AcVkSubmission* submission);
 
 /**
  * @brief Wait for GPU execution to complete on this event.

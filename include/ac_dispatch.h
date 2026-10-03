@@ -103,11 +103,63 @@ AcResult ac_vk_dispatch(
 
 typedef struct AcVkCommandBatch AcVkCommandBatch;
 
+/* Upper bound on dispatches per batch: a runaway recorder fails instead of exhausting host memory. */
+#define AC_VK_BATCH_MAX_DISPATCHES 65536u
+/* No automatic hazard analysis: the caller inserts ac_vk_batch_barrier() (it knows the byte ranges). */
+#define AC_VK_BATCH_FLAG_EXPLICIT_BARRIERS (1u << 0)
+/* Record GPU timestamps at batch begin and end (ignored when the queue has no timestamp support). */
+#define AC_VK_BATCH_FLAG_TIMESTAMPS        (1u << 1)
+/* Additionally record a timestamp after every dispatch (profiling; read with ac_vk_batch_get_dispatch_times). */
+#define AC_VK_BATCH_FLAG_DISPATCH_TIMESTAMPS (1u << 2)
+
+/* Legacy entry: 0 means 8 dispatches, automatic whole-buffer hazard tracking, no timestamps. */
 AcResult ac_vk_batch_begin(
     AcVkContext* ctx,
     uint32_t max_dispatches,
     AcVkCommandBatch** out_batch
 );
+
+AcResult ac_vk_batch_begin_ex(
+    AcVkContext* ctx,
+    uint32_t max_dispatches,
+    uint32_t flags,
+    AcVkCommandBatch** out_batch
+);
+
+/* Dispatch with explicit descriptor ranges: offsets[i] must be a multiple of the device's minimum offset alignment
+ * for the binding's descriptor type, ranges[i] > 0, offsets[i] + ranges[i] <= buffer size and ranges[i] <= the
+ * device's maximum range for that descriptor type. */
+AcResult ac_vk_batch_dispatch_ranges(
+    AcVkCommandBatch* batch,
+    AcVkKernel* kernel,
+    AcVkBuffer** buffers,
+    const uint64_t* offsets,
+    const uint64_t* ranges,
+    uint32_t buffer_count,
+    const void* push_constants,
+    size_t push_constants_size,
+    uint32_t group_x,
+    uint32_t group_y,
+    uint32_t group_z
+);
+
+/* Full compute -> compute memory barrier (shader writes visible to later shader reads and writes). */
+AcResult ac_vk_batch_barrier(AcVkCommandBatch* batch);
+
+/* Submits the commands recorded so far (no fence) and continues recording into a new command buffer; the final
+ * ac_vk_batch_submit's fence covers every flushed part. No-op when nothing was recorded since the last flush. */
+AcResult ac_vk_batch_flush(AcVkCommandBatch* batch);
+uint32_t ac_vk_batch_get_flush_count(const AcVkCommandBatch* batch);
+
+/* After completion of a batch begun with AC_VK_BATCH_FLAG_DISPATCH_TIMESTAMPS: GPU time of each dispatch in
+ * recording order, in ns (from the end of the previous dispatch, or from batch start for the first). */
+AcResult ac_vk_batch_get_dispatch_times(const AcVkCommandBatch* batch, uint64_t* out_ns, uint32_t capacity,
+                                        uint32_t* out_count);
+
+uint32_t ac_vk_batch_get_inserted_barriers(const AcVkCommandBatch* batch);
+uint32_t ac_vk_batch_get_elided_barriers(const AcVkCommandBatch* batch);
+uint32_t ac_vk_batch_get_dispatch_count(const AcVkCommandBatch* batch);
+void ac_vk_batch_get_cache_stats(const AcVkCommandBatch* batch, uint64_t* hits, uint64_t* misses);
 
 AcResult ac_vk_batch_dispatch(
     AcVkCommandBatch* batch,

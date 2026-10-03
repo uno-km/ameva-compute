@@ -133,6 +133,26 @@ AcResult ac_vk_context_create(AcVkContext** out_ctx) {
     ctx->active_child_kernels = 0;
     ctx->submission_outstanding_count = 0;
     ctx->timestamp_valid_bits = timestampValidBits;
+    ctx->max_memory_allocation_size = 0;
+    ctx->subgroup_size = 0;
+    ctx->desc_cache = NULL;
+    ctx->recording_batches = 0;
+
+    /* Vulkan 1.1 core queries (the instance requests 1.1): maxMemoryAllocationSize and the subgroup size. A device
+       that only implements 1.0 reports neither; the fields then stay 0 ("not reported"), they are never guessed. */
+    if (selectedProps.apiVersion >= VK_MAKE_VERSION(1, 1, 0)) {
+        VkPhysicalDeviceSubgroupProperties subgroup = {};
+        subgroup.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+        VkPhysicalDeviceMaintenance3Properties maint3 = {};
+        maint3.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES;
+        maint3.pNext = &subgroup;
+        VkPhysicalDeviceProperties2 props2 = {};
+        props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        props2.pNext = &maint3;
+        vkGetPhysicalDeviceProperties2(selectedDevice, &props2);
+        ctx->max_memory_allocation_size = (uint64_t)maint3.maxMemoryAllocationSize;
+        ctx->subgroup_size = subgroup.subgroupSize;
+    }
 
     *out_ctx = ctx;
     return AC_SUCCESS;
@@ -152,9 +172,13 @@ AcResult ac_vk_context_destroy(AcVkContext* ctx) {
     if (ctx->submission_outstanding_count > 0) {
         return AC_ERR_DEVICE_BUSY;
     }
+    if (ctx->recording_batches > 0) {
+        return AC_ERR_RESOURCE_IN_USE;
+    }
 
     if (ctx->device != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(ctx->device);
+        ac_vk_desc_cache_destroy(ctx);
         if (ctx->command_pool != VK_NULL_HANDLE) {
             vkDestroyCommandPool(ctx->device, ctx->command_pool, NULL);
             ctx->command_pool = VK_NULL_HANDLE;

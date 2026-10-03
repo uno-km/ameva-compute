@@ -1,4 +1,6 @@
 #include "ggml-ameva.h"
+#include "ggml-ameva-impl.h"
+#include "ggml-ameva-repack.h"
 #include "ggml-backend-impl.h"
 #include "ac_runtime.h"
 
@@ -6,18 +8,171 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
+#include <vector>
 
-// Forward declaration of internal context accessor
-AcContext* ameva_get_ac_context();
 void ameva_increment_buffer_create_count(void);
 void ameva_increment_buffer_destroy_count(void);
 
-struct ggml_backend_ameva_buffer_context {
-    AcBuffer* ac_buf;
-    void* mapped_ptr;
-    size_t size;
-};
+// =============================================================================
+// Repacked weights
+// =============================================================================
+// A quantized weight is stored in the AMEVA repacked layout (ggml-ameva-repack.h) so that ameva_qmv reads every
+// 32-weight unit with aligned vector loads. The layout of a tensor is decided by its first write and kept for its
+// lifetime. Every access through the buffer interface converts, so ggml always sees ggml-layout bytes; the bytes in
+// memory are not in the ggml layout, which is why AMEVA buffers are not host buffers while repacking is enabled
+// (the CPU backend would otherwise read them in place).
+//
+//   AMEVA_REPACK=0      no tensor is repacked; buffers are host buffers again (the layout before repacking)
+//   AMEVA_REPACK_ALL=1  tests only: repack eligible tensors of every buffer, not only of weight buffers
 
+static bool env_flag(const char* name, bool dflt) {
+    const char* v = getenv(name);
+    if (!v || !*v) return dflt;
+    if (strcmp(v, "0") == 0) return false;
+    if (strcmp(v, "1") == 0) return true;
+    GGML_ABORT("ggml-ameva: %s must be 0 or 1 (got \"%s\")", name, v);
+}
+
+bool ameva_repack_enabled(void) {
+    static const bool on = env_flag("AMEVA_REPACK", true);
+    return on;
+}
+
+static bool ameva_repack_all(void) {
+    static const bool all = env_flag("AMEVA_REPACK_ALL", false);
+    return all;
+}
+
+// tensor->extra of a repacked tensor; only the address is used
+static char s_repacked_tag;
+
+const struct ggml_tensor* ameva_repacked_base(const struct ggml_tensor* t) {
+    if (!t) return nullptr;
+    if (t->extra == &s_repacked_tag) return t;
+    if (t->view_src && t->view_src->extra == &s_repacked_tag) return t->view_src;
+    return nullptr;
+}
+
+// Byte offset of [p, p + size) inside the buffer mapping. The ggml buffer interface has no error return: an access
+// that cannot be completed aborts, because continuing would compute on data the caller believes was transferred.
+static size_t mapped_offset(const ggml_backend_ameva_buffer_context* ctx, const void* p, size_t size, const char* what) {
+    const char* base = (const char*)ctx->mapped_ptr;
+    const char* c = (const char*)p;
+    if (!base || c < base || (size_t)(c - base) > ctx->size || size > ctx->size - (size_t)(c - base)) {
+        GGML_ABORT("ggml-ameva-buffer: %s outside the buffer mapping", what);
+    }
+    return (size_t)(c - base);
+}
+
+static void sync_range(ggml_backend_ameva_buffer_context* ctx, size_t off, size_t size, bool flush, const char* what) {
+    if (size == 0) return;
+    const AcResult r = flush ? ac_runtime_buffer_flush(ctx->ac_buf, off, size)
+                             : ac_runtime_buffer_invalidate(ctx->ac_buf, off, size);
+    if (r != AC_SUCCESS) {
+        GGML_ABORT("ggml-ameva-buffer: %s failed in %s (code %d)", flush ? "flush" : "invalidate", what, r);
+    }
+}
+
+// Flush (GPU will read) or invalidate (CPU will read) the bytes of rows [r0, r1) of a repacked tensor: one range per
+// region, or the whole tensor when all rows are involved.
+static void sync_rows(ggml_backend_ameva_buffer_context* ctx, const ggml_tensor* base, int64_t r0, int64_t r1,
+                      bool flush, const char* what) {
+    const size_t t0 = mapped_offset(ctx, base->data, ggml_nbytes(base), what);
+    const int64_t rows = ggml_nrows(base);
+    if (r0 == 0 && r1 == rows) {
+        sync_range(ctx, t0, ggml_nbytes(base), flush, what);
+        return;
+    }
+    AmevaRepackRegions R;
+    if (!ameva_repack_regions(base->type, base->ne[0], rows, &R)) {
+        GGML_ABORT("ggml-ameva-buffer: %s: no repacked layout for %s", what, base->name);
+    }
+    const uint64_t n = (uint64_t)(r1 - r0);
+    sync_range(ctx, t0 + R.q + (uint64_t)r0 * R.q_row, n * R.q_row, flush, what);
+    sync_range(ctx, t0 + R.h + (uint64_t)r0 * R.h_row, n * R.h_row, flush, what);
+    sync_range(ctx, t0 + R.s + (uint64_t)r0 * R.s_row, n * R.s_row, flush, what);
+}
+
+enum class Access { Read, Write, Fill };
+
+// Bytes [off, off + size) of the ggml-layout image of the repacked tensor `base`: copied to `out` (Read), replaced by
+// `in` (Write) or set to `value` (Fill). Whole rows are converted; a range that does not cover whole rows is merged
+// into the rows it touches.
+static void repacked_access(ggml_backend_ameva_buffer_context* ctx, const ggml_tensor* base, uint64_t off, size_t size,
+                            Access mode, const void* in, void* out, uint8_t value, const char* what) {
+    if (size == 0) return;
+    const int64_t K = base->ne[0], rows = ggml_nrows(base);
+    const uint64_t row_bytes = ggml_row_size(base->type, K);
+    if (off > ggml_nbytes(base) || size > ggml_nbytes(base) - off) {
+        GGML_ABORT("ggml-ameva-buffer: %s range outside the repacked tensor %s", what, base->name);
+    }
+    const int64_t r0 = (int64_t)(off / row_bytes);
+    const int64_t r1 = (int64_t)((off + size + row_bytes - 1) / row_bytes);
+    const uint64_t lo = off - (uint64_t)r0 * row_bytes;
+    uint8_t* t = (uint8_t*)base->data;
+    if (mode == Access::Write && lo == 0 && size % row_bytes == 0) {
+        if (!ameva_repack_rows(base->type, K, rows, r0, r1 - r0, in, t)) {
+            GGML_ABORT("ggml-ameva-buffer: %s: repacking rows of %s failed", what, base->name);
+        }
+        sync_rows(ctx, base, r0, r1, true, what);
+        return;
+    }
+    std::vector<uint8_t> img((size_t)((uint64_t)(r1 - r0) * row_bytes));
+    sync_rows(ctx, base, r0, r1, false, what);
+    if (!ameva_unrepack_rows(base->type, K, rows, r0, r1 - r0, t, img.data())) {
+        GGML_ABORT("ggml-ameva-buffer: %s: unpacking rows of %s failed", what, base->name);
+    }
+    if (mode == Access::Read) {
+        memcpy(out, img.data() + lo, size);
+        return;
+    }
+    if (mode == Access::Write) memcpy(img.data() + lo, in, size);
+    else memset(img.data() + lo, value, size);
+    if (!ameva_repack_rows(base->type, K, rows, r0, r1 - r0, img.data(), t)) {
+        GGML_ABORT("ggml-ameva-buffer: %s: repacking rows of %s failed", what, base->name);
+    }
+    sync_rows(ctx, base, r0, r1, true, what);
+}
+
+// The repacked tensor a write to `tensor` goes to, deciding the layout on the tensor's first write: repacked when
+// repacking is enabled, the buffer holds weights (or AMEVA_REPACK_ALL=1), and the tensor is a contiguous tensor (not a
+// view) of a type with a repacked layout and an ameva_qmv kernel. A first write that does not cover the whole tensor
+// converts the bytes already there, so earlier writes made in the ggml layout keep their meaning.
+static const ggml_tensor* resolve_for_write(ggml_backend_buffer_t buffer, ggml_tensor* tensor, size_t offset,
+                                            size_t size, const char* what) {
+    if (const ggml_tensor* base = ameva_repacked_base(tensor)) return base;
+    if (!ameva_repack_enabled() || tensor->view_src || tensor->extra) return nullptr;
+    if (ggml_backend_buffer_get_usage(buffer) != GGML_BACKEND_BUFFER_USAGE_WEIGHTS && !ameva_repack_all()) return nullptr;
+    AmevaRepackLayout L;
+    if (!ameva_repack_layout(tensor->type, &L) || !ameva_qmv_has_type(tensor->type)) return nullptr;
+    const size_t nbytes = ggml_nbytes(tensor);
+    if (!ggml_is_contiguous(tensor) || tensor->ne[0] <= 0 || tensor->ne[0] % L.block_elems != 0 || nbytes == 0) {
+        return nullptr;
+    }
+    auto* ctx = (ggml_backend_ameva_buffer_context*)buffer->context;
+    const size_t t0 = mapped_offset(ctx, tensor->data, nbytes, what);
+    const int64_t K = tensor->ne[0], rows = ggml_nrows(tensor);
+    if (offset != 0 || size != nbytes) {
+        std::vector<uint8_t> img(nbytes);
+        sync_range(ctx, t0, nbytes, false, what);
+        memcpy(img.data(), tensor->data, nbytes);
+        if (!ameva_repack(tensor->type, K, rows, img.data(), tensor->data)) {
+            GGML_ABORT("ggml-ameva-buffer: %s: repacking %s failed", what, tensor->name);
+        }
+        sync_range(ctx, t0, nbytes, true, what);
+    }
+    tensor->extra = &s_repacked_tag;
+    {
+        std::lock_guard<std::mutex> lock(ctx->mu);
+        ctx->repacked.push_back({ t0, nbytes, tensor->type, K, rows });
+    }
+    ameva_count_repacked_tensor(nbytes);
+    return tensor;
+}
+
+// =============================================================================
+// Buffer interface
+// =============================================================================
 static void ggml_backend_ameva_buffer_free_buffer(ggml_backend_buffer_t buffer) {
     if (!buffer || !buffer->context) return;
     auto* ctx = (ggml_backend_ameva_buffer_context*)buffer->context;
@@ -49,78 +204,69 @@ static void* ggml_backend_ameva_buffer_get_base(ggml_backend_buffer_t buffer) {
     return ctx->mapped_ptr;
 }
 
+static void check_range(const ggml_tensor* tensor, size_t offset, size_t size, const char* what) {
+    const size_t tensor_nbytes = ggml_nbytes(tensor);
+    if (offset > tensor_nbytes || size > tensor_nbytes - offset) {
+        GGML_ABORT("ggml-ameva-buffer: %s range violation (offset=%zu, size=%zu, tensor=%zu)", what, offset, size,
+                   tensor_nbytes);
+    }
+}
+
 static void ggml_backend_ameva_buffer_memset_tensor(ggml_backend_buffer_t buffer, struct ggml_tensor* tensor, uint8_t value, size_t offset, size_t size) {
-    // The ggml buffer interface has no error return: a write that cannot be completed or made visible to the
-    // GPU aborts, because continuing would compute on data the caller believes was written.
     if (!buffer || !buffer->context || !tensor || !tensor->data) {
         GGML_ABORT("ggml-ameva-buffer: memset_tensor on an unallocated tensor or buffer");
     }
-    size_t tensor_nbytes = ggml_nbytes(tensor);
-    if (offset > tensor_nbytes || size > tensor_nbytes - offset) {
-        GGML_ABORT("ggml-ameva-buffer: memset_tensor range violation (offset=%zu, size=%zu, tensor=%zu)",
-                   offset, size, tensor_nbytes);
-    }
+    check_range(tensor, offset, size, "memset_tensor");
     auto* ctx = (ggml_backend_ameva_buffer_context*)buffer->context;
     char* dst = (char*)tensor->data + offset;
-    if (dst < (char*)ctx->mapped_ptr || (size_t)(dst - (char*)ctx->mapped_ptr) > ctx->size || size > ctx->size - (size_t)(dst - (char*)ctx->mapped_ptr)) {
-        GGML_ABORT("ggml-ameva-buffer: memset_tensor outside the buffer mapping");
+    const size_t byte_offset = mapped_offset(ctx, dst, size, "memset_tensor");
+    if (const ggml_tensor* base = resolve_for_write(buffer, tensor, offset, size, "memset_tensor")) {
+        repacked_access(ctx, base, (uint64_t)(dst - (char*)base->data), size, Access::Fill, nullptr, nullptr, value,
+                        "memset_tensor");
+        return;
     }
     memset(dst, value, size);
-    size_t byte_offset = (size_t)(dst - (char*)ctx->mapped_ptr);
-    AcResult fres = ac_runtime_buffer_flush(ctx->ac_buf, byte_offset, size);
-    if (fres != AC_SUCCESS) {
-        GGML_ABORT("ggml-ameva-buffer: flush failed in memset_tensor (code %d)", fres);
-    }
+    sync_range(ctx, byte_offset, size, true, "memset_tensor");
 }
 
 static void ggml_backend_ameva_buffer_set_tensor(ggml_backend_buffer_t buffer, struct ggml_tensor* tensor, const void* data, size_t offset, size_t size) {
     if (!buffer || !buffer->context || !tensor || !tensor->data || !data) {
         GGML_ABORT("ggml-ameva-buffer: set_tensor on an unallocated tensor or buffer, or from NULL");
     }
-    size_t tensor_nbytes = ggml_nbytes(tensor);
-    if (offset > tensor_nbytes || size > tensor_nbytes - offset) {
-        GGML_ABORT("ggml-ameva-buffer: set_tensor range violation (offset=%zu, size=%zu, tensor=%zu)",
-                   offset, size, tensor_nbytes);
-    }
+    check_range(tensor, offset, size, "set_tensor");
     auto* ctx = (ggml_backend_ameva_buffer_context*)buffer->context;
     char* dst = (char*)tensor->data + offset;
-    if (dst < (char*)ctx->mapped_ptr || (size_t)(dst - (char*)ctx->mapped_ptr) > ctx->size || size > ctx->size - (size_t)(dst - (char*)ctx->mapped_ptr)) {
-        GGML_ABORT("ggml-ameva-buffer: set_tensor outside the buffer mapping");
+    const size_t byte_offset = mapped_offset(ctx, dst, size, "set_tensor");
+    if (const ggml_tensor* base = resolve_for_write(buffer, tensor, offset, size, "set_tensor")) {
+        repacked_access(ctx, base, (uint64_t)(dst - (char*)base->data), size, Access::Write, data, nullptr, 0,
+                        "set_tensor");
+        return;
     }
     memcpy(dst, data, size);
-    size_t byte_offset = (size_t)(dst - (char*)ctx->mapped_ptr);
-    AcResult fres = ac_runtime_buffer_flush(ctx->ac_buf, byte_offset, size);
-    if (fres != AC_SUCCESS) {
-        GGML_ABORT("ggml-ameva-buffer: flush failed in set_tensor (code %d)", fres);
-    }
+    sync_range(ctx, byte_offset, size, true, "set_tensor");
 }
 
 static void ggml_backend_ameva_buffer_get_tensor(ggml_backend_buffer_t buffer, const struct ggml_tensor* tensor, void* data, size_t offset, size_t size) {
     if (!buffer || !buffer->context || !tensor || !tensor->data || !data) {
         GGML_ABORT("ggml-ameva-buffer: get_tensor on an unallocated tensor or buffer, or into NULL");
     }
-    size_t tensor_nbytes = ggml_nbytes(tensor);
-    if (offset > tensor_nbytes || size > tensor_nbytes - offset) {
-        GGML_ABORT("ggml-ameva-buffer: get_tensor range violation (offset=%zu, size=%zu, tensor=%zu)",
-                   offset, size, tensor_nbytes);
-    }
+    check_range(tensor, offset, size, "get_tensor");
     auto* ctx = (ggml_backend_ameva_buffer_context*)buffer->context;
     const char* src = (const char*)tensor->data + offset;
-    if (src < (const char*)ctx->mapped_ptr || (size_t)(src - (const char*)ctx->mapped_ptr) > ctx->size || size > ctx->size - (size_t)(src - (const char*)ctx->mapped_ptr)) {
-        GGML_ABORT("ggml-ameva-buffer: get_tensor outside the buffer mapping");
+    const size_t byte_offset = mapped_offset(ctx, src, size, "get_tensor");
+    if (const ggml_tensor* base = ameva_repacked_base(tensor)) {
+        repacked_access(ctx, base, (uint64_t)(src - (const char*)base->data), size, Access::Read, nullptr, data, 0,
+                        "get_tensor");
+        return;
     }
-    size_t byte_offset = (size_t)(src - (const char*)ctx->mapped_ptr);
-    AcResult ires = ac_runtime_buffer_invalidate(ctx->ac_buf, byte_offset, size);
-    if (ires != AC_SUCCESS) {
-        GGML_ABORT("ggml-ameva-buffer: invalidate failed in get_tensor (code %d)", ires);
-    }
+    sync_range(ctx, byte_offset, size, false, "get_tensor");
     memcpy(data, src, size);
 }
 
 static bool ggml_backend_ameva_buffer_cpy_tensor(ggml_backend_buffer_t buffer, const struct ggml_tensor* src, struct ggml_tensor* dst) {
     (void)buffer;
-    // src->data is a CPU address only for host buffers; for any other buffer it must not be read here.
-    // false tells ggml to copy through the host.
+    // src->data is a CPU address only for host buffers; for any other buffer (AMEVA buffers included while weights
+    // are repacked) it must not be read here. false tells ggml to copy through the host (get_tensor + set_tensor).
     if (src && dst && src->data && dst->data && src->buffer && ggml_backend_buffer_is_host(src->buffer)) {
         ggml_backend_tensor_set(dst, src->data, 0, ggml_nbytes(src));
         return true;
@@ -134,14 +280,24 @@ static void ggml_backend_ameva_buffer_clear(ggml_backend_buffer_t buffer, uint8_
     }
     auto* ctx = (ggml_backend_ameva_buffer_context*)buffer->context;
     memset(ctx->mapped_ptr, value, buffer->size);
-    AcResult fres = ac_runtime_buffer_flush(ctx->ac_buf, 0, buffer->size);
-    if (fres != AC_SUCCESS) {
-        GGML_ABORT("ggml-ameva-buffer: flush failed in clear (code %d)", fres);
+    // Repacking permutes the bits of a tensor, so all-zero and all-one bytes stay what they are; any other value is
+    // written into each repacked tensor through its layout.
+    if (value != 0x00 && value != 0xFF) {
+        std::lock_guard<std::mutex> lock(ctx->mu);
+        std::vector<uint8_t> img;
+        for (const AmevaRepackSpan& s : ctx->repacked) {
+            img.assign((size_t)s.bytes, value);
+            if (!ameva_repack(s.type, s.K, s.rows, img.data(), (uint8_t*)ctx->mapped_ptr + s.off)) {
+                GGML_ABORT("ggml-ameva-buffer: clear: repacking a %s tensor failed", ggml_type_name(s.type));
+            }
+        }
     }
+    sync_range(ctx, 0, buffer->size, true, "clear");
 }
 
 // Designated initializers (see ggml-ameva-device.cpp). init_tensor and reset are optional in ggml and left NULL:
-// tensors in a flat, host-mapped Vulkan buffer need no per-tensor setup and the buffer keeps no state to reset.
+// tensors in a flat Vulkan buffer need no per-tensor setup (the layout of a tensor is decided by its first write)
+// and the buffer keeps no state to reset.
 static const struct ggml_backend_buffer_i ggml_backend_ameva_buffer_i = {
     .free_buffer   = ggml_backend_ameva_buffer_free_buffer,
     .get_base      = ggml_backend_ameva_buffer_get_base,
@@ -160,7 +316,6 @@ static const char* ggml_backend_ameva_buffer_type_get_name(ggml_backend_buffer_t
 }
 
 static ggml_backend_buffer_t ggml_backend_ameva_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buft, size_t size) {
-    fprintf(stderr, "ggml-ameva-buffer: alloc_buffer called (requested_size=%zu)\n", size);
     AcContext* ctx = ameva_get_ac_context();
     if (!ctx) {
         fprintf(stderr, "ggml-ameva-buffer: alloc_buffer failed - ameva_get_ac_context returned NULL!\n");
@@ -195,10 +350,15 @@ static ggml_backend_buffer_t ggml_backend_ameva_buffer_type_alloc_buffer(ggml_ba
         return nullptr;
     }
 
-    fprintf(stderr, "ggml-ameva-buffer: alloc_buffer SUCCESS (aligned_size=%zu, mapped_ptr=%p)\n", aligned_size, mapped_ptr);
     auto* buf_ctx = new ggml_backend_ameva_buffer_context{ ac_buf, mapped_ptr, aligned_size };
     ggml_backend_buffer_t ret_buf = ggml_backend_buffer_init(buft, ggml_backend_ameva_buffer_i, buf_ctx, aligned_size);
-    fprintf(stderr, "ggml-ameva-buffer: alloc_buffer returned buffer=%p, buf->context=%p\n", ret_buf, ret_buf ? ret_buf->context : nullptr);
+    if (!ret_buf) {
+        fprintf(stderr, "ggml-ameva-buffer: ggml_backend_buffer_init failed for %zu bytes\n", aligned_size);
+        ac_runtime_buffer_destroy(ac_buf);
+        ameva_increment_buffer_destroy_count();
+        delete buf_ctx;
+        return nullptr;
+    }
     return ret_buf;
 }
 
@@ -207,20 +367,25 @@ static size_t ggml_backend_ameva_buffer_type_get_alignment(ggml_backend_buffer_t
     return 64;
 }
 
+// 512 MiB, or the device's maxMemoryAllocationSize when smaller. Buffers may exceed maxStorageBufferRange: kernels
+// bind tensor-sized ranges, never whole buffers. 0 only when no Vulkan context can be created; ggml then fails the
+// allocation instead of trying one.
 static size_t ggml_backend_ameva_buffer_type_get_max_size(ggml_backend_buffer_type_t buft) {
     (void)buft;
-    // Realistic maximum contiguous buffer size on mobile Vulkan (512 MiB)
-    return 512ULL * 1024 * 1024;
+    return (size_t)ameva_max_buffer_size();
 }
 
+// The repacked layout takes exactly ggml_nbytes, so allocation sizes do not depend on it.
 static size_t ggml_backend_ameva_buffer_type_get_alloc_size(ggml_backend_buffer_type_t buft, const struct ggml_tensor* tensor) {
     (void)buft;
     return ggml_nbytes(tensor);
 }
 
+// The memory is host-visible (UMA) in either case; "host buffer" in ggml means that the CPU may read and write tensor
+// data in place, which holds only while no tensor is repacked.
 static bool ggml_backend_ameva_buffer_type_is_host(ggml_backend_buffer_type_t buft) {
     (void)buft;
-    return true; // Host-visible unified memory architecture (UMA)
+    return !ameva_repack_enabled();
 }
 
 static const struct ggml_backend_buffer_type_i ggml_backend_ameva_buffer_type_i = {

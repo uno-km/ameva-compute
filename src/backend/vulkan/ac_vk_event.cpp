@@ -49,6 +49,17 @@ AcResult ac_vk_event_wait(AcVkEvent* event, uint64_t timeout_ns) {
         return AC_ERR_LAUNCH_TIMEOUT;
     }
 
+    /* Batch events: the submission owns the fence and retires the batch's resources exactly once */
+    if (event->shared) {
+        AcResult sr = ac_vk_submission_wait(event->shared, timeout_ns);
+        if (sr == AC_SUCCESS && !event->is_signaled) {
+            bool has_ts = false;
+            ac_vk_submission_get_timing(event->shared, &event->wall_latency_ns, &event->gpu_duration_ns, &has_ts);
+            event->is_signaled = true;
+        }
+        return sr;
+    }
+
     /* Idempotent double-wait */
     if (event->is_signaled) {
         ac_vk_event_retire_resources(event);
@@ -98,6 +109,22 @@ AcResult ac_vk_event_wait(AcVkEvent* event, uint64_t timeout_ns) {
 
 AcResult ac_vk_event_destroy(AcVkEvent* event) {
     if (!event) {
+        return AC_SUCCESS;
+    }
+
+    if (event->shared) {
+        /* Same contract as a single-dispatch event: destroying a pending event waits for it, and on timeout
+           nothing is released so the caller may retry. An unsubmitted or aborted batch has nothing to wait for. */
+        if (ac_vk_submission_is_submitted(event->shared) && !ac_vk_submission_is_signaled(event->shared)) {
+            AcResult wr = ac_vk_submission_wait(event->shared, 5000000000ULL);
+            if (wr == AC_ERR_LAUNCH_TIMEOUT || wr == AC_ERR_OUT_OF_HOST_MEMORY || wr == AC_ERR_OUT_OF_DEVICE_MEMORY) {
+                return wr;
+            }
+        }
+        ac_vk_submission_release(event->shared);
+        event->shared = NULL;
+        event->owning_context = NULL;
+        free(event);
         return AC_SUCCESS;
     }
 
@@ -167,6 +194,12 @@ AcResult ac_vk_event_get_timing(
 ) {
     if (!event) {
         return AC_ERR_NULL_POINTER;
+    }
+    if (event->shared && !event->is_signaled && ac_vk_submission_is_signaled(event->shared)) {
+        /* signaled through another event of the same batch, or through the batch itself */
+        bool has_ts = false;
+        ac_vk_submission_get_timing(event->shared, &event->wall_latency_ns, &event->gpu_duration_ns, &has_ts);
+        event->is_signaled = true;
     }
     if (!event->is_signaled) {
         return AC_ERR_DEVICE_BUSY;

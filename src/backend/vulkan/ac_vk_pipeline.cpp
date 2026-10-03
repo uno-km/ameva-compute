@@ -218,6 +218,12 @@ AcResult ac_vk_kernel_create_with_specialization(
         if (pipeline_identity) {
             strncpy(k->pipeline_identity, pipeline_identity, sizeof(k->pipeline_identity) - 1);
         }
+        /* The caller's metadata->bindings array need not outlive this call (k->metadata keeps only the pointer):
+           the layout the descriptor writes must match is captured here. */
+        for (uint32_t i = 0; i < buffer_count; ++i) {
+            k->binding_index[i] = bindings[i].binding;
+            k->binding_descriptor_type[i] = (uint32_t)bindings[i].descriptorType;
+        }
 
         ctx->active_child_kernels++;
         *out_kernel = k;
@@ -298,6 +304,9 @@ AcResult ac_vk_kernel_destroy(AcVkKernel* kernel) {
     }
 
     VkDevice device = kernel->owning_context->device;
+
+    /* cached descriptor sets of this layout must be freed before the layout is destroyed */
+    ac_vk_desc_cache_purge_layout(kernel->owning_context, kernel->descriptor_set_layout);
 
     if (kernel->compute_pipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(device, kernel->compute_pipeline, NULL);

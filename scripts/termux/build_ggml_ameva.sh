@@ -48,7 +48,7 @@ clang++ -O2 -fPIC -shared -std=c++17 -I "$ROOT/include" -I "$ROOT/src" \
 A="$ROOT/adapters/llama/ggml-ameva"
 clang++ -O2 -fPIC -shared -std=c++20 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers \
     -Wno-unused-function -I "$GGML_DIR/include" -I "$GGML_DIR/src" -I "$ROOT/include" -I "$A" \
-    "$A/ggml-ameva.cpp" "$A/ggml-ameva-device.cpp" "$A/ggml-ameva-buffer.cpp" \
+    "$A/ggml-ameva.cpp" "$A/ggml-ameva-device.cpp" "$A/ggml-ameva-buffer.cpp" "$A/ggml-ameva-repack.cpp" \
     "$OUT/libac_runtime.so.2" "$BASE_LIB" "$REG_LIB" -lvulkan -ldl -lm \
     -Wl,-soname,libggml-ameva.so -Wl,-rpath,'$ORIGIN' -Wl,--no-undefined -o "$OUT/libggml-ameva.so"
 echo "[build_ggml_ameva] built $OUT/libggml-ameva.so"

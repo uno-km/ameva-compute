@@ -1,0 +1,53 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// AMEVA SET_ROWS (ggml_set_rows): dst row idx[i] := src0 row i, src0 f32 -> dst f32 or f16, indices i64 or i32.
+// The KV-cache write of llama.cpp. ggml asserts 0 <= idx < ne1 on the CPU; here an index out of range is not
+// written and is reported through the status buffer (count, lowest offending node), which the host checks after
+// the batch and turns into a failed graph.
+// i64 indices are read as their low word (no 64-bit integers needed); a non-zero high word counts as out of range.
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+
+layout(std430, binding = 0) readonly buffer A { uint a[]; };
+layout(std430, binding = 1) readonly buffer I { uint idx[]; };
+layout(std430, binding = 2) buffer S { uint status[]; };
+layout(std430, binding = 3) buffer D { uint d[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint nc, nr, ne02, ne03;
+    uint a_off, a_s1, a_s2, a_s3;
+    uint i_off, i_s0, i_s1, i_s2;  // in words; i_s0 is 2 for i64, 1 for i32
+    uint i_ne1, i_ne2, idx64, dst_rows;
+    uint d_off, d_s1, d_s2, d_s3;  // in dst elements
+    uint dst_f16, node;
+} pc;
+
+void main() {
+    const uint i = ameva_linear_id();
+    if (i >= pc.nc * pc.nr * pc.ne02 * pc.ne03) return;
+    uint t = i;
+    const uint c = t % pc.nc;
+    t /= pc.nc;
+    const uint r = t % pc.nr;
+    t /= pc.nr;
+    const uint i02 = t % pc.ne02;
+    const uint i03 = t / pc.ne02;
+    const uint iw = pc.i_off + r * pc.i_s0 + (i02 % pc.i_ne1) * pc.i_s1 + (i03 % pc.i_ne2) * pc.i_s2;
+    const uint row = idx[iw];
+    const bool bad = row >= pc.dst_rows || (pc.idx64 != 0u && idx[iw + 1u] != 0u);
+    if (bad) {
+        if (c == 0u) {
+            atomicAdd(status[0], 1u);
+            atomicMin(status[1], pc.node);
+        }
+        return;
+    }
+    const float v = uintBitsToFloat(a[pc.a_off + c + r * pc.a_s1 + i02 * pc.a_s2 + i03 * pc.a_s3]);
+    const uint di = pc.d_off + c + row * pc.d_s1 + i02 * pc.d_s2 + i03 * pc.d_s3;
+    if (pc.dst_f16 != 0u) {
+        AMEVA_STORE_F16(d, di, v);
+    } else {
+        d[di] = floatBitsToUint(v);
+    }
+}

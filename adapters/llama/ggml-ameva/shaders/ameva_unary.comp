@@ -1,0 +1,57 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// AMEVA element-wise f32 ops, same shape in and out, dimension 0 contiguous.
+//   op: 0 SCALE (x*s + b)   1 TANH   2 SILU   3 GELU (tanh form)   4 GELU_ERF   5 GELU_QUICK
+//       6 RELU   7 SIGMOID   8 NEG   9 SQR   10 SQRT   11 EXP   12 ABS
+// The formulas are ggml's (ggml-cpu vec.h / unary-ops.cpp) evaluated in f32. ggml's CPU GELU goes through an f16
+// lookup table (GGML_GELU_FP16); this kernel evaluates the formula itself, so the two differ at f16 resolution.
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+
+layout(std430, binding = 0) readonly buffer A { uint a[]; };
+layout(std430, binding = 1) writeonly buffer D { uint d[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint ne0, ne1, ne2, ne3;
+    uint a_off, a_s1, a_s2, a_s3;
+    uint d_off, d_s1, d_s2, d_s3;
+    uint op;
+    uint p0; // SCALE: s (float bits)
+    uint p1; // SCALE: b (float bits)
+} pc;
+
+const float GELU_COEF_A = 0.044715;
+const float GELU_QUICK_COEF = -1.702;
+const float SQRT_2_OVER_PI = 0.79788456080286535587989211986876;
+const float SQRT_2_INV = 0.70710678118654752440084436210484;
+
+void main() {
+    const uint i = ameva_linear_id();
+    if (i >= pc.ne0 * pc.ne1 * pc.ne2 * pc.ne3) return;
+    uint t = i;
+    const uint i0 = t % pc.ne0;
+    t /= pc.ne0;
+    const uint i1 = t % pc.ne1;
+    t /= pc.ne1;
+    const uint i2 = t % pc.ne2;
+    const uint i3 = t / pc.ne2;
+    const float x = uintBitsToFloat(a[pc.a_off + i0 + i1 * pc.a_s1 + i2 * pc.a_s2 + i3 * pc.a_s3]);
+    float r;
+    switch (pc.op) {
+        case 0u: r = x * uintBitsToFloat(pc.p0) + uintBitsToFloat(pc.p1); break;
+        case 1u: r = ameva_tanh(x); break;
+        case 2u: r = x / (1.0 + exp(-x)); break;
+        case 3u: r = 0.5 * x * (1.0 + ameva_tanh(SQRT_2_OVER_PI * x * (1.0 + GELU_COEF_A * x * x))); break;
+        case 4u: r = 0.5 * x * (1.0 + ameva_erf(x * SQRT_2_INV)); break;
+        case 5u: r = x * (1.0 / (1.0 + exp(GELU_QUICK_COEF * x))); break;
+        case 6u: r = max(x, 0.0); break;
+        case 7u: r = 1.0 / (1.0 + exp(-x)); break;
+        case 8u: r = -x; break;
+        case 9u: r = x * x; break;
+        case 10u: r = sqrt(x); break;
+        case 11u: r = exp(x); break;
+        default: r = abs(x); break;
+    }
+    d[pc.d_off + i0 + i1 * pc.d_s1 + i2 * pc.d_s2 + i3 * pc.d_s3] = floatBitsToUint(r);
+}

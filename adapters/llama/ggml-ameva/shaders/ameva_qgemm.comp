@@ -1,0 +1,117 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : require
+// AMEVA QGEMM: ggml MUL_MAT (dst = src0^T x src1) for many activation rows (prompt processing), src0 stored in the
+// AMEVA repacked layout (ggml-ameva-repack.h).
+//
+// A workgroup of 128 invocations computes a tile of 64 weight rows x 32 activation rows. K is walked one 32-weight
+// unit at a time:
+//   1. invocations 0..63 decode the unit of one weight row each (ameva_qdecode.glsl: exactly ggml's values, f32) into
+//      the shared weight tile, k-major;
+//   2. all invocations stage the 32 x 32 block of activations into the shared activation tile, k-major;
+//   3. every invocation accumulates its 4 x 4 block of the output tile: for each of the 32 k, one vec4 of 4 weight
+//      rows times one vec4 of 4 activation rows (outer product, 16 fma).
+// A weight unit is decoded once per 32 activation rows and an activation value is read from memory once per 64 weight
+// rows (ameva_qmm and ameva_qmv with COLS = 8: once per 8 activation rows and once per 4 weight rows). Each output is
+// the f32 sum over k = 0..K-1 in order.
+// A 128 x 32 tile with an 8 x 4 block per invocation (8 vec4 accumulators live across the decode) ran about 6 times
+// slower on Adreno 650 (q5_0 4864x896, M = 185: 210 ms against 33 ms per dispatch), as if registers spilled.
+//
+//   bindings 0..2: repacked weights (ameva_qdecode.glsl), binding 3: src1 F32 as vec4, binding 4: dst F32
+//   push: M, K, N (weight rows of this dispatch), q_off, h_off (Q / H vector elements), s_off (bytes, even), a_off,
+//         d_off, s1, sd (floats; a_off and s1 multiples of 4)
+//   grid: (ceil(N / 64), ceil(M / 32))
+
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+#include "ameva_qdecode.glsl"
+
+layout(std430, binding = 3) readonly buffer BufA { vec4 a4[]; };
+layout(std430, binding = 4) writeonly buffer BufD { float dst[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint M, K, N, q_off;
+    uint h_off, s_off, a_off, d_off;
+    uint s1, sd;
+} pc;
+
+#define BN 64u // weight rows per tile
+#define BM 32u // activation rows per tile
+
+// tile_w[k * 16 + n / 4][n % 4] = W[n0 + n][k0 + k], tile_a[k * 8 + m / 4][m % 4] = A[m0 + m][k0 + k]
+shared vec4 tile_w[32 * (BN / 4u)];
+shared vec4 tile_a[32 * (BM / 4u)];
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    qdecode_init(tid);
+    const uint n0 = gl_WorkGroupID.x * BN;
+    const uint m0 = gl_WorkGroupID.y * BM;
+    const uint U = pc.K >> 5u;
+    const uint s_row = (pc.K / BLOCK_ELEMS) * SB;
+
+    // decoding: invocation t < 64 owns weight row n0 + t; rows past N decode the last row and are never stored
+    const uint drow = min(n0 + (tid & 63u), pc.N - 1u);
+    const uint dcol = (tid & 63u) >> 2u, dcomp = tid & 3u;
+    // staging: activation vec4 number v = tid + 128 e (e = 0, 1) is k quad (v & 7) of tile row (v >> 3); rows past M
+    // read the last row and are never stored
+    uint arow[2];
+    [[unroll]] for (uint e = 0u; e < 2u; ++e) {
+        const uint r = (tid + 128u * e) >> 3u;
+        arow[e] = ((pc.a_off + min(m0 + r, pc.M - 1u) * pc.s1) >> 2u) + (tid & 7u);
+    }
+    // accumulation: rows 4 tn .. 4 tn + 3 of the tile, activation rows 4 tm .. 4 tm + 3
+    const uint tn = tid & 15u, tm = tid >> 4u;
+    vec4 acc0 = vec4(0.0), acc1 = vec4(0.0), acc2 = vec4(0.0), acc3 = vec4(0.0);
+
+    for (uint u = 0u; u < U; ++u) {
+        if (tid < 64u) {
+            const uint b = u / UPB;
+            vec4 w[8];
+            decode(pc.q_off + (drow * U + u) * QPER, pc.h_off + drow * U + u, pc.s_off + drow * s_row + b * SB,
+                   u - b * UPB, w);
+            [[unroll]] for (uint i = 0u; i < 8u; ++i) {
+                const uint k = 4u * (i & 3u) + 16u * (i >> 2u); // w[i] holds weights k .. k + 3 of the unit
+                tile_w[(k + 0u) * 16u + dcol][dcomp] = w[i].x;
+                tile_w[(k + 1u) * 16u + dcol][dcomp] = w[i].y;
+                tile_w[(k + 2u) * 16u + dcol][dcomp] = w[i].z;
+                tile_w[(k + 3u) * 16u + dcol][dcomp] = w[i].w;
+            }
+        }
+        [[unroll]] for (uint e = 0u; e < 2u; ++e) {
+            const uint v = tid + 128u * e;
+            const uint r = v >> 3u, kq = v & 7u;
+            const vec4 x = a4[arow[e] + 8u * u];
+            tile_a[(4u * kq + 0u) * 8u + (r >> 2u)][r & 3u] = x.x;
+            tile_a[(4u * kq + 1u) * 8u + (r >> 2u)][r & 3u] = x.y;
+            tile_a[(4u * kq + 2u) * 8u + (r >> 2u)][r & 3u] = x.z;
+            tile_a[(4u * kq + 3u) * 8u + (r >> 2u)][r & 3u] = x.w;
+        }
+        barrier();
+        [[unroll]] for (uint k = 0u; k < 32u; ++k) {
+            const vec4 wv = tile_w[k * 16u + tn];
+            const vec4 av = tile_a[k * 8u + tm];
+            acc0 = fma(wv, vec4(av.x), acc0);
+            acc1 = fma(wv, vec4(av.y), acc1);
+            acc2 = fma(wv, vec4(av.z), acc2);
+            acc3 = fma(wv, vec4(av.w), acc3);
+        }
+        barrier();
+    }
+
+    // output (weight row n0 + 4 tn + i, activation row m0 + 4 tm + j) = acc_j[i]
+    const uint nb = n0 + 4u * tn;
+    const uint mb = m0 + 4u * tm;
+    [[unroll]] for (uint j = 0u; j < 4u; ++j) {
+        const uint m = mb + j;
+        if (m < pc.M) {
+            const vec4 a = j == 0u ? acc0 : (j == 1u ? acc1 : (j == 2u ? acc2 : acc3));
+            const uint o = pc.d_off + m * pc.sd + nb;
+            if (nb + 0u < pc.N) dst[o + 0u] = a.x;
+            if (nb + 1u < pc.N) dst[o + 1u] = a.y;
+            if (nb + 2u < pc.N) dst[o + 2u] = a.z;
+            if (nb + 3u < pc.N) dst[o + 3u] = a.w;
+        }
+    }
+}

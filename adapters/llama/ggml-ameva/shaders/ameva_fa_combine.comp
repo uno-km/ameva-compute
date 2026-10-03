@@ -1,0 +1,46 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// AMEVA FLASH_ATTN_EXT, merge of key splits (flash decoding). ameva_flash_attn with split_keys > 0 leaves, per split z
+// and output row r (= query position * n_head + head), the running maximum m, the sum l and the DV unnormalized
+// accumulators at part_off + (z * n_rows + r) * (DV + 2). Here every row is merged:
+//   M = max_z m_z,  L = sum_z l_z exp(m_z - M),  O[d] = sum_z acc_z[d] exp(m_z - M) / L   (O = 0 when L == 0)
+// Splits whose keys were all masked (m = -inf) contribute nothing. One workgroup of 64 invocations per row.
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+
+layout(std430, binding = 0) readonly buffer Part { uint part[]; };
+layout(std430, binding = 1) writeonly buffer O { uint o[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint DV, n_rows, n_split, part_off;
+    uint o_off;
+} pc;
+
+void main() {
+    const uint row = ameva_workgroup_id();
+    if (row >= pc.n_rows) return; // uniform across the workgroup
+    const uint tid = gl_LocalInvocationID.x;
+    const uint stride = pc.DV + 2u;
+    const float NEG_INF = -1.0 / 0.0;
+    float M = NEG_INF;
+    for (uint z = 0u; z < pc.n_split; ++z) {
+        M = max(M, uintBitsToFloat(part[pc.part_off + (z * pc.n_rows + row) * stride]));
+    }
+    float L = 0.0;
+    for (uint z = 0u; z < pc.n_split; ++z) {
+        const uint b = pc.part_off + (z * pc.n_rows + row) * stride;
+        const float m = uintBitsToFloat(part[b]);
+        if (m != NEG_INF) L += uintBitsToFloat(part[b + 1u]) * exp(m - M);
+    }
+    const float inv = L == 0.0 ? 0.0 : 1.0 / L;
+    for (uint d = tid; d < pc.DV; d += 64u) {
+        float acc = 0.0;
+        for (uint z = 0u; z < pc.n_split; ++z) {
+            const uint b = pc.part_off + (z * pc.n_rows + row) * stride;
+            const float m = uintBitsToFloat(part[b]);
+            if (m != NEG_INF) acc += uintBitsToFloat(part[b + 2u + d]) * exp(m - M);
+        }
+        o[pc.o_off + row * pc.DV + d] = floatBitsToUint(acc * inv);
+    }
+}

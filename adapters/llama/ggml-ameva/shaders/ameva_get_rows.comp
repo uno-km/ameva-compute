@@ -1,0 +1,44 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// AMEVA GET_ROWS (ggml_get_rows) with f32 or f16 rows and i32 indices, f32 result:
+//   dst[c, i10, i11, i12] = src0[c, idx[i10, i11, i12], i11, i12]
+// An index outside [0, ne01) is reported through the status buffer (as in ameva_set_rows) and its row is not read.
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+
+layout(std430, binding = 0) readonly buffer A { uint a[]; };
+layout(std430, binding = 1) readonly buffer I { int idx[]; };
+layout(std430, binding = 2) buffer S { uint status[]; };
+layout(std430, binding = 3) writeonly buffer D { uint d[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint nc, ne10, ne11, ne12;
+    uint a_off, a_s1, a_s2, a_s3;  // src0 elements
+    uint i_off, i_s0, i_s1, i_s2;  // i32 elements
+    uint d_off, d_s1, d_s2, d_s3;
+    uint src_f16, src_rows, node;
+} pc;
+
+void main() {
+    const uint i = ameva_linear_id();
+    if (i >= pc.nc * pc.ne10 * pc.ne11 * pc.ne12) return;
+    uint t = i;
+    const uint c = t % pc.nc;
+    t /= pc.nc;
+    const uint i10 = t % pc.ne10;
+    t /= pc.ne10;
+    const uint i11 = t % pc.ne11;
+    const uint i12 = t / pc.ne11;
+    const int row = idx[pc.i_off + i10 * pc.i_s0 + i11 * pc.i_s1 + i12 * pc.i_s2];
+    if (row < 0 || uint(row) >= pc.src_rows) {
+        if (c == 0u) {
+            atomicAdd(status[0], 1u);
+            atomicMin(status[1], pc.node);
+        }
+        return;
+    }
+    const uint si = pc.a_off + c + uint(row) * pc.a_s1 + i11 * pc.a_s2 + i12 * pc.a_s3;
+    const float v = pc.src_f16 != 0u ? AMEVA_LOAD_F16(a, si) : uintBitsToFloat(a[si]);
+    d[pc.d_off + c + i10 * pc.d_s1 + i11 * pc.d_s2 + i12 * pc.d_s3] = floatBitsToUint(v);
+}

@@ -1,0 +1,48 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// AMEVA binary ops with ggml broadcasting: dst[i] = src0[i] (op) src1[i mod ne1x], all f32.
+//   op: 0 ADD, 1 SUB, 2 MUL, 3 DIV
+// src0 and dst have the dst shape; src1 repeats along every dimension where its extent is smaller. Dimension 0 is
+// contiguous for all three tensors (the host checks nb[0] == 4); higher strides are free.
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+
+layout(std430, binding = 0) readonly buffer A { uint a[]; };
+layout(std430, binding = 1) readonly buffer B { uint b[]; };
+layout(std430, binding = 2) writeonly buffer D { uint d[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint ne0, ne1, ne2, ne3;
+    uint a_off, a_s1, a_s2, a_s3;
+    uint b_off, b_ne0, b_ne1, b_ne2;
+    uint b_ne3, b_s1, b_s2, b_s3;
+    uint d_off, d_s1, d_s2, d_s3;
+    uint op;
+} pc;
+
+void main() {
+    const uint i = ameva_linear_id();
+    if (i >= pc.ne0 * pc.ne1 * pc.ne2 * pc.ne3) return;
+    uint t = i;
+    const uint i0 = t % pc.ne0;
+    t /= pc.ne0;
+    const uint i1 = t % pc.ne1;
+    t /= pc.ne1;
+    const uint i2 = t % pc.ne2;
+    const uint i3 = t / pc.ne2;
+    const float x = uintBitsToFloat(a[pc.a_off + i0 + i1 * pc.a_s1 + i2 * pc.a_s2 + i3 * pc.a_s3]);
+    const float y = uintBitsToFloat(b[pc.b_off + (i0 % pc.b_ne0) + (i1 % pc.b_ne1) * pc.b_s1 + (i2 % pc.b_ne2) * pc.b_s2 +
+                                      (i3 % pc.b_ne3) * pc.b_s3]);
+    float r;
+    if (pc.op == 0u) {
+        r = x + y;
+    } else if (pc.op == 1u) {
+        r = x - y;
+    } else if (pc.op == 2u) {
+        r = x * y;
+    } else {
+        r = x / y;
+    }
+    d[pc.d_off + i0 + i1 * pc.d_s1 + i2 * pc.d_s2 + i3 * pc.d_s3] = floatBitsToUint(r);
+}

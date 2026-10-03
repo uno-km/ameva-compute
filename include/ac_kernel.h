@@ -63,6 +63,9 @@ struct AcVkKernel {
     AcSpecConstant specializations[16];
     AcDim3 effective_local_size;
     char pipeline_identity[AC_PIPELINE_IDENTITY_SHA256_HEX_SIZE];
+    /* descriptor set layout as created: binding numbers and VkDescriptorType per buffer slot */
+    uint32_t binding_index[16];
+    uint32_t binding_descriptor_type[16];
 };
 
 /**

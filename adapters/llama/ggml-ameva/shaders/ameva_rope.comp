@@ -1,0 +1,75 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// AMEVA ROPE (ggml_rope_ext forward), f32, modes NORMAL (0) and NEOX (2), optional frequency factors.
+// One invocation per element pair. The angle follows ggml_rope_cache_init / rope_yarn exactly:
+//   theta_j = p * theta_scale^j, built by the same repeated f32 multiplication as the CPU (bit-identical angle),
+//   divided by freq_factors[j], then YaRN interpolation and magnitude scaling; sin/cos by ameva_sincos.
+// Pairs: NORMAL (2j, 2j+1), NEOX (j, j + n_dims/2); elements past n_dims are copied unchanged.
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+
+layout(std430, binding = 0) readonly buffer A { uint a[]; };
+layout(std430, binding = 1) readonly buffer P { int pos[]; };
+layout(std430, binding = 2) readonly buffer F { uint ff[]; };   // bound to any buffer when has_ff == 0
+layout(std430, binding = 3) writeonly buffer D { uint d[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint ne0, ne1, ne2, ne3;
+    uint a_off, a_s1, a_s2, a_s3;
+    uint d_off, d_s1, d_s2, d_s3;
+    uint pos_off, ff_off, n_dims, mode_neox;
+    uint has_ff, theta_scale, freq_scale, ext_factor;
+    uint attn_factor, corr0, corr1;
+} pc;
+
+void main() {
+    const uint half_ne0 = pc.ne0 >> 1u;
+    const uint i = ameva_linear_id();
+    if (i >= half_ne0 * pc.ne1 * pc.ne2 * pc.ne3) return;
+    uint t = i;
+    const uint j = t % half_ne0;
+    t /= half_ne0;
+    const uint i1 = t % pc.ne1;
+    t /= pc.ne1;
+    const uint i2 = t % pc.ne2;
+    const uint i3 = t / pc.ne2;
+    const uint ab = pc.a_off + i1 * pc.a_s1 + i2 * pc.a_s2 + i3 * pc.a_s3;
+    const uint db = pc.d_off + i1 * pc.d_s1 + i2 * pc.d_s2 + i3 * pc.d_s3;
+
+    if (2u * j >= pc.n_dims) {
+        d[db + 2u * j] = a[ab + 2u * j];
+        d[db + 2u * j + 1u] = a[ab + 2u * j + 1u];
+        return;
+    }
+
+    float theta = float(pos[pc.pos_off + i2]);
+    const float ts = uintBitsToFloat(pc.theta_scale);
+    for (uint k = 0u; k < j; ++k) {
+        theta *= ts;
+    }
+    const float theta_extrap = pc.has_ff != 0u ? theta / uintBitsToFloat(ff[pc.ff_off + j]) : theta;
+    const float freq_scale = uintBitsToFloat(pc.freq_scale);
+    const float ext_factor = uintBitsToFloat(pc.ext_factor);
+    float mscale = uintBitsToFloat(pc.attn_factor);
+    const float theta_interp = freq_scale * theta_extrap;
+    float th = theta_interp;
+    if (ext_factor != 0.0) {
+        const float low = uintBitsToFloat(pc.corr0);
+        const float high = uintBitsToFloat(pc.corr1);
+        const float y = (float(j) - low) / max(0.001, high - low);
+        const float ramp_mix = (1.0 - min(1.0, max(0.0, y))) * ext_factor;
+        th = theta_interp * (1.0 - ramp_mix) + theta_extrap * ramp_mix;
+        mscale *= 1.0 + 0.1 * log(1.0 / freq_scale);
+    }
+    const vec2 sc = ameva_sincos(th);
+    const float sin_t = sc.x * mscale;
+    const float cos_t = sc.y * mscale;
+
+    const uint e0 = pc.mode_neox != 0u ? j : 2u * j;
+    const uint e1 = pc.mode_neox != 0u ? j + (pc.n_dims >> 1u) : 2u * j + 1u;
+    const float x0 = uintBitsToFloat(a[ab + e0]);
+    const float x1 = uintBitsToFloat(a[ab + e1]);
+    d[db + e0] = floatBitsToUint(x0 * cos_t - x1 * sin_t);
+    d[db + e1] = floatBitsToUint(x0 * sin_t + x1 * cos_t);
+}

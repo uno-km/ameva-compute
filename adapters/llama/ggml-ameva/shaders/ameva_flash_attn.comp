@@ -1,0 +1,255 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : require
+// AMEVA FLASH_ATTN_EXT, tiled (FlashAttention-2 forward):
+//   softmax(scale * Q K^T [softcap] + slope * mask) V
+//   q f32 [D, n_q, n_head] (any strides), k [D, n_kv, n_head_kv] and v [DV, n_kv, n_head_kv] in f16 or f32 (any row
+//   and head strides), mask f16 [n_kv, >= n_q, mask_ne2] optional, dst f32 [DV, n_head, n_q] contiguous.
+//   Grouped-query attention: head h reads KV head h / G (G = n_head / n_head_kv). ALiBi slopes as in ggml.
+//
+// A workgroup of 128 invocations owns BQ rows that read the same KV head; a row is one (query position, head of the
+// KV group) pair, so the G heads of a group share every K and V load (token generation: one workgroup per KV head
+// holds all G heads). Keys are processed in blocks of BK:
+//   0. each invocation reads the mask of its BK / (128 / BQ) keys; a block masked out for every row of the tile is
+//      skipped (causal prompts, KV cache padding);
+//   1. the block's K is staged in shared memory as f32 (exact f16 conversion);
+//   2. each invocation computes the scores of its keys for its row and the per-invocation maximum;
+//   3. the row maximum of the block updates the running maximum (online softmax), the probabilities go to shared
+//      memory and the block's V replaces K;
+//   4. each invocation rescales and accumulates its DMAX / (128 / BQ) output columns.
+// Scores, probabilities and accumulation are f32 (ggml's CPU kernel rounds Q to f16 and accumulates V in f16 when V is
+// f16). Variants: -DDMAX=64|128|256 (at least max(D, DV); D and DV multiples of 4), -DBQ, -DBK.
+//
+// Key splits (flash decoding): with split_keys > 0, workgroup z handles keys [z * split_keys, (z + 1) * split_keys)
+// and writes its partial result per output row r = iq1 * n_head + iq2 to binding 5 at
+// part_off + (z * n_q * n_head + r) * (DV + 2): running maximum m, sum l, then the DV unnormalized accumulators.
+// ameva_fa_combine merges the splits. In token generation a tile holds every row of a KV head, so without splits the
+// whole cache of a head is walked by one workgroup.
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+
+layout(std430, binding = 0) readonly buffer Q { uint q[]; };
+layout(std430, binding = 1) readonly buffer K { uint k[]; };
+layout(std430, binding = 2) readonly buffer V { uint v[]; };
+layout(std430, binding = 3) readonly buffer M { uint mask[]; };
+layout(std430, binding = 4) writeonly buffer O { uint o[]; };
+layout(std430, binding = 5) writeonly buffer Part { uint part[]; }; // split partials (any range when split_keys == 0)
+
+layout(push_constant) uniform PushConstants {
+    uint D, DV, n_kv, n_q;
+    uint n_head, n_head_kv, kv_f16, has_mask;
+    uint q_off, q_s1, q_s2, k_off;
+    uint k_s1, k_s2, v_off, v_s1;
+    uint v_s2, m_off, m_s1, m_s2;
+    uint m_ne2, o_off, scale, softcap;
+    uint max_bias, m0, m1, n_head_log2;
+    uint tile_base; // first tile of this dispatch (long prompts are split over several dispatches)
+    uint split_keys, part_off;
+} pc;
+
+#ifndef DMAX
+#define DMAX 64u
+#endif
+#ifndef BQ
+#define BQ 16u
+#endif
+#ifndef BK
+#define BK 32u
+#endif
+#define TPR (128u / BQ)        // invocations per row
+#define KPT (BK / TPR)         // keys per invocation and block
+#define NV (DMAX / 4u / TPR)   // output vec4 per invocation
+#define QS (DMAX / 4u)         // vec4 per staged Q row
+#define KS (DMAX / 4u + 1u)    // vec4 per staged K/V row (padded: neighbouring keys in different banks)
+
+shared vec4 sQ[BQ * QS];
+shared vec4 sKV[BK * KS];
+shared float sP[BQ * BK];
+shared float sMax[128];
+shared uint sAny[2]; // per block parity: some key of the block is unmasked for some row
+
+// 4 consecutive elements of K (is_k) or V starting at element idx
+vec4 load4(bool is_k, uint idx) {
+    if (pc.kv_f16 != 0u) {
+        if ((idx & 1u) == 0u) {
+            const uint w0 = is_k ? k[idx >> 1u] : v[idx >> 1u];
+            const uint w1 = is_k ? k[(idx >> 1u) + 1u] : v[(idx >> 1u) + 1u];
+            return vec4(ameva_h2f(w0 & 0xFFFFu), ameva_h2f(w0 >> 16u), ameva_h2f(w1 & 0xFFFFu), ameva_h2f(w1 >> 16u));
+        }
+        return is_k ? vec4(AMEVA_LOAD_F16(k, idx), AMEVA_LOAD_F16(k, idx + 1u), AMEVA_LOAD_F16(k, idx + 2u),
+                           AMEVA_LOAD_F16(k, idx + 3u))
+                    : vec4(AMEVA_LOAD_F16(v, idx), AMEVA_LOAD_F16(v, idx + 1u), AMEVA_LOAD_F16(v, idx + 2u),
+                           AMEVA_LOAD_F16(v, idx + 3u));
+    }
+    return is_k ? uintBitsToFloat(uvec4(k[idx], k[idx + 1u], k[idx + 2u], k[idx + 3u]))
+                : uintBitsToFloat(uvec4(v[idx], v[idx + 1u], v[idx + 2u], v[idx + 3u]));
+}
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint G = pc.n_head / pc.n_head_kv;
+    const uint hkv = gl_WorkGroupID.y;
+    const uint tile = pc.tile_base + gl_WorkGroupID.x;
+    const uint nrows = pc.n_q * G;
+    const uint i = tid / TPR;     // row of the tile owned by this invocation
+    const uint lane = tid % TPR;
+    const uint r = tile * BQ + i;
+    const bool row_ok = r < nrows;
+    const uint rc = min(r, nrows - 1u);
+    const uint iq1 = rc / G;
+    const uint iq2 = hkv * G + rc % G;
+    const uint D4 = pc.D >> 2u, DV4 = pc.DV >> 2u;
+
+    // Q rows of the tile (zero past the last row and past D)
+    for (uint e = tid; e < BQ * QS; e += 128u) {
+        const uint ii = e / QS, d4 = e % QS;
+        const uint rr = tile * BQ + ii;
+        vec4 x = vec4(0.0);
+        if (rr < nrows && d4 < D4) {
+            const uint b = pc.q_off + (rr / G) * pc.q_s1 + (hkv * G + rr % G) * pc.q_s2 + 4u * d4;
+            x = uintBitsToFloat(uvec4(q[b], q[b + 1u], q[b + 2u], q[b + 3u]));
+        }
+        sQ[e] = x;
+    }
+    if (tid < 2u) sAny[tid] = 0u;
+
+    float scale = uintBitsToFloat(pc.scale);
+    const float softcap = uintBitsToFloat(pc.softcap);
+    if (softcap != 0.0) scale /= softcap;
+    const float max_bias = uintBitsToFloat(pc.max_bias);
+    float slope = 1.0;
+    if (max_bias > 0.0) {
+        slope = iq2 < pc.n_head_log2 ? pow(uintBitsToFloat(pc.m0), float(iq2 + 1u))
+                                     : pow(uintBitsToFloat(pc.m1), float(2u * (iq2 - pc.n_head_log2) + 1u));
+    }
+    const float NEG_INF = -1.0 / 0.0;
+    const uint kbase = pc.k_off + hkv * pc.k_s2;
+    const uint vbase = pc.v_off + hkv * pc.v_s2;
+    const uint mrow = pc.m_off + iq1 * pc.m_s1 + (iq2 % pc.m_ne2) * pc.m_s2;
+    const uint split = gl_WorkGroupID.z;
+    const uint kv_begin = pc.split_keys != 0u ? split * pc.split_keys : 0u;
+    const uint kv_end = pc.split_keys != 0u ? min(pc.n_kv, kv_begin + pc.split_keys) : pc.n_kv;
+
+    vec4 acc[NV];
+    [[unroll]] for (uint n = 0u; n < NV; ++n) {
+        acc[n] = vec4(0.0);
+    }
+    float m_run = NEG_INF;
+    float l_run = 0.0;
+    barrier();
+
+    uint blk = 0u;
+    for (uint kb = kv_begin; kb < kv_end; kb += BK, ++blk) {
+        // 0. mask of this invocation's keys (-inf: masked or past the key range or not a row of the tile)
+        float mv[KPT];
+        bool any = false;
+        [[unroll]] for (uint c = 0u; c < KPT; ++c) {
+            const uint j = kb + lane + TPR * c;
+            float m = NEG_INF;
+            if (row_ok && j < kv_end) {
+                m = pc.has_mask != 0u ? slope * AMEVA_LOAD_F16(mask, mrow + j) : 0.0;
+            }
+            mv[c] = m;
+            any = any || m != NEG_INF;
+        }
+        if (any) sAny[blk & 1u] = 1u;
+        // the other flag was last read before a barrier this invocation has passed (or in a skipped block, where it
+        // was 0 already)
+        if (tid == 0u) sAny[(blk + 1u) & 1u] = 0u;
+        barrier();
+        if (sAny[blk & 1u] == 0u) {
+            continue; // uniform: every key of the block is masked for every row
+        }
+
+        // 1. K of the block
+        for (uint e = tid; e < BK * D4; e += 128u) {
+            const uint j = e / D4, d4 = e % D4;
+            sKV[j * KS + d4] = kb + j < kv_end ? load4(true, kbase + (kb + j) * pc.k_s1 + 4u * d4) : vec4(0.0);
+        }
+        barrier();
+
+        // 2. scores of this invocation's keys
+        float s[KPT];
+        float mloc = NEG_INF;
+        [[unroll]] for (uint c = 0u; c < KPT; ++c) {
+            float x = NEG_INF;
+            if (mv[c] != NEG_INF) {
+                const uint jl = lane + TPR * c;
+                float dotv = 0.0;
+                for (uint d4 = 0u; d4 < D4; ++d4) {
+                    dotv += dot(sQ[i * QS + d4], sKV[jl * KS + d4]);
+                }
+                x = dotv * scale;
+                if (softcap != 0.0) x = softcap * ameva_tanh(x);
+                x += mv[c];
+            }
+            s[c] = x;
+            mloc = max(mloc, x);
+        }
+        sMax[tid] = mloc;
+        barrier();
+
+        // 3. running maximum of the row, probabilities, V of the block
+        float mblk = NEG_INF;
+        [[unroll]] for (uint l2 = 0u; l2 < TPR; ++l2) {
+            mblk = max(mblk, sMax[i * TPR + l2]);
+        }
+        const float m_new = max(m_run, mblk);
+        [[unroll]] for (uint c = 0u; c < KPT; ++c) {
+            sP[i * BK + lane + TPR * c] = (m_new == NEG_INF || s[c] == NEG_INF) ? 0.0 : exp(s[c] - m_new);
+        }
+        for (uint e = tid; e < BK * DV4; e += 128u) {
+            const uint j = e / DV4, d4 = e % DV4;
+            sKV[j * KS + d4] = kb + j < kv_end ? load4(false, vbase + (kb + j) * pc.v_s1 + 4u * d4) : vec4(0.0);
+        }
+        barrier();
+
+        // 4. rescale and accumulate this invocation's output columns
+        const float alpha = m_run == NEG_INF ? 0.0 : exp(m_run - m_new);
+        [[unroll]] for (uint n = 0u; n < NV; ++n) {
+            acc[n] *= alpha;
+        }
+        float lblk = 0.0;
+        for (uint jl = 0u; jl < BK; ++jl) {
+            const float p = sP[i * BK + jl];
+            lblk += p;
+            [[unroll]] for (uint n = 0u; n < NV; ++n) {
+                acc[n] += p * sKV[jl * KS + lane + TPR * n];
+            }
+        }
+        l_run = l_run * alpha + lblk;
+        m_run = m_new;
+        barrier();
+    }
+
+    if (row_ok && pc.split_keys != 0u) {
+        const uint pb = pc.part_off + (split * pc.n_q * pc.n_head + iq1 * pc.n_head + iq2) * (pc.DV + 2u);
+        if (lane == 0u) {
+            part[pb] = floatBitsToUint(m_run);
+            part[pb + 1u] = floatBitsToUint(l_run);
+        }
+        [[unroll]] for (uint n = 0u; n < NV; ++n) {
+            const uint d4 = lane + TPR * n;
+            if (d4 < DV4) {
+                part[pb + 2u + 4u * d4 + 0u] = floatBitsToUint(acc[n].x);
+                part[pb + 2u + 4u * d4 + 1u] = floatBitsToUint(acc[n].y);
+                part[pb + 2u + 4u * d4 + 2u] = floatBitsToUint(acc[n].z);
+                part[pb + 2u + 4u * d4 + 3u] = floatBitsToUint(acc[n].w);
+            }
+        }
+    } else if (row_ok) {
+        const float inv = l_run == 0.0 ? 0.0 : 1.0 / l_run;
+        const uint ob = pc.o_off + (iq1 * pc.n_head + iq2) * pc.DV;
+        [[unroll]] for (uint n = 0u; n < NV; ++n) {
+            const uint d4 = lane + TPR * n;
+            if (d4 < DV4) {
+                const vec4 x = acc[n] * inv;
+                o[ob + 4u * d4 + 0u] = floatBitsToUint(x.x);
+                o[ob + 4u * d4 + 1u] = floatBitsToUint(x.y);
+                o[ob + 4u * d4 + 2u] = floatBitsToUint(x.z);
+                o[ob + 4u * d4 + 3u] = floatBitsToUint(x.w);
+            }
+        }
+    }
+}
