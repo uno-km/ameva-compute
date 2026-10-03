@@ -81,9 +81,11 @@ void main() {
 #if UPL == 1
     // One unit per lane and step (the build that ships): the loop below is the only unit loop. The UPL > 1 form
     // compiled for UPL == 1 - a main loop that covers every unit and a leftover loop that never runs - is the same
-    // computation, but the Mali r38 drivers ran it about 12x slower: Mali-G78 r38p0 (Galaxy S21, 2026-10-04), q5_0
-    // 4864x896, 2988 us per dispatch against 235 us with this single loop (mali_qmv: 276-301 us). Removing the
-    // fusion epilogue instead did not help (3071 us). Mali-G68 r32p1 and Adreno did not show the slowdown.
+    // computation, but the Mali r38 drivers ran it about 10x slower: Mali-G78 r38p0 (Galaxy S21, 2026-10-04), q5_0
+    // 4864x896, 2988 us per dispatch against 235 us with this single loop (mali_qmv: 276-301 us); removing the
+    // fusion epilogue instead did not help (3071 us). Mali-G68 r38p1 (Galaxy A35): 6061-6524 us against 671-680 us.
+    // Adreno 650 with Mesa Turnip: the default layout took about 1.6x the GPU time per graph. Mali-G68 r32p1 and
+    // Adreno 830 ran both forms at the same speed.
     const uint UQ = 0u;
 #else
     // Each step a lane takes UPL consecutive units: their activations are one contiguous read, their quants one

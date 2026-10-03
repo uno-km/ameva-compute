@@ -5,9 +5,11 @@
 // mali_qmv: token-generation MUL_MAT (one activation row) on a weight stored in the AMEVA repacked layout, as
 // ameva_qmv with COLS == 1, in another work split: 128 invocations (32 x 4), one weight row per 32 lanes, every lane
 // one 32-weight unit per step, partial sums reduced in shared memory. Written for low register use per lane on Mali.
-// One of the layouts the host chooses from per device and shape (ggml-ameva.cpp, token-generation GEMV selection):
-// measured 2026-10-03, it ran Qwen2.5-0.5B decode 6-11x faster than ameva_qmv (4 rows x 16 lanes) on Mali-G78
-// (r38p0) and up to 2.2x slower on Mali-G68 MP4 (r32p1).
+// One of the layouts the host chooses from per device and shape (ggml-ameva.cpp, token-generation GEMV selection).
+// Measured 2026-10-04 with Qwen2.5-0.5B against the default ameva_qmv layout (4 rows x 16 lanes): the fastest layout
+// for some 128-row and k-quant shapes on Mali (the default up to 2.8x slower at 128 rows), 0.9-1.9x the default's
+// time on the large shapes on Mali, 1.6-1.9x on Adreno 830, 4.6-8.3x on Adreno 650 (Turnip). The 6-11x advantage
+// recorded on Mali-G78 on 2026-10-03 was against an ameva_qmv build with a duplicated unit loop (ameva_qmv.comp).
 // Same bindings and push constants as ameva_qmv (tpr is not read).
 
 layout(local_size_x = 32, local_size_y = 4, local_size_z = 1) in;

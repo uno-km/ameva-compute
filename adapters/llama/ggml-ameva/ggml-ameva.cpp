@@ -1391,12 +1391,20 @@ static uint32_t ameva_qmv_tpr(uint32_t units) {
 //   mali_qmv   32 lanes per weight row, 4 weight rows per workgroup of 128 invocations
 // The fastest layout depends on the device, its driver and the shape, and what the driver reports does not decide
 // it: Mali-G68 (r32p1, r38p1) and Mali-G78 (r38p0) report the same subgroup size (16, fixed) and the same limits, yet
-// with Qwen2.5-0.5B (2026-10-03) the default ameva_qmv layout was the fastest for the large shapes on the G68 MP4
-// (mali_qmv up to 2.2x slower) and 6-11x slower than mali_qmv on the G78. So the layout is measured: before the first
+// with Qwen2.5-0.5B Q4_K_M (2026-10-04) the fastest layout differed by device and shape. Large shapes: 4 rows x 8
+// lanes on the G68 r32p1 (default 6-12 % slower), the default or 4 x 32 on the G68 r38p1, the default, 4 x 8 or
+// mali_qmv on the G78. 128-row shapes: 1 row per lane group or mali_qmv on all three (default 1.5-2.8x slower).
+// mali_qmv against the default on the large shapes: 1.0-1.9x slower on the G68, 0.9-1.3x on the G78, 1.6-1.9x slower
+// on Adreno 830, 4.6-8.3x slower on Adreno 650 (Turnip). So the layout is measured: before the first
 // graph that multiplies a weight shape (type, K, N) not seen before, every candidate runs on that weight with a GPU
 // timestamp after each dispatch (ameva_qmv_tune_shape), and the fastest is kept unless the default is within
 // kQmvTuneMargin of it. Results are kept per device and driver (s_device_key) and per kernel build (SPIR-V SHA-256
 // of both families) in the tune file, so a device measures each shape once.
+// The measurement ranks layouts by GPU time per dispatch. Token speed also depends on the clock the GPU governor
+// picks, which the engine does not control: on the Galaxy S21 (Mali-G78, "Interactive" governor, 2026-10-04) 27 runs
+// of one build had a mean GPU clock of 465 to 820 MHz and 10.7 to 25.6 t/s (correlation 0.83). The governor stayed at
+// a low clock more often with the ameva_qmv layouts (22.4-22.7 t/s per GHz of mean clock, median 11.6-14.7 t/s) than
+// with mali_qmv (20.3 t/s per GHz, median 15.8 t/s): scripts/termux/lab/gpu_clock_ab.sh.
 //   AMEVA_QMV_KERNEL=auto|qmv|mali   auto (default): measured; qmv or mali: that family, nothing measured
 //   AMEVA_QMV_ROWS=1|2|4, AMEVA_QMV_TPR=4|8|16|32|64   fix the ameva_qmv layout (nothing measured; AMEVA_QMV_TPR
 //                                    also sets the prompt variant's lanes per row)
