@@ -1,0 +1,82 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : require
+
+// AMEVA Mali-Optimized QMV: 128 threads (32x4), zero stack-spill streaming architecture.
+// Designed to keep registers < 24 per lane for 100% occupancy on ARM Mali Valhall / Bifrost GPUs.
+
+layout(local_size_x = 32, local_size_y = 4, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+
+layout(std430, binding = 3) readonly buffer BufA { vec4 a4[]; };
+layout(std430, binding = 4) writeonly buffer BufD { float dst[]; };
+layout(std430, binding = 5) readonly buffer BufE { float epi[]; };
+layout(std430, binding = 6) writeonly buffer BufEO { float eout[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint M, K, N, q_off;
+    uint h_off, s_off, a_off, d_off;
+    uint s1, sd, tpr, ep_mode;
+    uint e_off, eo_off;
+} pc;
+
+#include "mali_qdecode.glsl"
+
+shared float red[4][32];
+
+void main() {
+    const uint local_lane = gl_LocalInvocationID.x;
+    const uint local_row  = gl_LocalInvocationID.y;
+    const uint tid = local_row * 32u + local_lane;
+
+    qdecode_init(tid);
+
+    const uint global_row = gl_WorkGroupID.x * 4u + local_row;
+    const uint U = pc.K >> 5u;
+    const uint s_row = (pc.K / BLOCK_ELEMS) * SB;
+
+    float acc = 0.0;
+
+    if (global_row < pc.N) {
+        for (uint u = local_lane; u < U; u += 32u) {
+            const uint b = u / UPB;
+            const uint qi = pc.q_off + (global_row * U + u) * QPER;
+            const uint hi = pc.h_off + global_row * U + u;
+            const uint sb = pc.s_off + global_row * s_row + b * SB;
+            const uint ab = (pc.a_off + 32u * u) >> 2u;
+            decode_dot(qi, hi, sb, u - b * UPB, ab, acc);
+        }
+    }
+
+    red[local_row][local_lane] = acc;
+    barrier();
+
+    if (local_lane < 16u) red[local_row][local_lane] += red[local_row][local_lane + 16u];
+    barrier();
+    if (local_lane < 8u)  red[local_row][local_lane] += red[local_row][local_lane + 8u];
+    barrier();
+    if (local_lane < 4u)  red[local_row][local_lane] += red[local_row][local_lane + 4u];
+    barrier();
+    if (local_lane < 2u)  red[local_row][local_lane] += red[local_row][local_lane + 2u];
+    barrier();
+    if (local_lane < 1u)  red[local_row][local_lane] += red[local_row][local_lane + 1u];
+    barrier();
+
+    if (local_lane == 0u && global_row < pc.N) {
+        const float val = red[local_row][0];
+        dst[pc.d_off + global_row] = val;
+        if (pc.ep_mode != 0u) {
+            const float e = epi[pc.e_off + global_row];
+            float o;
+            if (pc.ep_mode == 1u) {
+                o = val + e;
+            } else if (pc.ep_mode == 2u) {
+                o = (val / (1.0 + exp(-val))) * e;
+            } else {
+                o = (e / (1.0 + exp(-e))) * val;
+            }
+            eout[pc.eo_off + global_row] = o;
+        }
+    }
+}

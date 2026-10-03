@@ -243,6 +243,8 @@ static AcContext* s_ctx = nullptr;
 static AcDeviceLimits s_limits = {};
 static AcKernel* s_qmm[AMEVA_QMM_VARIANT_COUNT] = {};
 static AcKernel* s_qmv[AMEVA_QMV_VARIANT_COUNT] = {};
+static AcKernel* s_mali_qmv[AMEVA_MALI_QMV_VARIANT_COUNT] = {};
+static bool s_is_mali = false;
 static AcKernel* s_qgemm[AMEVA_QGEMM_VARIANT_COUNT] = {};
 static AcKernel* s_mmq[AMEVA_MMQ_VARIANT_COUNT] = {};
 static AcKernel* s_fa[AMEVA_FA_VARIANT_COUNT] = {};
@@ -362,6 +364,19 @@ AcContext* ameva_get_ac_context() {
             return nullptr;
         }
         ameva_pipeline_cache_load(s_ctx);
+        char dev_name[128] = {};
+        if (ac_runtime_context_get_device_name(s_ctx, dev_name, sizeof(dev_name)) == AC_SUCCESS) {
+            if (strstr(dev_name, "Mali") != nullptr) {
+                s_is_mali = true;
+            }
+        }
+        const char* env_mali = getenv("AMEVA_MALI_QMV");
+        if (env_mali) {
+            s_is_mali = (strcmp(env_mali, "1") == 0 || strcmp(env_mali, "on") == 0);
+        }
+        if (s_is_mali) {
+            fprintf(stderr, "ggml-ameva: ARM Mali architecture detected: Mali-optimized GEMV enabled\n");
+        }
     }
     return s_ctx;
 }
@@ -428,6 +443,25 @@ static AcKernel* ameva_qmm_kernel(int idx) {
     return s_qmm[idx];
 }
 
+static AcKernel* ameva_make_kernel_2d(const char* name, const uint32_t* spirv, size_t bytes, const char* sha,
+                                      uint32_t bindings, uint32_t push_bytes, uint32_t local_x, uint32_t local_y) {
+    AcKernelRuntimeMetadata meta = {
+        name, "main", bindings, kBindings, push_bytes, { local_x, local_y, 1 }, 0, sha, 0, nullptr
+    };
+    AcKernelDesc kdesc = { AC_ABI_VERSION, sizeof(AcKernelDesc), spirv, bytes, &meta, 0, nullptr };
+    AcKernel* k = nullptr;
+    const uint64_t t0 = ameva_now_ns();
+    AcResult res = ac_runtime_kernel_create(s_ctx, &kdesc, &k);
+    g_prof_kcreate_ns.fetch_add(ameva_now_ns() - t0);
+    g_prof_kcreate_n.fetch_add(1);
+    if (res != AC_SUCCESS) {
+        fprintf(stderr, "ggml-ameva: failed to create kernel %s (code %d)\n", name, res);
+        return nullptr;
+    }
+    ameva_increment_kernel_create_count();
+    return k;
+}
+
 static AcKernel* ameva_qmv_kernel(int idx) {
     static char names[AMEVA_QMV_VARIANT_COUNT][40];
     std::lock_guard<std::mutex> lock(s_mutex);
@@ -438,6 +472,19 @@ static AcKernel* ameva_qmv_kernel(int idx) {
                                        AMEVA_QMV_PUSH_CONSTANT_BYTES, AMEVA_QMV_LOCAL_SIZE_X);
     }
     return s_qmv[idx];
+}
+
+static AcKernel* ameva_mali_qmv_kernel(int idx) {
+    static char names[AMEVA_MALI_QMV_VARIANT_COUNT][40];
+    std::lock_guard<std::mutex> lock(s_mutex);
+    if (!s_mali_qmv[idx] && s_ctx) {
+        const AmevaMaliQmvVariant& v = kAmevaMaliQmvVariants[idx];
+        snprintf(names[idx], sizeof(names[idx]), "mali_qmv_%s", v.type_name);
+        s_mali_qmv[idx] = ameva_make_kernel_2d(names[idx], v.spirv, v.spirv_bytes, v.spirv_sha256,
+                                              AMEVA_MALI_QMV_BINDINGS, AMEVA_MALI_QMV_PUSH_CONSTANT_BYTES,
+                                              AMEVA_MALI_QMV_LOCAL_SIZE_X, AMEVA_MALI_QMV_LOCAL_SIZE_Y);
+    }
+    return s_mali_qmv[idx];
 }
 
 static AcKernel* ameva_qgemm_kernel(int idx) {
@@ -720,6 +767,15 @@ static int ameva_qmv_find(enum ggml_type type, uint32_t cols) {
     if (!tn) return -1;
     for (int i = 0; i < AMEVA_QMV_VARIANT_COUNT; ++i) {
         if (kAmevaQmvVariants[i].cols == cols && strcmp(kAmevaQmvVariants[i].type_name, tn) == 0) return i;
+    }
+    return -1;
+}
+
+static int ameva_mali_qmv_find(enum ggml_type type) {
+    const char* tn = ggml_type_name(type);
+    if (!tn) return -1;
+    for (int i = 0; i < AMEVA_MALI_QMV_VARIANT_COUNT; ++i) {
+        if (strcmp(kAmevaMaliQmvVariants[i].type_name, tn) == 0) return i;
     }
     return -1;
 }
@@ -1311,11 +1367,20 @@ static const char* enc_mul_mat(AmevaRecorder& rec, const struct ggml_tensor* nod
             rows_per_wg = 64; // shaders/ameva_qgemm.comp tile: 64 weight rows x 32 activation rows
             cols_per_wg = 32;
         } else {
-            const int vi = ameva_qmv_find(src0->type, ncols);
-            kernel = vi >= 0 ? ameva_qmv_kernel(vi) : nullptr;
-            if (!kernel) return "no ameva_qmv kernel";
-            tpr = ameva_qmv_tpr(K / 32);
-            rows_per_wg = (64u / tpr) * kAmevaQmvVariants[vi].rows;
+            const bool use_mali = (ncols == 1 && s_is_mali);
+            const int mvi = use_mali ? ameva_mali_qmv_find(src0->type) : -1;
+            if (mvi >= 0) {
+                kernel = ameva_mali_qmv_kernel(mvi);
+                if (!kernel) return "no ameva_mali_qmv kernel";
+                rows_per_wg = 4;
+                tpr = 32;
+            } else {
+                const int vi = ameva_qmv_find(src0->type, ncols);
+                kernel = vi >= 0 ? ameva_qmv_kernel(vi) : nullptr;
+                if (!kernel) return "no ameva_qmv kernel";
+                tpr = ameva_qmv_tpr(K / 32);
+                rows_per_wg = (64u / tpr) * kAmevaQmvVariants[vi].rows;
+            }
         }
         if (!ameva_repack_layout(base->type, &L) || !ameva_repack_regions(base->type, base->ne[0], ggml_nrows(base), &R))
             return "repacked weight without a layout";

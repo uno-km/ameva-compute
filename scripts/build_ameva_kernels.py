@@ -172,7 +172,7 @@ def main():
               "/* compiler: %s, --target-env vulkan1.0, NOT checked by spirv-val (--spirv-val none) */" % version),
              "#ifndef GGML_AMEVA_KERNELS_SPV_H", "#define GGML_AMEVA_KERNELS_SPV_H", "",
              "#include <stddef.h>", "#include <stdint.h>", ""]
-    qmm, qmv, qgemm, mmq, fa, ops = [], [], [], [], [], []
+    qmm, qmv, mali_qmv, qgemm, mmq, fa, ops = [], [], [], [], [], [], []
     with tempfile.TemporaryDirectory() as tmp:
         qsrc = os.path.join(SHADERS, "ameva_qmm.comp")
         qbind, qpush, qlocal = source_info(qsrc)
@@ -203,6 +203,17 @@ def main():
                 emit_array(lines, var, data)
                 qmv.append((name, cols, rows, var, len(data), hashlib.sha256(data).hexdigest()))
                 print("qmv %-6s cols=%d rows=%d %6d bytes sha256=%s" % (name, cols, rows, len(data), qmv[-1][5]))
+        msrc_mali = os.path.join(SHADERS, "mali_qmv.comp")
+        mbind_mali, mpush_mali, mlocal_mali = source_info(msrc_mali)
+        for name, define in QMV_TYPES:
+            spv = os.path.join(tmp, "mali_qmv_%s.spv" % name)
+            data, rsize = compile_module(args, msrc_mali, [define], spv)
+            if rsize is not None and rsize != mpush_mali:
+                fail("mali_qmv %s: reflection says %d push-constant bytes, source %d" % (name, rsize, mpush_mali))
+            var = "kAmevaMaliQmv_%s" % name
+            emit_array(lines, var, data)
+            mali_qmv.append((name, var, len(data), hashlib.sha256(data).hexdigest()))
+            print("mali_qmv %-6s %6d bytes sha256=%s" % (name, len(data), mali_qmv[-1][3]))
         gsrc = os.path.join(SHADERS, "ameva_qgemm.comp")
         gbind, gpush, glocal = source_info(gsrc)
         for name, define in QMV_TYPES:
@@ -283,6 +294,18 @@ def main():
               "typedef struct {",
               "    const char* type_name;   /* ggml_type_name() of the weight type (stored repacked) */",
               "    const uint32_t* spirv;", "    size_t spirv_bytes;", "    const char* spirv_sha256;",
+              "} AmevaMaliQmvVariant;", "",
+              "static const AmevaMaliQmvVariant kAmevaMaliQmvVariants[] = {"]
+    for name, var, nbytes, sha in mali_qmv:
+        lines.append('    { "%s", %s, %du, "%s" },' % (name, var, nbytes, sha))
+    lines += ["};", "#define AMEVA_MALI_QMV_VARIANT_COUNT %d" % len(mali_qmv),
+              "#define AMEVA_MALI_QMV_BINDINGS %d" % mbind_mali,
+              "#define AMEVA_MALI_QMV_PUSH_CONSTANT_BYTES %d" % mpush_mali,
+              "#define AMEVA_MALI_QMV_LOCAL_SIZE_X 32",
+              "#define AMEVA_MALI_QMV_LOCAL_SIZE_Y 4", "",
+              "typedef struct {",
+              "    const char* type_name;   /* ggml_type_name() of the weight type (stored repacked) */",
+              "    const uint32_t* spirv;", "    size_t spirv_bytes;", "    const char* spirv_sha256;",
               "} AmevaQgemmVariant;", "",
               "static const AmevaQgemmVariant kAmevaQgemmVariants[] = {"]
     for name, var, nbytes, sha in qgemm:
@@ -329,8 +352,8 @@ def main():
     lines += ["};", "", "#endif /* GGML_AMEVA_KERNELS_SPV_H */", ""]
     with open(args.out, "w", newline="\n") as f:
         f.write("\n".join(lines))
-    print("wrote %s (%d qmm, %d qmv, %d qgemm, %d mmq, %d fa variants, %d op kernels)" %
-          (args.out, len(qmm), len(qmv), len(qgemm), len(mmq), len(fa), len(ops)))
+    print("wrote %s (%d qmm, %d qmv, %d mali_qmv, %d qgemm, %d mmq, %d fa variants, %d op kernels)" %
+          (args.out, len(qmm), len(qmv), len(mali_qmv), len(qgemm), len(mmq), len(fa), len(ops)))
 
 
 if __name__ == "__main__":
