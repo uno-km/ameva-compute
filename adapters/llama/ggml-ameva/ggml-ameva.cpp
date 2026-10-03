@@ -263,7 +263,8 @@ static std::mutex s_compute_mutex;  // graph_compute (the status buffer is share
 // =0: no cache file; any other value: that path. Data of another device or driver version is rejected by the runtime
 // (header check) and replaced at exit. Saved at teardown when this run added pipelines (the data grew).
 static std::string s_pcache_path;
-static size_t s_pcache_loaded_bytes = 0;
+static size_t s_pcache_loaded_bytes = 0;    // cache bytes on disk (loaded or last written)
+static uint64_t s_pcache_kcreate_seen = 0;  // kernel creations already accounted for by a save check
 
 static std::string ameva_pipeline_cache_path(void) {
     const char* e = getenv("AMEVA_PIPELINE_CACHE");
@@ -335,7 +336,20 @@ static void ameva_pipeline_cache_save(void) {
         fprintf(stderr, "ggml-ameva: pipeline cache %s could not be written (%s)\n", s_pcache_path.c_str(),
                 strerror(errno));
         remove(tmp.c_str());
+        return;
     }
+    s_pcache_loaded_bytes = size;
+}
+
+// After a graph completed: when kernels were created since the last check, save the cache if it grew. Library
+// destructors are not a reliable save point (an Android process may end without running them: on Galaxy S25 no cache
+// file was ever written from teardown), so the cache is saved as soon as new pipelines exist; the teardown save stays.
+static void ameva_pipeline_cache_checkpoint(void) {
+    const uint64_t n = g_prof_kcreate_n.load();
+    if (n == s_pcache_kcreate_seen) return;
+    std::lock_guard<std::mutex> lock(s_mutex);
+    s_pcache_kcreate_seen = n;
+    ameva_pipeline_cache_save();
 }
 
 AcContext* ameva_get_ac_context() {
@@ -850,6 +864,20 @@ const char* ameva_op_unsupported_reason(const struct ggml_tensor* op) {
         for (int i = 0; i < GGML_MAX_SRC; ++i) {
             if (op->src[i] && !(op->op == GGML_OP_MUL_MAT && i == 0) && ameva_repacked_base(op->src[i]))
                 return "reads a repacked weight outside MUL_MAT";
+        }
+        // With AMEVA_REPACK_ALL=1 a quantized tensor becomes repacked at its first write, which usually comes after
+        // this question (test-backend-ops asks, then allocates and fills): decline up front every op that would write
+        // such a tensor or read it other than as MUL_MAT weights (the quantized KV-cache ops), instead of failing at
+        // graph_compute.
+        if (ameva_repack_all_enabled()) {
+            if (ggml_is_quantized(op->type) && ameva_qmv_has_type(op->type))
+                return "AMEVA_REPACK_ALL stores this quantized result repacked";
+            for (int i = 0; i < GGML_MAX_SRC; ++i) {
+                const struct ggml_tensor* s = op->src[i];
+                if (s && !(op->op == GGML_OP_MUL_MAT && i == 0) && ggml_is_quantized(s->type) &&
+                    ameva_qmv_has_type(s->type))
+                    return "AMEVA_REPACK_ALL stores this quantized input repacked";
+            }
         }
     }
     switch (op->op) {
@@ -2203,6 +2231,7 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
     ameva_count_qmv_mul_mat(rec.qmv_nodes);
     ameva_count_mmq_mul_mat(rec.mmq_nodes);
     g_prof_fused.fetch_add((uint64_t)rec.fused_pairs);
+    ameva_pipeline_cache_checkpoint();
     return GGML_STATUS_SUCCESS;
 }
 

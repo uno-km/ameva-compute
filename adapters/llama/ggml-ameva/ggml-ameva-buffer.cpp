@@ -43,6 +43,10 @@ static bool ameva_repack_all(void) {
     return all;
 }
 
+bool ameva_repack_all_enabled(void) {
+    return ameva_repack_enabled() && ameva_repack_all();
+}
+
 // tensor->extra of a repacked tensor; only the address is used
 static char s_repacked_tag;
 

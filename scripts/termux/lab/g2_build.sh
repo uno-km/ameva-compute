@@ -9,7 +9,7 @@
 #   ameva_fuse_check    graph-engine fusion, run with AMEVA_FUSE=1 and =0: both must pass and print the same hash
 set -u
 LAB=$HOME/abi-lab
-SRC=$LAB/src
+SRC=${SRC:-$LAB/src} # another source tree (e.g. ~/abi-lab/src-<tag>) keeps parallel sessions apart
 P=/data/data/com.termux/files/usr
 OUT=${1:-$LAB/out-g2}
 mkdir -p "$OUT"

@@ -31,6 +31,8 @@ struct ggml_backend_ameva_buffer_context {
 // Weights are repacked unless AMEVA_REPACK=0. With repacking, AMEVA buffers are not host buffers: only the buffer
 // interface (which converts) may read or write their tensors.
 bool ameva_repack_enabled(void);
+// AMEVA_REPACK_ALL=1 (tests): eligible quantized tensors of every buffer are repacked at their first write
+bool ameva_repack_all_enabled(void);
 // The repacked tensor holding t's bytes: t itself, or the tensor t is a view of. nullptr: t's bytes are in the ggml
 // layout.
 const struct ggml_tensor* ameva_repacked_base(const struct ggml_tensor* t);

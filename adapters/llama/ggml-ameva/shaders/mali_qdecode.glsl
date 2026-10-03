@@ -25,7 +25,7 @@ layout(std430, binding = 0) readonly buffer BufQ { QVEC qv[]; };
 layout(std430, binding = 1) readonly buffer BufH { HVEC hv[]; };
 layout(std430, binding = 2) readonly buffer BufS { uint sw[]; };
 
-uint s_last;
+uint s_last; // last word of the S binding: a clamped word only feeds bytes outside the field being read
 uint sw_at(uint wi) { return sw[min(wi, s_last)]; }
 uint sld32(uint a) {
     const uint wi = a >> 2u;
@@ -80,7 +80,10 @@ vec4 kv4(uint q) { return vec4(s_kv[q & 0xFu], s_kv[(q >> 8u) & 0xFu], s_kv[(q >
 #define UPB (BLOCK_ELEMS / 32u)
 
 void qdecode_init(uint tid) {
-    s_last = (pc.s_off >> 2u) + (pc.N * ((pc.K / BLOCK_ELEMS) * SB) >> 2u) - 1u;
+    // The bound is the end of the binding, as in ameva_qdecode.glsl. A bound computed from this dispatch's rows
+    // ((s_off >> 2) + (N * s_row >> 2) - 1) is one word short whenever s_off or N * s_row is 2 modulo 4: the last
+    // scale field of the last row was then read from the word before it.
+    s_last = uint(sw.length()) - 1u;
 #ifdef KV_LUT
     if (tid < 16u) s_kv[tid] = kv_init(tid);
     barrier();

@@ -30,8 +30,10 @@ die() { echo "[build_ggml_ameva] ERROR: $*" >&2; exit 2; }
 [ -n "$GGML_DIR" ] && [ -n "$GGML_LIB" ] || die "--ggml-dir and --ggml-lib are required (no default: a wrong ggml builds fine and fails at run time)"
 [ -f "$GGML_DIR/include/ggml-backend.h" ] || die "$GGML_DIR/include/ggml-backend.h not found"
 [ -f "$GGML_DIR/src/ggml-backend-impl.h" ] || die "$GGML_DIR/src/ggml-backend-impl.h not found"
-BASE_LIB="$(ls "$GGML_LIB"/libggml-base.so* 2>/dev/null | head -n 1)"
-REG_LIB="$(ls "$GGML_LIB"/libggml.so* 2>/dev/null | head -n 1)"
+# first match of each glob (no "ls | head": under pipefail, head closing the pipe early fails the pipeline)
+first_match() { local f; for f in "$@"; do [ -e "$f" ] && { printf '%s\n' "$f"; return 0; }; done; return 0; }
+BASE_LIB="$(first_match "$GGML_LIB"/libggml-base.so*)"
+REG_LIB="$(first_match "$GGML_LIB"/libggml.so*)"
 [ -n "$BASE_LIB" ] && [ -n "$REG_LIB" ] || die "libggml-base.so / libggml.so not found in $GGML_LIB"
 mkdir -p "$OUT"
 
@@ -66,10 +68,11 @@ if command -v llama-completion >/dev/null 2>&1; then
     done
     devs="$(LD_LIBRARY_PATH="$RT:$OUT" GGML_BACKEND_PATH="$OUT/libggml-ameva.so" \
             llama-completion --list-devices 2>&1 || true)"
-    if printf '%s\n' "$devs" | grep -q "AMEVA0"; then
+    # here-strings, not "printf | grep -q": grep -q exits at the first match and printf would fail with SIGPIPE
+    if grep -q "AMEVA0" <<< "$devs"; then
         echo "[build_ggml_ameva] llama.cpp registered AMEVA0 from the new library"
     else
-        printf '%s\n' "$devs" | grep -E "ggml-ameva|load_backend" >&2 || true
+        grep -E "ggml-ameva|load_backend" <<< "$devs" >&2 || true
         die "the installed llama.cpp did not register AMEVA0 from $OUT/libggml-ameva.so (ggml version mismatch?)"
     fi
 else
