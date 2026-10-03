@@ -30,6 +30,7 @@ static std::atomic<int64_t> g_ameva_q5_0_staging_free_count{0};
 static std::atomic<int64_t> g_ameva_repacked_tensor_count{0};
 static std::atomic<int64_t> g_ameva_repacked_bytes{0};
 static std::atomic<int64_t> g_ameva_qmv_mul_mat_count{0};
+static std::atomic<int64_t> g_ameva_mmq_mul_mat_count{0};
 static std::atomic<int>     g_ameva_failure_injection{0};
 
 #ifndef GGML_AMEVA_BUILD_COMMIT
@@ -108,6 +109,10 @@ int64_t ggml_backend_ameva_get_repacked_bytes(void) {
     return g_ameva_repacked_bytes.load();
 }
 
+int64_t ggml_backend_ameva_get_mmq_mul_mat_count(void) {
+    return g_ameva_mmq_mul_mat_count.load();
+}
+
 int64_t ggml_backend_ameva_get_qmv_mul_mat_count(void) {
     return g_ameva_qmv_mul_mat_count.load();
 }
@@ -125,6 +130,7 @@ void ggml_backend_ameva_reset_counters(void) {
     g_ameva_q5_0_staging_alloc_count.store(0);
     g_ameva_q5_0_staging_free_count.store(0);
     g_ameva_qmv_mul_mat_count.store(0);
+    g_ameva_mmq_mul_mat_count.store(0);
     // the repacked tensor and byte counts describe stored weights, not activity, and are not reset
 }
 
@@ -142,6 +148,10 @@ void ameva_increment_f32_gpu_sgemm_dispatch_count(void) {
 
 void ameva_count_mul_mat(int64_t n) {
     g_ameva_f32_gpu_sgemm_dispatch_count.fetch_add(n);
+}
+
+void ameva_count_mmq_mul_mat(int64_t n) {
+    g_ameva_mmq_mul_mat_count.fetch_add(n);
 }
 
 void ameva_count_qmv_mul_mat(int64_t n) {

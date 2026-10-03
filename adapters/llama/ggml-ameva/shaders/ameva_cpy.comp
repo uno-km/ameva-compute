@@ -1,8 +1,10 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
-// AMEVA CPY / CONT / DUP between f32 and f16 tensors of any strides and shapes with the same element count.
-// Element k of the source in row-major order of its own shape goes to element k of the destination in row-major
-// order of the destination shape (ggml_compute_forward_dup semantics).
+// AMEVA CPY / CONT / DUP from f32, f16, q8_0 or q4_0 to f32 or f16, any strides and shapes with the same element
+// count. Element k of the source in row-major order of its own shape goes to element k of the destination in
+// row-major order of the destination shape (ggml_compute_forward_dup semantics). A quantized source (the KV-cache
+// shift casts the quantized K cache to f32) is addressed in bytes: a_off, a_s1..a_s3 in bytes, a_s0 the block size,
+// rows of whole 32-element blocks; it is dequantized exactly as ggml's dequantize_row_q8_0 / q4_0.
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 #include "ameva_common.glsl"
@@ -15,7 +17,7 @@ layout(push_constant) uniform PushConstants {
     uint a_off, a_s0, a_s1, a_s2;
     uint a_s3, d_ne0, d_ne1, d_ne2;
     uint d_off, d_s0, d_s1, d_s2;
-    uint d_s3, src_f16, dst_f16;
+    uint d_s3, src_type, dst_f16; // src_type: 0 f32, 1 f16, 2 q8_0, 3 q4_0
 } pc;
 
 void main() {
@@ -35,9 +37,24 @@ void main() {
     t /= pc.d_ne1;
     const uint b2 = t % pc.d_ne2;
     const uint b3 = t / pc.d_ne2;
-    const uint si = pc.a_off + a0 * pc.a_s0 + a1 * pc.a_s1 + a2 * pc.a_s2 + a3 * pc.a_s3;
     const uint di = pc.d_off + b0 * pc.d_s0 + b1 * pc.d_s1 + b2 * pc.d_s2 + b3 * pc.d_s3;
-    const float v = pc.src_f16 != 0u ? AMEVA_LOAD_F16(a, si) : uintBitsToFloat(a[si]);
+    float v;
+    if (pc.src_type <= 1u) {
+        const uint si = pc.a_off + a0 * pc.a_s0 + a1 * pc.a_s1 + a2 * pc.a_s2 + a3 * pc.a_s3;
+        v = pc.src_type == 1u ? AMEVA_LOAD_F16(a, si) : uintBitsToFloat(a[si]);
+    } else {
+        const uint bb = pc.a_off + (a0 >> 5u) * pc.a_s0 + a1 * pc.a_s1 + a2 * pc.a_s2 + a3 * pc.a_s3; // block, even
+        const uint j = a0 & 31u;
+        const float dq = AMEVA_LOAD_F16(a, bb >> 1u);
+        if (pc.src_type == 2u) {
+            const uint p = bb + 2u + j;
+            v = float(bitfieldExtract(int(a[p >> 2u]), int((p & 3u) * 8u), 8)) * dq;
+        } else {
+            const uint p = bb + 2u + (j & 15u);
+            const uint byte = (a[p >> 2u] >> ((p & 3u) * 8u)) & 0xFFu;
+            v = (float(j < 16u ? (byte & 0xFu) : (byte >> 4u)) - 8.0) * dq;
+        }
+    }
     if (pc.dst_f16 != 0u) {
         AMEVA_STORE_F16(d, di, v);
     } else {

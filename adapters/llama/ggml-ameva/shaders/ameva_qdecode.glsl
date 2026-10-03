@@ -3,6 +3,8 @@
 //   binding 0: Q (QVEC elements), binding 1: H (HVEC elements; any range when the type has no high bits),
 //   binding 2: S as 32-bit words
 // decode() turns one 32-weight unit into 8 vec4 with exactly the arithmetic of ggml's dequantize_row_<type>.
+// decode_i8() gives the same unit as 32 small integers v (int8 bytes) and per 16-weight half a scale and an offset,
+// weight k = sc[k / 16] * v[k] + mc[k / 16], for integer dot products (ameva_mmq).
 // qdecode_init() must be called by every invocation at the start of main (it contains a barrier for the IQ4 table).
 
 #if defined(TYPE_Q8_0)
@@ -215,6 +217,147 @@ void decode(uint qi, uint hi, uint sb, uint j, out vec4 w[8]) {
         w[i] = (u8x4((q[i] & 0x0F0F0F0Fu) | (spread2((h.x >> (8u * i)) & 0xFFu) << 4u)) - 32.0) * dl0;
         w[i + 4u] = (u8x4(((q[i] >> 4u) & 0x0F0F0F0Fu) | (spread2((h.y >> (8u * i)) & 0xFFu) << 4u)) - 32.0) * dl1;
     }
+#endif
+}
+
+#if defined(TYPE_IQ4_NL) || defined(TYPE_IQ4_XS)
+// kvalues_iq4nl[n] as a signed byte (the words of kv_init)
+uint kv_byte(uint n) {
+    const uint w = n < 8u ? (n < 4u ? 0xBFAD9881u : 0xF6EADDCFu) : (n < 12u ? 0x26190D01u : 0x71594535u);
+    return (w >> (8u * (n & 3u))) & 0xFFu;
+}
+// the low nibble of each byte of q through the table, packed back into 4 bytes
+uint kv_bytes4(uint q) {
+    return kv_byte(q & 0xFu) | (kv_byte((q >> 8u) & 0xFu) << 8u) | (kv_byte((q >> 16u) & 0xFu) << 16u) |
+           (kv_byte((q >> 24u) & 0xFu) << 24u);
+}
+#endif
+
+// One unit as int8: byte k % 4 of v[k / 4] is v_k (unsigned 0..63 or, for q8_0 and the IQ4 types, signed), and
+// weight k = sc[h] * v_k + mc[h] with h = k / 16. The scales are those of decode(); the constant offsets of the
+// types without a stored minimum (-8 d, -16 d, -4 dl, -32 dl) move into mc, so v stays non-negative.
+void decode_i8(uint qi, uint hi, uint sb, uint j, out uint v[8], out vec2 sc, out vec2 mc) {
+#if defined(TYPE_Q4_0)
+    const uvec4 q = qv[qi];
+    const float d = sldh(sb);
+    [[unroll]] for (uint i = 0u; i < 4u; ++i) {
+        v[i] = q[i] & 0x0F0F0F0Fu;
+        v[i + 4u] = (q[i] >> 4u) & 0x0F0F0F0Fu;
+    }
+    sc = vec2(d);
+    mc = vec2(-8.0 * d);
+#elif defined(TYPE_Q4_1)
+    const uvec4 q = qv[qi];
+    const float d = sldh(sb), m = sldh(sb + 2u);
+    [[unroll]] for (uint i = 0u; i < 4u; ++i) {
+        v[i] = q[i] & 0x0F0F0F0Fu;
+        v[i + 4u] = (q[i] >> 4u) & 0x0F0F0F0Fu;
+    }
+    sc = vec2(d);
+    mc = vec2(m);
+#elif defined(TYPE_Q5_0) || defined(TYPE_Q5_1)
+    const uvec4 q = qv[qi];
+    const uint h = hv[hi];
+    [[unroll]] for (uint i = 0u; i < 4u; ++i) {
+        v[i] = (q[i] & 0x0F0F0F0Fu) | spread4(h >> (4u * i));
+        v[i + 4u] = ((q[i] >> 4u) & 0x0F0F0F0Fu) | spread4(h >> (16u + 4u * i));
+    }
+    const float d = sldh(sb);
+    sc = vec2(d);
+#if defined(TYPE_Q5_0)
+    mc = vec2(-16.0 * d);
+#else
+    mc = vec2(sldh(sb + 2u));
+#endif
+#elif defined(TYPE_Q8_0)
+    const uvec4 q0 = qv[qi], q1 = qv[qi + 1u];
+    [[unroll]] for (uint i = 0u; i < 4u; ++i) {
+        v[i] = q0[i];
+        v[i + 4u] = q1[i];
+    }
+    sc = vec2(sldh(sb));
+    mc = vec2(0.0);
+#elif defined(TYPE_IQ4_NL)
+    const uvec4 q = qv[qi];
+    [[unroll]] for (uint i = 0u; i < 4u; ++i) {
+        v[i] = kv_bytes4(q[i]);
+        v[i + 4u] = kv_bytes4(q[i] >> 4u);
+    }
+    sc = vec2(sldh(sb));
+    mc = vec2(0.0);
+#elif defined(TYPE_IQ4_XS)
+    const uvec4 q = qv[qi];
+    const uint ls = ((sld32(sb + 4u) >> (4u * j)) & 0xFu) | (((sld16(sb + 2u) >> (2u * j)) & 3u) << 4u);
+    [[unroll]] for (uint i = 0u; i < 4u; ++i) {
+        v[i] = kv_bytes4(q[i]);
+        v[i + 4u] = kv_bytes4(q[i] >> 4u);
+    }
+    sc = vec2(sldh(sb) * float(int(ls) - 32));
+    mc = vec2(0.0);
+#elif defined(TYPE_Q2_K)
+    const uvec2 q = qv[qi];
+    const float d = sldh(sb + 16u), dmin = sldh(sb + 18u);
+    const uint sc2 = sld16(sb + 8u * (j >> 2u) + 2u * (j & 3u));
+    const uint sa = sc2 & 0xFFu, sbh = sc2 >> 8u;
+    [[unroll]] for (uint i = 0u; i < 4u; ++i) {
+        v[i] = spread2((q.x >> (8u * i)) & 0xFFu);
+        v[i + 4u] = spread2((q.y >> (8u * i)) & 0xFFu);
+    }
+    sc = vec2(d * float(sa & 0xFu), d * float(sbh & 0xFu));
+    mc = vec2(-(dmin * float(sa >> 4u)), -(dmin * float(sbh >> 4u)));
+#elif defined(TYPE_Q3_K)
+    const uvec2 q = qv[qi];
+    const uint h = hv[hi];
+    const float d = sldh(sb + 12u);
+    const uint a0 = sld32(sb), a1 = sld32(sb + 4u), t = sld32(sb + 8u);
+    const uint si = 8u * (j >> 2u) + 2u * (j & 3u);
+    const uint qsel = si >> 2u;
+    const uint aux = ((((qsel & 1u) != 0u ? a1 : a0) >> (4u * (qsel >> 1u))) & 0x0F0F0F0Fu) |
+                     (((t >> (2u * qsel)) & 0x03030303u) << 4u);
+    const float dl0 = d * float(int((aux >> (8u * (si & 3u))) & 0xFFu) - 32);
+    const float dl1 = d * float(int((aux >> (8u * ((si & 3u) + 1u))) & 0xFFu) - 32);
+    [[unroll]] for (uint i = 0u; i < 4u; ++i) {
+        v[i] = spread2((q.x >> (8u * i)) & 0xFFu) | (spread4(h >> (4u * i)) >> 2u);
+        v[i + 4u] = spread2((q.y >> (8u * i)) & 0xFFu) | (spread4(h >> (16u + 4u * i)) >> 2u);
+    }
+    sc = vec2(dl0, dl1);
+    mc = vec2(-4.0 * dl0, -4.0 * dl1);
+#elif defined(TYPE_Q4_K) || defined(TYPE_Q5_K)
+    const uvec4 q = qv[qi];
+    const float d = sldh(sb), dmin = sldh(sb + 2u);
+    const uint s0 = sld32(sb + 4u), s1 = sld32(sb + 8u), s2 = sld32(sb + 12u);
+    const uint k = 8u * (j & 3u);
+    const uint b0 = (s0 >> k) & 0xFFu, b1 = (s1 >> k) & 0xFFu, b2 = (s2 >> k) & 0xFFu;
+    const bool lo = j < 4u;
+    const uint scq = lo ? (b0 & 63u) : ((b2 & 0xFu) | ((b0 >> 6u) << 4u));
+    const uint mnq = lo ? (b1 & 63u) : ((b2 >> 4u) | ((b1 >> 6u) << 4u));
+#if defined(TYPE_Q5_K)
+    const uint h = hv[hi];
+    [[unroll]] for (uint i = 0u; i < 4u; ++i) {
+        v[i] = (q[i] & 0x0F0F0F0Fu) | spread4(h >> (4u * i));
+        v[i + 4u] = ((q[i] >> 4u) & 0x0F0F0F0Fu) | spread4(h >> (16u + 4u * i));
+    }
+#else
+    [[unroll]] for (uint i = 0u; i < 4u; ++i) {
+        v[i] = q[i] & 0x0F0F0F0Fu;
+        v[i + 4u] = (q[i] >> 4u) & 0x0F0F0F0Fu;
+    }
+#endif
+    sc = vec2(d * float(scq));
+    mc = vec2(-(dmin * float(mnq)));
+#elif defined(TYPE_Q6_K)
+    const uvec4 q = qv[qi];
+    const uvec2 h = hv[hi];
+    const float d = sldh(sb + 16u);
+    const int sc2 = int(sld16(sb + 8u * (j >> 2u) + 2u * (j & 3u)));
+    const float dl0 = d * float(bitfieldExtract(sc2, 0, 8));
+    const float dl1 = d * float(bitfieldExtract(sc2, 8, 8));
+    [[unroll]] for (uint i = 0u; i < 4u; ++i) {
+        v[i] = (q[i] & 0x0F0F0F0Fu) | (spread2((h.x >> (8u * i)) & 0xFFu) << 4u);
+        v[i + 4u] = ((q[i] >> 4u) & 0x0F0F0F0Fu) | (spread2((h.y >> (8u * i)) & 0xFFu) << 4u);
+    }
+    sc = vec2(dl0, dl1);
+    mc = vec2(-32.0 * dl0, -32.0 * dl1);
 #endif
 }
 

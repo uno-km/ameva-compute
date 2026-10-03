@@ -3,8 +3,9 @@
 #extension GL_EXT_control_flow_attributes : require
 // AMEVA FLASH_ATTN_EXT, tiled (FlashAttention-2 forward):
 //   softmax(scale * Q K^T [softcap] + slope * mask) V
-//   q f32 [D, n_q, n_head] (any strides), k [D, n_kv, n_head_kv] and v [DV, n_kv, n_head_kv] in f16 or f32 (any row
-//   and head strides), mask f16 [n_kv, >= n_q, mask_ne2] optional, dst f32 [DV, n_head, n_q] contiguous.
+//   q f32 [D, n_q, n_head] (any strides), k [D, n_kv, n_head_kv] and v [DV, n_kv, n_head_kv] each in f32, f16, q8_0
+//   or q4_0 (any row and head strides; K and V types independent; a quantized head row is whole ggml blocks, D or DV a
+//   multiple of 32), mask f16 [n_kv, >= n_q, mask_ne2] optional, dst f32 [DV, n_head, n_q] contiguous.
 //   Grouped-query attention: head h reads KV head h / G (G = n_head / n_head_kv). ALiBi slopes as in ggml.
 //
 // A workgroup of 128 invocations owns BQ rows that read the same KV head; a row is one (query position, head of the
@@ -12,7 +13,8 @@
 // holds all G heads). Keys are processed in blocks of BK:
 //   0. each invocation reads the mask of its BK / (128 / BQ) keys; a block masked out for every row of the tile is
 //      skipped (causal prompts, KV cache padding);
-//   1. the block's K is staged in shared memory as f32 (exact f16 conversion);
+//   1. the block's K is staged in shared memory as f32 (exact f16 conversion; q8_0 / q4_0 dequantized exactly as
+//      ggml's dequantize_row_q8_0 / q4_0);
 //   2. each invocation computes the scores of its keys for its row and the per-invocation maximum;
 //   3. the row maximum of the block updates the running maximum (online softmax), the probabilities go to shared
 //      memory and the block's V replaces K;
@@ -38,8 +40,8 @@ layout(std430, binding = 5) writeonly buffer Part { uint part[]; }; // split par
 
 layout(push_constant) uniform PushConstants {
     uint D, DV, n_kv, n_q;
-    uint n_head, n_head_kv, kv_f16, has_mask;
-    uint q_off, q_s1, q_s2, k_off;
+    uint n_head, n_head_kv, kv_types, has_mask; // kv_types: K type in bits 0..3, V type in bits 4..7
+    uint q_off, q_s1, q_s2, k_off;   // K and V offsets and strides: elements (f32, f16) or bytes (q8_0, q4_0)
     uint k_s1, k_s2, v_off, v_s1;
     uint v_s2, m_off, m_s1, m_s2;
     uint m_ne2, o_off, scale, softcap;
@@ -69,12 +71,34 @@ shared float sP[BQ * BK];
 shared float sMax[128];
 shared uint sAny[2]; // per block parity: some key of the block is unmasked for some row
 
-// 4 consecutive elements of K (is_k) or V starting at element idx
-vec4 load4(bool is_k, uint idx) {
-    if (pc.kv_f16 != 0u) {
+// K / V element types (pc.kv_types)
+#define KV_F32 0u
+#define KV_F16 1u
+#define KV_Q8_0 2u
+#define KV_Q4_0 3u
+
+uint kv_word(bool is_k, uint wi) { return is_k ? k[wi] : v[wi]; }
+// 4 bytes starting at the even byte address p (ggml blocks are 34 / 18 bytes: fields start at even addresses)
+uint kv_bytes4(bool is_k, uint p) {
+    const uint w0 = kv_word(is_k, p >> 2u);
+    if ((p & 2u) == 0u) return w0;
+    return (w0 >> 16u) | (kv_word(is_k, (p >> 2u) + 1u) << 16u);
+}
+float kv_half(bool is_k, uint p) { return ameva_h2f((kv_word(is_k, p >> 2u) >> ((p & 2u) * 8u)) & 0xFFFFu); }
+
+// elements e .. e + 3 (e a multiple of 4) of a K (is_k) or V row that starts at `row`: an element index (f32, f16)
+// or a byte address (q8_0, q4_0). Uniform branch: the type is the same for the whole dispatch.
+vec4 load4(bool is_k, uint row, uint e) {
+    const uint t = is_k ? (pc.kv_types & 15u) : ((pc.kv_types >> 4u) & 15u);
+    if (t == KV_F32) {
+        const uint idx = row + e;
+        return uintBitsToFloat(uvec4(kv_word(is_k, idx), kv_word(is_k, idx + 1u), kv_word(is_k, idx + 2u),
+                                     kv_word(is_k, idx + 3u)));
+    }
+    if (t == KV_F16) {
+        const uint idx = row + e;
         if ((idx & 1u) == 0u) {
-            const uint w0 = is_k ? k[idx >> 1u] : v[idx >> 1u];
-            const uint w1 = is_k ? k[(idx >> 1u) + 1u] : v[(idx >> 1u) + 1u];
+            const uint w0 = kv_word(is_k, idx >> 1u), w1 = kv_word(is_k, (idx >> 1u) + 1u);
             return vec4(ameva_h2f(w0 & 0xFFFFu), ameva_h2f(w0 >> 16u), ameva_h2f(w1 & 0xFFFFu), ameva_h2f(w1 >> 16u));
         }
         return is_k ? vec4(AMEVA_LOAD_F16(k, idx), AMEVA_LOAD_F16(k, idx + 1u), AMEVA_LOAD_F16(k, idx + 2u),
@@ -82,8 +106,20 @@ vec4 load4(bool is_k, uint idx) {
                     : vec4(AMEVA_LOAD_F16(v, idx), AMEVA_LOAD_F16(v, idx + 1u), AMEVA_LOAD_F16(v, idx + 2u),
                            AMEVA_LOAD_F16(v, idx + 3u));
     }
-    return is_k ? uintBitsToFloat(uvec4(k[idx], k[idx + 1u], k[idx + 2u], k[idx + 3u]))
-                : uintBitsToFloat(uvec4(v[idx], v[idx + 1u], v[idx + 2u], v[idx + 3u]));
+    const uint b = e >> 5u, j = e & 31u;
+    if (t == KV_Q8_0) {
+        // block: d f16 @0, qs int8[32] @2. y = qs[j] * d
+        const uint bb = row + 34u * b;
+        const int x = int(kv_bytes4(is_k, bb + 2u + j));
+        return vec4(bitfieldExtract(x, 0, 8), bitfieldExtract(x, 8, 8), bitfieldExtract(x, 16, 8),
+                    bitfieldExtract(x, 24, 8)) * kv_half(is_k, bb);
+    }
+    // KV_Q4_0 block: d f16 @0, qs[16] @2; element j < 16 is the low nibble of qs[j], j >= 16 the high nibble of
+    // qs[j - 16]. y = (nibble - 8) * d
+    const uint bb = row + 18u * b;
+    const uint w = kv_bytes4(is_k, bb + 2u + (j & 15u));
+    const uint n = j < 16u ? (w & 0x0F0F0F0Fu) : ((w >> 4u) & 0x0F0F0F0Fu);
+    return (vec4(uvec4(n, n >> 8u, n >> 16u, n >> 24u) & 0xFFu) - 8.0) * kv_half(is_k, bb);
 }
 
 void main() {
@@ -165,7 +201,7 @@ void main() {
         // 1. K of the block
         for (uint e = tid; e < BK * D4; e += 128u) {
             const uint j = e / D4, d4 = e % D4;
-            sKV[j * KS + d4] = kb + j < kv_end ? load4(true, kbase + (kb + j) * pc.k_s1 + 4u * d4) : vec4(0.0);
+            sKV[j * KS + d4] = kb + j < kv_end ? load4(true, kbase + (kb + j) * pc.k_s1, 4u * d4) : vec4(0.0);
         }
         barrier();
 
@@ -201,7 +237,7 @@ void main() {
         }
         for (uint e = tid; e < BK * DV4; e += 128u) {
             const uint j = e / DV4, d4 = e % DV4;
-            sKV[j * KS + d4] = kb + j < kv_end ? load4(false, vbase + (kb + j) * pc.v_s1 + 4u * d4) : vec4(0.0);
+            sKV[j * KS + d4] = kb + j < kv_end ? load4(false, vbase + (kb + j) * pc.v_s1, 4u * d4) : vec4(0.0);
         }
         barrier();
 

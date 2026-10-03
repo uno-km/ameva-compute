@@ -56,7 +56,7 @@ struct Options {
     int gen = 32;
     bool cpu_decode = true;
     bool fa = true;      // flash attention on both backends (the AMEVA graph engine runs it on the GPU)
-    bool kv_f32 = false; // f32 KV cache instead of f16
+    ggml_type kv_type = GGML_TYPE_F16; // KV cache type (K and V): f16, f32, q8_0 or q4_0
     double gate_kld = -1.0; // < 0: mode default
 };
 
@@ -362,9 +362,9 @@ static llama_context* make_ctx(llama_model* m, const Options& o) {
     cp.n_threads_batch = o.threads;
     // the same attention graph on both backends ("auto" would decide per device)
     cp.flash_attn_type = o.fa ? LLAMA_FLASH_ATTN_TYPE_ENABLED : LLAMA_FLASH_ATTN_TYPE_DISABLED;
-    if (o.kv_f32) {
-        cp.type_k = GGML_TYPE_F32;
-        cp.type_v = GGML_TYPE_F32;
+    if (o.kv_type != GGML_TYPE_F16) {
+        cp.type_k = o.kv_type;
+        cp.type_v = o.kv_type;
     }
     cp.no_perf = true;
     llama_context* c = llama_init_from_model(m, cp);
@@ -411,7 +411,7 @@ static void usage(const char* argv0) {
     fprintf(stderr,
             "usage: %s --model M.gguf --plugin libggml-ameva.so --text corpus.txt [--ref-model M_f32.gguf]\n"
             "          [--ctx 256] [--chunks 2] [--threads 4] [--gen 32] [--prompt TEXT] [--no-cpu-decode]\n"
-            "          [--fa on|off] [--kv f16|f32] [--gate-kld X]\n",
+            "          [--fa on|off] [--kv f16|f32|q8_0|q4_0] [--gate-kld X]\n",
             argv0);
 }
 
@@ -432,7 +432,17 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--gate-kld") && has) o.gate_kld = atof(argv[++i]);
         else if (!strcmp(a, "--no-cpu-decode")) o.cpu_decode = false;
         else if (!strcmp(a, "--fa") && has) o.fa = !strcmp(argv[++i], "on");
-        else if (!strcmp(a, "--kv") && has) o.kv_f32 = !strcmp(argv[++i], "f32");
+        else if (!strcmp(a, "--kv") && has) {
+            const char* t = argv[++i];
+            if (!strcmp(t, "f16")) o.kv_type = GGML_TYPE_F16;
+            else if (!strcmp(t, "f32")) o.kv_type = GGML_TYPE_F32;
+            else if (!strcmp(t, "q8_0")) o.kv_type = GGML_TYPE_Q8_0;
+            else if (!strcmp(t, "q4_0")) o.kv_type = GGML_TYPE_Q4_0;
+            else {
+                fprintf(stderr, "--kv must be f16, f32, q8_0 or q4_0 (got %s)\n", t);
+                return 2;
+            }
+        }
         else {
             usage(argv[0]);
             return 2;
@@ -512,7 +522,7 @@ int main(int argc, char** argv) {
     printf("AMEVA_LLM_PARITY model=\"%s\" file=%s params=%.2fM n_vocab=%d layers=%d ctx=%d chunks=%d scored=%d "
            "threads=%d flash_attn=%s kv=%s reference=%s\n",
            desc, base ? base + 1 : o.model, llama_model_n_params(model) / 1e6, ref.n_vocab, llama_model_n_layer(model),
-           o.ctx, o.chunks, scored_total, o.threads, o.fa ? "on" : "off", o.kv_f32 ? "f32" : "f16",
+           o.ctx, o.chunks, scored_total, o.threads, o.fa ? "on" : "off", ggml_type_name(o.kv_type),
            o.ref_model ? "cpu-on-f32-dequantized-model" : "cpu-on-same-model");
     printf("tensor_types model: %s\n", tensor_types(o.model).c_str());
     if (o.ref_model) printf("tensor_types reference: %s\n", tensor_types(o.ref_model).c_str());

@@ -44,4 +44,5 @@ uint64_t ameva_max_buffer_size(void);
 // ---- counters (ggml-ameva-device.cpp) ----
 void ameva_count_repacked_tensor(uint64_t bytes);
 void ameva_count_qmv_mul_mat(int64_t n);
+void ameva_count_mmq_mul_mat(int64_t n);
 void ameva_count_mul_mat(int64_t n);

@@ -2,6 +2,7 @@
 #include "ac_base.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 static uint64_t get_time_ns(void) {

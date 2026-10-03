@@ -6,19 +6,25 @@
 // ggml scale bytes of every block. A unit's quants are one aligned 8/16/32-byte load (the ggml block layout needs 4..9
 // unaligned 32-bit loads), and the dequantized values are exactly those of ggml's dequantize_row_<type>.
 //
-// Variants: -DTYPE_<T>, -DROWS=<weight rows per lane group>, -DCOLS=<activation rows per workgroup>.
-//   COLS == 1 (token generation): the 8 activation vec4 of a unit stay in registers and serve ROWS weight rows.
+// Variants: -DTYPE_<T>, -DROWS=<weight rows per lane group>, -DCOLS=<activation rows per workgroup>, -DUPL=<units per
+// lane and step, COLS == 1>.
+//   COLS == 1 (token generation): the activation vec4 of a lane's UPL units stay in registers and serve ROWS weight
+//   rows.
 //   COLS  > 1 (prompt): every decoded unit is dotted with COLS activation rows read from memory.
-// Work split: the 64 invocations of a workgroup form 64/tpr groups of tpr lanes (tpr = 16, 32 or 64, chosen by the
-// host from K). A group owns ROWS consecutive weight rows; its lanes stride over the units of those rows, so
+// Work split: the 64 invocations of a workgroup form 64/tpr groups of tpr lanes (tpr from the host: 16, or
+// AMEVA_QMV_TPR). A group owns ROWS consecutive weight rows; its lanes stride over the units of those rows, so
 // neighbouring lanes read neighbouring units, and the partial sums are reduced in shared memory (no subgroup
 // operations: subgroup sizes differ between Adreno and Mali).
 // Per unit the lane computes s = sum_i dot(w[i], a[i]) and adds s to its accumulator, as ameva_qmm does.
 //
 //   binding 0: Q, binding 1: H (any range when the type has no high bits), binding 2: S as 32-bit words,
-//   binding 3: src1 F32 as vec4, binding 4: dst F32
+//   binding 3: src1 F32 as vec4, binding 4: dst F32, binding 5: epilogue operand F32, binding 6: epilogue output F32
 //   push: M, K, N (weight rows of this dispatch), q_off, h_off (in Q / H vector elements), s_off (bytes, even),
-//         a_off, d_off, s1, sd (floats; a_off and s1 multiples of 4), tpr
+//         a_off, d_off, s1, sd (floats; a_off and s1 multiples of 4), tpr, ep_mode, e_off, eo_off (floats)
+// Epilogue (COLS == 1, one activation row; the graph engine's fusion of the node that consumes the product): besides
+// dst[n] = v it writes eout[n] = v + e[n] (ADD: bias or residual), silu(v) * e[n] or silu(e[n]) * v (SWIGLU with the
+// product as gate or as up projection), with the operations of ameva_binary / ameva_glu, so the values are those of
+// the unfused nodes. ep_mode 0: no epilogue (bindings 5 and 6 are not read).
 //   grid: (ceil(N / (ROWS * 64 / tpr)), ceil(M / COLS))
 
 #ifndef ROWS
@@ -26,6 +32,12 @@
 #endif
 #ifndef COLS
 #define COLS 1
+#endif
+#ifndef UPL
+// COLS == 1: consecutive units per lane and step. Adreno 830 (S25, 2026-10-03), Qwen2.5-0.5B / Llama-3.2-1B Q4_K_M
+// token generation: UPL 1 59.2-60.2 / 41.9-42.1 t/s, UPL 2 46.7-46.9 / 41.5-41.7, UPL 4 28.3-28.6 / 31.0-31.1.
+// More units per step hold more activation registers per invocation and lowered the throughput.
+#define UPL 1
 #endif
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
@@ -36,11 +48,14 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 layout(std430, binding = 3) readonly buffer BufA { vec4 a4[]; };
 layout(std430, binding = 4) writeonly buffer BufD { float dst[]; };
+layout(std430, binding = 5) readonly buffer BufE { float epi[]; };
+layout(std430, binding = 6) writeonly buffer BufEO { float eout[]; };
 
 layout(push_constant) uniform PushConstants {
     uint M, K, N, q_off;
     uint h_off, s_off, a_off, d_off;
-    uint s1, sd, tpr;
+    uint s1, sd, tpr, ep_mode;
+    uint e_off, eo_off;
 } pc;
 
 shared float red[ROWS * COLS * 64];
@@ -62,9 +77,36 @@ void main() {
     }
 
 #if COLS == 1
-    for (uint u = lane; u < U; u += tpr) {
+    // Each step a lane takes UPL consecutive units: their activations are one contiguous read, their quants one
+    // contiguous read per weight row, and in a k-quant they share the block's scale words; every load of the step can
+    // be issued before the arithmetic that uses it. The U % UPL units left over go one per lane afterwards.
+    const uint UQ = U - U % uint(UPL);
+    for (uint u = uint(UPL) * lane; u < UQ; u += uint(UPL) * tpr) {
+        vec4 a[UPL * 8];
+        const uint ab = (pc.a_off + col0 * pc.s1 + 32u * u) >> 2u;
+        [[unroll]] for (uint i = 0u; i < uint(UPL) * 8u; ++i) {
+            a[i] = a4[ab + i];
+        }
+        [[unroll]] for (uint r = 0u; r < uint(ROWS); ++r) {
+            const uint n = row0 + r;
+            if (n < pc.N) {
+                [[unroll]] for (uint p = 0u; p < uint(UPL); ++p) {
+                    const uint up = u + p;
+                    const uint b = up / UPB;
+                    vec4 w[8];
+                    decode(pc.q_off + (n * U + up) * QPER, pc.h_off + n * U + up, pc.s_off + n * s_row + b * SB,
+                           up - b * UPB, w);
+                    float s = 0.0;
+                    [[unroll]] for (uint i = 0u; i < 8u; ++i) {
+                        s += dot(w[i], a[8u * p + i]);
+                    }
+                    acc[r] += s;
+                }
+            }
+        }
+    }
+    for (uint u = UQ + lane; u < U; u += tpr) {
         const uint b = u / UPB;
-        const uint j = u - b * UPB;
         vec4 a[8];
         const uint ab = (pc.a_off + col0 * pc.s1 + 32u * u) >> 2u;
         [[unroll]] for (uint i = 0u; i < 8u; ++i) {
@@ -74,7 +116,8 @@ void main() {
             const uint n = row0 + r;
             if (n < pc.N) {
                 vec4 w[8];
-                decode(pc.q_off + (n * U + u) * QPER, pc.h_off + n * U + u, pc.s_off + n * s_row + b * SB, j, w);
+                decode(pc.q_off + (n * U + u) * QPER, pc.h_off + n * U + u, pc.s_off + n * s_row + b * SB,
+                       u - b * UPB, w);
                 float s = 0.0;
                 [[unroll]] for (uint i = 0u; i < 8u; ++i) {
                     s += dot(w[i], a[i]);
@@ -127,7 +170,22 @@ void main() {
             if (n < pc.N) {
                 [[unroll]] for (uint c = 0u; c < uint(COLS); ++c) {
                     if (col0 + c < pc.M) {
-                        dst[pc.d_off + (col0 + c) * pc.sd + n] = red[(r * uint(COLS) + c) * 64u + tid];
+                        const float val = red[(r * uint(COLS) + c) * 64u + tid];
+                        dst[pc.d_off + (col0 + c) * pc.sd + n] = val;
+#if COLS == 1
+                        if (pc.ep_mode != 0u) {
+                            const float e = epi[pc.e_off + n];
+                            float o;
+                            if (pc.ep_mode == 1u) {
+                                o = val + e;
+                            } else if (pc.ep_mode == 2u) {
+                                o = (val / (1.0 + exp(-val))) * e;
+                            } else {
+                                o = (e / (1.0 + exp(-e))) * val;
+                            }
+                            eout[pc.eo_off + n] = o;
+                        }
+#endif
                     }
                 }
             }

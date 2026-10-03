@@ -1,0 +1,162 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_EXT_integer_dot_product : require
+// AMEVA MMQ: ggml MUL_MAT (dst = src0^T x src1) for many activation rows (prompt processing) with integer dot
+// products: src0 stored in the AMEVA repacked layout (ggml-ameva-repack.h), src1 quantized per 32-element unit to
+// int8 by ameva_quant_a8 (d_a, q_a, sums of q_a per 16-element half).
+// For a weight unit decoded by decode_i8 (weight k = sc_h v_k + mc_h, h = k / 16) the unit's contribution is
+//   sum_h  d_a * sc_h * sum_{k in h} v_k q_a,k  +  mc_h * d_a * sum_{k in h} q_a,k
+// where the inner sums are exact integer dot products (dotPacked4x8EXT, signed 8-bit x 8-bit). The only difference
+// from ameva_qgemm is the rounding of the activations to int8 (|error| <= d_a / 2 per element); the weights are used
+// at full precision. Each output is the f32 sum of these contributions over the units in order.
+//
+// A workgroup of 128 invocations computes a tile of 64 weight rows x 32 activation rows. Per unit, invocations 0..63
+// decode one weight row each into shared memory while invocations 64..127 stage the quantized activations; then every
+// invocation accumulates a 4 x 4 block of the tile (16 packed dot products per 32-bit word of the unit).
+//
+//   bindings 0..2: repacked weights (ameva_qdecode.glsl), binding 3: AQ (uvec4), binding 4: AD (uvec2),
+//   binding 5: dst F32
+//   push: M, K, N (weight rows of this dispatch), q_off, h_off (Q / H vector elements), s_off (bytes, even),
+//         aq_off (uvec4), ad_off (uvec2), d_off, sd (floats)
+//   grid: (ceil(N / 64), ceil(M / 32))
+//   variants: -DTYPE_<T> (the 12 repacked types)
+
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+#include "ameva_qdecode.glsl"
+
+layout(std430, binding = 3) readonly buffer BufAQ { uvec4 aq[]; };
+layout(std430, binding = 4) readonly buffer BufAD { uvec2 ad[]; };
+layout(std430, binding = 5) writeonly buffer BufD { float dst[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint M, K, N, q_off;
+    uint h_off, s_off, aq_off, ad_off;
+    uint d_off, sd;
+} pc;
+
+#define BN 64u
+#define BM 32u
+
+#if defined(TYPE_Q2_K) || defined(TYPE_Q3_K) || defined(TYPE_Q6_K)
+#define HALF_SCALES // one scale and offset per 16-weight half
+#endif
+
+shared uvec4 s_wq[8u * (BN / 4u)];   // [w * 16 + n / 4][n % 4]: word w of weight row n
+shared vec4 s_wsc[2u * (BN / 4u)];   // [h * 16 + n / 4][n % 4]: scale of half h of row n
+shared vec4 s_wmc[2u * (BN / 4u)];   // offsets
+shared uvec4 s_aq[8u * (BM / 4u)];   // [w * 8 + m / 4][m % 4]: word w of activation row m
+shared vec4 s_ad[BM / 4u];           // d_a of row m
+shared vec4 s_as[2u * (BM / 4u)];    // [h * 8 + m / 4][m % 4]: d_a * sum of q_a over half h
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    qdecode_init(tid);
+    const uint n0 = gl_WorkGroupID.x * BN;
+    const uint m0 = gl_WorkGroupID.y * BM;
+    const uint U = pc.K >> 5u;
+    const uint s_row = (pc.K / BLOCK_ELEMS) * SB;
+    // rows past N decode the last row and rows past M read the last activation row; neither is stored
+    const uint drow = min(n0 + (tid & 63u), pc.N - 1u);
+    const uint t = tid & 63u;
+    const uint qrow = min(m0 + (t >> 1u), pc.M - 1u); // invocations 64..127: quantized half t & 1 of row t >> 1
+    const uint drow_a = min(m0 + (t & 31u), pc.M - 1u);
+    const uint tn = tid & 15u, tm = tid >> 4u;
+    vec4 acc0 = vec4(0.0), acc1 = vec4(0.0), acc2 = vec4(0.0), acc3 = vec4(0.0);
+
+    for (uint u = 0u; u < U; ++u) {
+        if (tid < 64u) {
+            const uint b = u / UPB;
+            uint v[8];
+            vec2 sc, mc;
+            decode_i8(pc.q_off + (drow * U + u) * QPER, pc.h_off + drow * U + u, pc.s_off + drow * s_row + b * SB,
+                      u - b * UPB, v, sc, mc);
+            const uint c = t >> 2u, comp = t & 3u;
+            [[unroll]] for (uint w = 0u; w < 8u; ++w) {
+                s_wq[w * 16u + c][comp] = v[w];
+            }
+            s_wsc[c][comp] = sc.x;
+            s_wsc[16u + c][comp] = sc.y;
+            s_wmc[c][comp] = mc.x;
+            s_wmc[16u + c][comp] = mc.y;
+        } else {
+            const uint r = t >> 1u, hh = t & 1u;
+            const uvec4 x = aq[pc.aq_off + (qrow * U + u) * 2u + hh];
+            [[unroll]] for (uint c = 0u; c < 4u; ++c) {
+                s_aq[(4u * hh + c) * 8u + (r >> 2u)][r & 3u] = x[c];
+            }
+            if (t < 32u) {
+                const uvec2 e = ad[pc.ad_off + drow_a * U + u];
+                const float da = uintBitsToFloat(e.x);
+                s_ad[t >> 2u][t & 3u] = da;
+                s_as[t >> 2u][t & 3u] = da * float(bitfieldExtract(int(e.y), 0, 16));
+                s_as[8u + (t >> 2u)][t & 3u] = da * float(bitfieldExtract(int(e.y), 16, 16));
+            }
+        }
+        barrier();
+        const vec4 da = s_ad[tm];
+#if defined(HALF_SCALES)
+        [[unroll]] for (uint h = 0u; h < 2u; ++h) {
+            ivec4 i0 = ivec4(0), i1 = ivec4(0), i2 = ivec4(0), i3 = ivec4(0);
+            [[unroll]] for (uint w = 4u * h; w < 4u * h + 4u; ++w) {
+                const ivec4 W = ivec4(s_wq[w * 16u + tn]);
+                const ivec4 A = ivec4(s_aq[w * 8u + tm]);
+                i0 += ivec4(dotPacked4x8EXT(W.x, A.x), dotPacked4x8EXT(W.y, A.x), dotPacked4x8EXT(W.z, A.x),
+                            dotPacked4x8EXT(W.w, A.x));
+                i1 += ivec4(dotPacked4x8EXT(W.x, A.y), dotPacked4x8EXT(W.y, A.y), dotPacked4x8EXT(W.z, A.y),
+                            dotPacked4x8EXT(W.w, A.y));
+                i2 += ivec4(dotPacked4x8EXT(W.x, A.z), dotPacked4x8EXT(W.y, A.z), dotPacked4x8EXT(W.z, A.z),
+                            dotPacked4x8EXT(W.w, A.z));
+                i3 += ivec4(dotPacked4x8EXT(W.x, A.w), dotPacked4x8EXT(W.y, A.w), dotPacked4x8EXT(W.z, A.w),
+                            dotPacked4x8EXT(W.w, A.w));
+            }
+            const vec4 sc = s_wsc[h * 16u + tn], mc = s_wmc[h * 16u + tn];
+            const vec4 sa = s_as[h * 8u + tm];
+            acc0 += da.x * (sc * vec4(i0)) + mc * sa.x;
+            acc1 += da.y * (sc * vec4(i1)) + mc * sa.y;
+            acc2 += da.z * (sc * vec4(i2)) + mc * sa.z;
+            acc3 += da.w * (sc * vec4(i3)) + mc * sa.w;
+        }
+#else
+        {
+            ivec4 i0 = ivec4(0), i1 = ivec4(0), i2 = ivec4(0), i3 = ivec4(0);
+            [[unroll]] for (uint w = 0u; w < 8u; ++w) {
+                const ivec4 W = ivec4(s_wq[w * 16u + tn]);
+                const ivec4 A = ivec4(s_aq[w * 8u + tm]);
+                i0 += ivec4(dotPacked4x8EXT(W.x, A.x), dotPacked4x8EXT(W.y, A.x), dotPacked4x8EXT(W.z, A.x),
+                            dotPacked4x8EXT(W.w, A.x));
+                i1 += ivec4(dotPacked4x8EXT(W.x, A.y), dotPacked4x8EXT(W.y, A.y), dotPacked4x8EXT(W.z, A.y),
+                            dotPacked4x8EXT(W.w, A.y));
+                i2 += ivec4(dotPacked4x8EXT(W.x, A.z), dotPacked4x8EXT(W.y, A.z), dotPacked4x8EXT(W.z, A.z),
+                            dotPacked4x8EXT(W.w, A.z));
+                i3 += ivec4(dotPacked4x8EXT(W.x, A.w), dotPacked4x8EXT(W.y, A.w), dotPacked4x8EXT(W.z, A.w),
+                            dotPacked4x8EXT(W.w, A.w));
+            }
+            const vec4 sc = s_wsc[tn], mc = s_wmc[tn];
+            const vec4 sa = s_as[tm] + s_as[8u + tm];
+            acc0 += da.x * (sc * vec4(i0)) + mc * sa.x;
+            acc1 += da.y * (sc * vec4(i1)) + mc * sa.y;
+            acc2 += da.z * (sc * vec4(i2)) + mc * sa.z;
+            acc3 += da.w * (sc * vec4(i3)) + mc * sa.w;
+        }
+#endif
+        barrier();
+    }
+
+    // output (weight row n0 + 4 tn + i, activation row m0 + 4 tm + j) = acc_j[i]
+    const uint nb = n0 + 4u * tn;
+    const uint mb = m0 + 4u * tm;
+    [[unroll]] for (uint j = 0u; j < 4u; ++j) {
+        const uint m = mb + j;
+        if (m < pc.M) {
+            const vec4 a = j == 0u ? acc0 : (j == 1u ? acc1 : (j == 2u ? acc2 : acc3));
+            const uint o = pc.d_off + m * pc.sd + nb;
+            if (nb + 0u < pc.N) dst[o + 0u] = a.x;
+            if (nb + 1u < pc.N) dst[o + 1u] = a.y;
+            if (nb + 2u < pc.N) dst[o + 2u] = a.z;
+            if (nb + 3u < pc.N) dst[o + 3u] = a.w;
+        }
+    }
+}

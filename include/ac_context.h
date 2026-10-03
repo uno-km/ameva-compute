@@ -32,6 +32,13 @@ struct AcVkContext {
     /* Vulkan 1.1 properties not in VkPhysicalDeviceLimits (0 when the driver does not report them) */
     uint64_t max_memory_allocation_size;
     uint32_t subgroup_size;
+    /* VK_KHR_shader_integer_dot_product: 1 when the extension and its feature are enabled on the device (packed
+       int8 dot products in shaders), and whether the driver reports the signed 4x8 packed form as accelerated */
+    uint32_t integer_dot_product;
+    uint32_t integer_dot_product_accelerated;
+    /* Compiled pipelines of this device, used by every kernel creation; filled from saved data with
+       ac_vk_pipeline_cache_merge and read back with ac_vk_pipeline_cache_get_data. */
+    VkPipelineCache pipeline_cache;
     /* Descriptor sets keyed by (set layout, bound buffer ranges), shared by every dispatch path of this context.
        Owned by ac_vk_dispatch.cpp; NULL until the first dispatch. */
     void* desc_cache;
@@ -58,6 +65,21 @@ AcResult ac_vk_context_create(AcVkContext** out_ctx);
  * @return AC_SUCCESS on success, error code on failure.
  */
 AcResult ac_vk_context_destroy(AcVkContext* ctx);
+
+/**
+ * @brief Merge saved pipeline cache data (vkGetPipelineCacheData of an earlier context) into the context's cache.
+ * The Vulkan header of the data must name this device and driver (vendor ID, device ID, pipelineCacheUUID); data of
+ * another device or driver version, or malformed data, is rejected with AC_ERR_INVALID_ARGUMENT and the cache is
+ * left as it was.
+ */
+AcResult ac_vk_pipeline_cache_merge(AcVkContext* ctx, const void* data, size_t size);
+
+/**
+ * @brief Copy the context's pipeline cache data. With data == NULL, *inout_size receives the size; otherwise up to
+ * *inout_size bytes are written and *inout_size is set to the bytes written (AC_ERR_INVALID_BUFFER_SIZE when the
+ * buffer is too small for the whole cache).
+ */
+AcResult ac_vk_pipeline_cache_get_data(AcVkContext* ctx, void* data, size_t* inout_size);
 
 /**
  * @brief Descriptor set cache maintenance (implemented in ac_vk_dispatch.cpp).

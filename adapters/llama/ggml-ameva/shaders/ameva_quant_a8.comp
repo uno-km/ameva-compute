@@ -1,0 +1,57 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : require
+// AMEVA activation quantization for ameva_mmq: f32 rows -> int8 per 32-element unit.
+//   d = amax / 127 (f32), q = round(x / d) with ties to even (as ggml's ARM quantize_row_q8_0), |q| <= 127, and the
+//   sums of q over the two 16-element halves (for the offsets of the weight types).
+// One invocation per (row m, unit u); gi = m * U + u. Output (scratch of the graph engine):
+//   AQ[aq_off + 2 gi + h] (uvec4): q of elements 16h .. 16h + 15, byte k of component c = element 16h + 4c + k
+//   AD[ad_off + gi] (uvec2): x = bits of d, y = sum over elements 0..15 (int16, low half) | sum over 16..31 (high half)
+//
+//   binding 0: src1 F32 as vec4, binding 1: AQ, binding 2: AD
+//   push: M (rows), K, a_off, s1 (floats; multiples of 4), aq_off (uvec4), ad_off (uvec2)
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+
+layout(std430, binding = 0) readonly buffer BufA { vec4 a4[]; };
+layout(std430, binding = 1) writeonly buffer BufQ { uvec4 aq[]; };
+layout(std430, binding = 2) writeonly buffer BufD { uvec2 ad[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint M, K, a_off, s1;
+    uint aq_off, ad_off;
+} pc;
+
+void main() {
+    const uint gi = ameva_linear_id();
+    const uint U = pc.K >> 5u;
+    if (gi >= pc.M * U) return;
+    const uint m = gi / U;
+    const uint u = gi - m * U;
+    const uint base = (pc.a_off + m * pc.s1 + 32u * u) >> 2u;
+    vec4 x[8];
+    float amax = 0.0;
+    [[unroll]] for (uint i = 0u; i < 8u; ++i) {
+        x[i] = a4[base + i];
+        const vec4 ax = abs(x[i]);
+        amax = max(amax, max(max(ax.x, ax.y), max(ax.z, ax.w)));
+    }
+    const float d = amax / 127.0;
+    const float id = d != 0.0 ? 1.0 / d : 0.0;
+    uint w[8];
+    int s0 = 0, s1 = 0;
+    [[unroll]] for (uint i = 0u; i < 8u; ++i) {
+        const ivec4 q = clamp(ivec4(roundEven(x[i] * id)), ivec4(-127), ivec4(127));
+        w[i] = (uint(q.x) & 0xFFu) | ((uint(q.y) & 0xFFu) << 8u) | ((uint(q.z) & 0xFFu) << 16u) | (uint(q.w) << 24u);
+        const int qs = q.x + q.y + q.z + q.w;
+        if (i < 4u) {
+            s0 += qs;
+        } else {
+            s1 += qs;
+        }
+    }
+    aq[pc.aq_off + 2u * gi] = uvec4(w[0], w[1], w[2], w[3]);
+    aq[pc.aq_off + 2u * gi + 1u] = uvec4(w[4], w[5], w[6], w[7]);
+    ad[pc.ad_off + gi] = uvec2(floatBitsToUint(d), (uint(s0) & 0xFFFFu) | (uint(s1) << 16u));
+}

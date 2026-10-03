@@ -1,0 +1,129 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : require
+// AMEVA quantizing row store: f32 rows -> ggml q8_0 / q4_0 blocks (ggml layout, not the repacked one).
+//   SET_ROWS (the quantized KV-cache write of llama.cpp): dst row idx[r] := quantized src0 row r, indices i64 / i32;
+//   an index out of range is not written and is reported through the status buffer, as in ameva_set_rows.
+//   CPY f32 -> quantized of the same shape (KV-cache shift): idx_mode 0, dst row r := src row r.
+// One invocation quantizes one 32-element block with ggml's formulas:
+//   q8_0: d = amax / 127, q = round(x / d) (ties to even, as ggml's ARM quantize_row_q8_0), d stored as f16 (RNE)
+//   q4_0: d = max / -8 (max: the element of largest magnitude, the first one on ties), q = min(15, trunc(x / d + 8.5))
+// The division d = amax / 127 and 1 / d may differ from the CPU in the last bit (Vulkan allows 2.5 ulp), which can
+// move a value that lies on a rounding boundary to the neighbouring quantization level.
+// Blocks are 34 / 18 bytes, so a block starts at an even byte address and shares one 32-bit word with a neighbour at
+// one end: that 16-bit half is written with two atomics on disjoint bits, every other word of the block plainly.
+//
+//   binding 0: src f32, binding 1: indices (any range in idx_mode 0), binding 2: status, binding 3: dst (bytes)
+//   push: nb (blocks per row), nr, ne02, ne03; a_off, a_s1, a_s2, a_s3 (floats); i_off, i_s0, i_s1, i_s2 (words);
+//         i_ne1, i_ne2, idx_mode (0 identity, 1 i32, 2 i64), dst_rows; d_off, d_s1, d_s2, d_s3 (bytes); node
+//   variants: -DQTYPE_Q8_0 | -DQTYPE_Q4_0
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+
+layout(std430, binding = 0) readonly buffer A { uint a[]; };
+layout(std430, binding = 1) readonly buffer I { uint idx[]; };
+layout(std430, binding = 2) buffer S { uint status[]; };
+layout(std430, binding = 3) buffer D { uint d[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint nb, nr, ne02, ne03;
+    uint a_off, a_s1, a_s2, a_s3;
+    uint i_off, i_s0, i_s1, i_s2;
+    uint i_ne1, i_ne2, idx_mode, dst_rows;
+    uint d_off, d_s1, d_s2, d_s3;
+    uint node;
+} pc;
+
+#if defined(QTYPE_Q8_0)
+#define NH 17u // 16-bit halves per block (34 bytes)
+#elif defined(QTYPE_Q4_0)
+#define NH 9u  // 18 bytes
+#else
+#error "define QTYPE_Q8_0 or QTYPE_Q4_0"
+#endif
+
+void store_half(uint p, uint h) {
+    const uint sh = (p & 2u) * 8u;
+    atomicAnd(d[p >> 2u], ~(0xFFFFu << sh));
+    atomicOr(d[p >> 2u], h << sh);
+}
+
+void main() {
+    const uint gi = ameva_linear_id();
+    if (gi >= pc.nb * pc.nr * pc.ne02 * pc.ne03) return;
+    uint t = gi;
+    const uint c = t % pc.nb;
+    t /= pc.nb;
+    const uint r = t % pc.nr;
+    t /= pc.nr;
+    const uint i02 = t % pc.ne02;
+    const uint i03 = t / pc.ne02;
+    uint row = r;
+    if (pc.idx_mode != 0u) {
+        const uint iw = pc.i_off + r * pc.i_s0 + (i02 % pc.i_ne1) * pc.i_s1 + (i03 % pc.i_ne2) * pc.i_s2;
+        row = idx[iw];
+        const bool bad = row >= pc.dst_rows || (pc.idx_mode == 2u && idx[iw + 1u] != 0u);
+        if (bad) {
+            if (c == 0u) {
+                atomicAdd(status[0], 1u);
+                atomicMin(status[1], pc.node);
+            }
+            return;
+        }
+    }
+    const uint src = pc.a_off + 32u * c + r * pc.a_s1 + i02 * pc.a_s2 + i03 * pc.a_s3;
+    float x[32];
+    [[unroll]] for (uint j = 0u; j < 32u; ++j) {
+        x[j] = uintBitsToFloat(a[src + j]);
+    }
+
+    uint hw[NH];
+#if defined(QTYPE_Q8_0)
+    float amax = 0.0;
+    [[unroll]] for (uint j = 0u; j < 32u; ++j) {
+        amax = max(amax, abs(x[j]));
+    }
+    const float dq = amax / 127.0;
+    const float id = dq != 0.0 ? 1.0 / dq : 0.0;
+    hw[0] = ameva_f2h(dq);
+    [[unroll]] for (uint k = 0u; k < 16u; ++k) {
+        const int q0 = clamp(int(roundEven(x[2u * k] * id)), -127, 127);
+        const int q1 = clamp(int(roundEven(x[2u * k + 1u] * id)), -127, 127);
+        hw[1u + k] = (uint(q0) & 0xFFu) | ((uint(q1) & 0xFFu) << 8u);
+    }
+#else
+    float amax = 0.0, mx = 0.0;
+    [[unroll]] for (uint j = 0u; j < 32u; ++j) {
+        if (amax < abs(x[j])) {
+            amax = abs(x[j]);
+            mx = x[j];
+        }
+    }
+    const float dq = mx * -0.125; // = max / -8 exactly
+    const float id = dq != 0.0 ? 1.0 / dq : 0.0;
+    hw[0] = ameva_f2h(dq);
+    [[unroll]] for (uint k = 0u; k < 8u; ++k) {
+        uint b2[2];
+        [[unroll]] for (uint e = 0u; e < 2u; ++e) {
+            const uint j = 2u * k + e;
+            const uint lo = uint(min(15, int(x[j] * id + 8.5)));
+            const uint hi = uint(min(15, int(x[j + 16u] * id + 8.5)));
+            b2[e] = lo | (hi << 4u);
+        }
+        hw[1u + k] = b2[0] | (b2[1] << 8u);
+    }
+#endif
+
+    const uint p0 = pc.d_off + c * (2u * NH) + row * pc.d_s1 + i02 * pc.d_s2 + i03 * pc.d_s3;
+    uint k0 = 0u;
+    if ((p0 & 2u) != 0u) {
+        store_half(p0, hw[0]);
+        k0 = 1u;
+    }
+    uint k = k0;
+    for (; k + 1u < NH; k += 2u) {
+        d[(p0 + 2u * k) >> 2u] = hw[k] | (hw[k + 1u] << 16u);
+    }
+    if (k < NH) store_half(p0 + 2u * k, hw[k]);
+}

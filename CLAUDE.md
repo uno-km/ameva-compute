@@ -62,12 +62,17 @@ evidence/poc_cuda_like/<timestamp>/
 
 ## 4. 현재 진행 중인 최우선 과제
 
-- **[최우선] Q5_0 native GEMV**: 디코드(M=1) MUL_MAT에서 Q5_0 가중치를 AMEVA 버퍼에서 GPU가 직접 읽는다.
-  현재는 CPU가 F32로 역양자화한 사본(가중치 4배 메모리)을 `ggml_mul_mat_vec.comp`가 읽는다. 목표는 트래픽을 약 4.6배 줄이고 F32 캐시를 없애는 것이다.
-  기준선(S25, qwen2.5-0.5b Q4_K_M, 64토큰): AMEVA GEMV 12.3 t/s, CPU 50.3 t/s.
-  `AMEVA_PROFILE=1`로 단계별 시간을 측정하고, GEMM 경로와 출력이 같은지 확인한다.
-- **[다음] 레이어 단위 GPU 그래프 실행**: 현재는 토큰당 약 138개 MUL_MAT을 각각 동기 대기한다.
-  RMS_NORM, ROPE, softmax, SwiGLU 등을 GPU에 올려 제출 및 대기 횟수를 줄인다(`src/shaders/` 활용).
+- **[최우선] 2026-10-03 개발분 실기기 검증**: MMQ(int8 정수 내적, `AMEVA_MMQ`), 양자화 KV 캐시(q8_0/q4_0),
+  연산 융합(`AMEVA_FUSE`), 파이프라인 캐시(`AMEVA_PIPELINE_CACHE`). 로컬 검사(구문·셰이더 컴파일)만 통과한 상태이다.
+  런북과 판정 기준은 `docs/handover/LATEST.md` §3. 기기 생성 커널 헤더(spirv-val 포함)로 저장소 헤더를 교체한다.
+  MMQ 수용 기준(사용자 결정): CPU 대비 KLD 평균 ≤ 0.01.
+- **[다음]** 실측 결과에 따른 MMQ 기본값 정책, 융합 확대(QKV 합치기, ROPE+SET_ROWS), 양자화 KV 타입 확대.
+- 현재 기준선(S25 Adreno 830, Qwen2.5-0.5B Q4_K_M, 커밋 a6eee0f): 디코드 59~67 t/s(CPU 35~50), 프롬프트 368토큰 287 t/s(CPU 59).
+  측정 시 `Cpus_allowed_list`와 Adreno `max_gpuclk`를 함께 기록한다(조건에 따라 2~3배 차이).
+
+### 종결 기록: Q5_0 native GEMV / 레이어 단위 GPU 그래프 실행 (2026-10-02~03 종결)
+- 가중치 재배열(12개 양자화 타입) + 전용 GEMV(`ameva_qmv`)·타일 GEMM(`ameva_qgemm`)으로 대체했고, 그래프 전체를 배치 1회로 실행한다
+  (RMS_NORM, ROPE, FA, SwiGLU 등 GPU 실행). 검증: `ameva_qmm_check`, `test-backend-ops`, 실모델 3종 정합성(인수인계서 참조).
 
 ### 종결 기록: ggml-ameva S25 `GGML_ASSERT(device)` (2026-10-02 종결)
 - 원인: `libggml-ameva.so`가 실행 측 llama.cpp b8471(ggml 0.9.8)보다 새 ggml 헤더로 빌드되었다.

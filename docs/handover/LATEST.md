@@ -1,276 +1,319 @@
-# AMEVA 인수인계서: 재배열 가중치, QMV·QGEMM, 타일 Flash Attention
+# AMEVA 인수인계서: MMQ, 양자화 KV 캐시, 연산 융합, 파이프라인 캐시
 
-- 작성: 2026-10-03 07:22 (KST), 중간 갱신입니다. 작업은 계속 진행 중입니다.
-- 이전 문서
-  - `docs/handover/20261002-2248.md`: 재배열과 QMV 도입
-  - `docs/handover/20261002-1740.md`: 그래프 엔진
-- 브랜치: `vision/v1-pointwise-conv`. 마지막 커밋 `500b6e6` 이후 작업은 모두 **미커밋**이며, 커밋은 사용자가 합니다.
-- 검증 기기
-  - A35 (Mali-G68): 10/02 밤까지 사용했고, 10/03 새벽부터 ssh 연결 시간 초과입니다.
-  - S20 (Adreno 650): 10/03에 검증했습니다.
-  - S25, S21은 연결 거부, A53은 연결 시간 초과입니다.
+- 작성: 2026-10-03 20:40 (KST)
+- 브랜치: `vision/v1-pointwise-conv`
+  - 마지막 커밋 `a6eee0f`(사용자, 15:44)에는 타일 FA, FA 키 분할, QGEMM, 행 청크 처리, 분기 없는 디코더까지 포함되어 있습니다.
+  - 이 문서의 작업은 그 이후의 **미커밋** 변경입니다.
+- 이전 문서: `docs/handover/20261003-0722.md`
+- **이번 작업은 실기기 검증 전입니다.**
+  - 사용자 지시에 따라 실기기 검증은 별도 세션에서 진행합니다. 이 세션은 기기를 쓰지 않았습니다.
+  - 모든 변경은 로컬에서만 확인했습니다: aarch64 C++ 구문·형 검사, 셰이더 컴파일.
+  - §3 런북의 결과가 나오기 전까지는 "구현됨, 검증 대기" 상태입니다.
 
 ## 1. 요약
 
-- **목표:** 양자화 LLM의 디코드와 프롬프트 처리를 GPU에서 빠르게 합니다.
-- **현재 위치:**
-  - 가중치 재배열 + 디코드 GEMV(QMV) + 프롬프트 타일 GEMM(QGEMM) + 타일 Flash Attention이 들어갔습니다.
-  - A35·S20에서 정확성 시험, ggml 적합성 시험, 실모델 정합성 검사를 통과했습니다.
-- **S20 결과 (Qwen2.5-0.5B Q4_K_M)**
+- **목표:** 사용자 결정(2026-10-03)에 따른 기능 개발입니다. 결정 사항은 아래와 같습니다.
+  - (1) MMQ(int8 정수 내적) 도입. 기본 활성, `AMEVA_MMQ=0`으로 끔, 조건은 CPU 대비 KLD 평균 0.01 이하
+  - (2) 양자화 KV 캐시(Q8_0/Q4_0)와 가중치 재배열의 공존
+  - (3) 그 밖에 남은 개발: 연산 융합, 파이프라인 캐시
+- **현재 위치:** 네 기능 모두 구현했고 로컬 검사를 통과했습니다. 실기기 검증용 시험·스크립트를 함께 작성했습니다.
+- **다음 담당자가 먼저 할 일:** §3 런북을 S25에서 그대로 실행하고, 결과를 §3의 판정 기준에 맞춰 기록합니다.
 
-  | 항목 | AMEVA | 종전 경로 | CPU |
-  |---|---|---|---|
-  | 프롬프트 368토큰 | 121 t/s | 28.6 t/s | 47.4 t/s (CPU의 2.55배) |
-  | 디코드 | 16.6~19.4 t/s | 8.4 t/s | 22.8 t/s (CPU보다 낮음) |
+## 2. 변경 내용
 
-- **다음 담당자가 먼저 할 일**
-  1. 접속되는 기기(A35·S25)에서 §4.1 검증을 반복합니다.
-  2. 이어서 §4.2 이후의 성능 작업을 진행합니다.
+### 2.1 양자화 KV 캐시 (Q8_0 / Q4_0)
 
-## 2. 완료·검증된 작업
+**설계 변경 (사용자 지시안과 다름. 사유 포함)**
 
-### 2.1 이 단계에서 추가·변경한 것
+사용자 지시는 "KV 버퍼를 호스트·비재배열 경로로 분리"였으나, llama.cpp b8471에서는 이 방식을 구현할 수 없습니다.
+- KV 캐시와 가중치가 모두 장치의 기본 버퍼 타입으로 할당됩니다. 호스트 여부는 버퍼 타입 단위로 정해집니다.
+- 분리하더라도 FA와 양자화를 CPU가 수행하게 되어, 층마다 GPU↔CPU 왕복이 생깁니다.
 
-1. **공용 디코더** `shaders/ameva_qdecode.glsl`
-   - 재배열 가중치 바인딩 0~2, 적재 헬퍼, `decode()`, `qdecode_init()`를 담습니다.
-   - QMV와 QGEMM이 같은 디코더를 씁니다.
-2. **QMV 프롬프트 경로(COLS=8) 회귀 수정**
-   - 단위 루프 안의 행 경계 분기 때문에 Mali에서 2배 느렸습니다(190 ms 대 QMM 100 ms).
-   - 분기를 루프 밖으로 옮겨 QMM과 같은 속도가 되었습니다.
-   - M=1 경로는 분기가 있는 원래 형태가 더 빨라서 그대로 둡니다. 실측: 행 고정 방식 11.56, 원래 형태 12.41 t/s.
-3. **QGEMM** `shaders/ameva_qgemm.comp`
-   - 재배열 가중치용 타일 GEMM입니다.
-     - 128스레드가 64행 × 32열 타일을 맡습니다.
-     - 단위마다 공유 메모리에서 f32로 역양자화하고, 스레드당 4×4 외적 누산을 합니다.
-   - M ≥ 8이면 QGEMM을 씁니다. `AMEVA_QGEMM_MIN_M`으로 바꿀 수 있습니다.
-     - A35 교차점: q5_0은 M=8부터, q4_K는 M=12부터 QGEMM이 빠릅니다.
-   - 128×32 타일·스레드당 8×4 시도는 Adreno 650에서 6배 느려 되돌렸습니다(§6).
-4. **QMV 행당 레인 수:** 모든 K에서 16으로 고정했습니다(근거는 §2.3).
-5. **타일 Flash Attention** `shaders/ameva_flash_attn.comp`. 이전 커널은 (쿼리 행, 헤드)당 워크그룹 하나였고, 이를 교체했습니다.
-   - 같은 KV 헤드를 읽는 (쿼리 위치, 그룹 헤드) 행 BQ개를 128스레드가 맡습니다(GQA 헤드가 K/V 적재를 공유).
-   - 키는 BK개 블록 단위로 처리합니다: 공유 메모리에 f32로 올리고(f16 정확 변환) 온라인 softmax를 적용합니다.
-   - 모든 행에서 마스킹된 블록은 건너뜁니다.
-   - 변형 3종: DMAX 64(BQ16, BK32), 128(16, 32), 256(8, 16). 공유 메모리는 각 32 KB 미만입니다.
-   - D·DV가 4의 배수가 아니면 계약에서 거부합니다.
-6. **배치 KAT 수정** `tests/test_batch_graph_kat.cpp`
-   - '정렬 위반' 검사를 기기 정렬값의 절반 오프셋으로 만들도록 바꿨습니다.
-   - Adreno 650은 정렬이 4바이트여서, 고정 오프셋 4가 합법 값이었습니다.
-7. **도구·스크립트** (`scripts/termux/lab/`)
-   - `prompt_bench.sh`, `tbo_run.sh`, `parity_three.sh`, `qgemm_crossover.sh`, `wait_cool.sh`
-   - `decode_bench.sh`·`prompt_bench.sh`는 `Cpus_allowed_list`와 `gpu_max_clk`(Adreno)를 함께 출력합니다.
-   - `llm_parity_setup.sh`는 출력 디렉터리를 `OUT`으로 받습니다(기본 `out-g2`).
-8. **S20 실험 환경 신규 구성** (`~/abi-lab`)
-   - b8471 헤더(`ggml-b8471`, `llama-b8471`)
-   - `rt098` (0.9.8 링크)
-   - `tbo/test-backend-ops`
-   - 말뭉치
+그래서 KV 캐시를 건드리는 연산 전부를 GPU에서 수행하도록 했습니다(llama.cpp b8471 소스로 확인).
 
-### 2.2 검증 결과
-
-| 검사 | A35 (Mali-G68) | S20 (Adreno 650) |
+| 연산 | 시점 | 구현 |
 |---|---|---|
-| `ameva_qmm_check` (15타입 × 8형상 × 배치 4종, QGEMM 포함) | 480/480 | 480/480. `AMEVA_QMV_TPR` 4/8/16/32/64 모두 480/480 |
-| `test-backend-ops` 기본 / `AMEVA_REPACK_ALL=1` (QGEMM 빌드) | 1691/1691 / 1691/1691 (QGEMM 전 빌드) | 1690/1690 / 1690/1690 |
-| `test-backend-ops -o FLASH_ATTN_EXT` (타일 FA) | 미실행 | 824/824 |
-| 배치 KAT | PASS | PASS (KAT 수정 후) |
-| parity Qwen2.5-0.5B Q4_K_M | PASS, KLD 2.571e-3, 그리디 32/32 | PASS, KLD 2.569e-3, 그리디 32/32 |
-| parity Llama-3.2-1B Q4_K_M (ctx 256) | — | PASS, KLD 2.398e-3, 그리디 10/32 (S25 이전 결과와 같은 양상) |
-| parity Gemma-2-2B Q4_K_M (ctx 256, 헤드 256, softcap) | — | PASS, KLD 5.404e-3 (CPU 자체 6.881e-3), 그리디 32/32 |
+| SET_ROWS f32→q8_0/q4_0 | KV 쓰기 | 새 커널 `shaders/ameva_set_rows_q.comp` |
+| FLASH_ATTN_EXT, K/V q8_0/q4_0 | 어텐션 | `ameva_flash_attn.comp`의 K/V 적재에 역양자화 추가. K와 V 타입을 서로 다르게 쓸 수 있습니다. |
+| CPY q8_0/q4_0→f32 | 컨텍스트 시프트 | `ameva_cpy.comp`가 양자화 소스를 바이트 주소로 읽습니다. |
+| CPY f32→q8_0/q4_0 | 컨텍스트 시프트 | `ameva_set_rows_q` 항등 모드 |
 
-- 로그 위치
-  - S20: `~/abi-lab/results/parity3_s20g3.txt`, `parity_s20g3_*.log`, `tbo_*.log`, `tbo_fa_g3.log`
-  - A35: `~/abi-lab/results/parity_q05_qgemm_a35.log`
+**양자화 공식은 ggml과 같습니다.**
+- q8_0: d = amax/127, 반올림은 ties-to-even(ggml ARM `quantize_row_q8_0`와 같음), d는 f16 RNE로 저장
+- q4_0: d = max/-8, q = min(15, trunc(x/d + 8.5))
+- Vulkan의 나눗셈은 정확 반올림이 아니어서(2.5 ulp), 경계값이 이웃 단계로 갈 수 있습니다. 시험은 이를 허용 범위로 판정합니다.
 
-### 2.3 성능
+**블록 경계 처리**
+- 블록은 34/18바이트입니다. 이웃 블록과 공유하는 16비트 반쪽은 atomic 두 번(AND, OR)으로 씁니다.
 
-**측정 조건:** `Cpus_allowed_list`와 Adreno 클럭 상한을 반드시 함께 보십시오(§6).
+**계약 (그 밖의 KV 타입은 명시적으로 거부)**
+- SET_ROWS 대상과 CPY 대상·원본에 q8_0/q4_0을 허용합니다. 행은 32의 배수(블록 단위)여야 합니다.
+- FA는 K/V에 f32/f16/q8_0/q4_0을 허용합니다. 양자화 K/V는 헤드 크기가 32의 배수여야 합니다.
+- q4_1, q5_0, q5_1, iq4_nl KV는 거부합니다. 재배열이 켜져 있으면 llama.cpp 스케줄러가 명시적으로 중단합니다.
 
-**S20, Qwen2.5-0.5B Q4_K_M** (cpuset 0-7)
+**FA 끔 + 양자화 K:** 지원하지 않습니다. K의 MUL_MAT 경로가 대상이 아니기 때문입니다. llama.cpp는 양자화 V에 FA를 요구합니다.
 
-| 구성 | 디코드 t/s | 프롬프트 368토큰 t/s |
-|---|---|---|
-| CPU (`-t 4`) | 22.79 | 47.43 |
-| AMEVA QMM (`AMEVA_REPACK=0`) | 8.37 | 28.63 |
-| AMEVA QMV/QGEMM + 이전 FA | 15.70 | 93.44 |
-| AMEVA + 타일 FA (tpr 자동=K별) | 16.62 | 121.06 |
-| AMEVA + 타일 FA, tpr 16 / 8 | 17.9~18.9 / 19.41 | — |
+**도구 변경:** parity 도구에 `--kv q8_0|q4_0` 옵션을 추가했습니다(K와 V 같은 타입).
 
-- 위 행들은 정상 클럭에서 측정했습니다. 발열로 상한이 305 MHz로 떨어진 상태에서는 디코드 11.7, 프롬프트 71.5였습니다.
+### 2.2 MMQ (int8 활성값 × 재배열 가중치, 정수 내적)
 
-**S20 디코드 형상별 QMV 시간** (tpr 8 / 16 / 64)
+**런타임**
+- `VK_KHR_shader_integer_dot_product`가 제공되면 장치 생성 시 확장과 기능을 켭니다.
+- 지원 여부는 `AcDeviceLimits.integer_dot_product`와 `integer_dot_product_accelerated`(필드 추가)로 보고합니다.
+- `struct_size`가 이전 크기인 호출자도 받아들입니다.
 
-| 형상 | tpr 8 | tpr 16 | tpr 64 |
-|---|---|---|---|
-| q8_0 151936×896 | 7.28 ms | 8.19 ms | 11.4 ms |
-| q4_K 896×4864 | 336 µs | 356 µs | 611 µs |
-| q6_K 896×4864 | 296 µs | 296 µs | 559 µs |
-| q5_0 4864×896 | 241 µs | 245 µs | 660 µs |
+**커널**
+- `ameva_quant_a8.comp`
+  - 32원소 단위로 d = amax/127, q = round(x/d)(ties-to-even)를 계산합니다.
+  - 반쪽(16원소)별 q 합도 함께 구합니다.
+- `ameva_mmq.comp` (12타입)
+  - 가중치를 `decode_i8`(`ameva_qdecode.glsl`)로 풉니다: w = sc_h × v + mc_h, v는 int8 바이트입니다.
+  - 64×32 타일입니다. 스레드 0..63은 가중치를 디코드하고, 64..127은 활성값을 스테이징합니다.
+  - `dotPacked4x8EXT`로 정확한 정수 내적을 계산합니다.
 
-- 출력 투영(q8_0)은 약 20 GB/s입니다.
+**정밀도:** 활성값만 int8로 반올림됩니다(원소당 오차 d/2 이하). 가중치는 원래 정밀도 그대로입니다. CPU 백엔드도 활성값을 q8_0/q8_K로 반올림합니다.
 
-**S20 프롬프트 내역** (368토큰, 타일 FA)
-- QGEMM이 82%입니다. q5_0 4864×896이 회당 33 ms로 약 48 G FMA/s입니다.
-- FA가 8%(회당 5.4 ms)입니다. 이전 FA는 A35에서 회당 35 ms였습니다.
+**적용 조건:** 재배열 가중치, M ≥ 8(QGEMM과 같은 기준), 장치 지원.
 
-**A35, Qwen2.5-0.5B Q4_K_M** (QGEMM 빌드, cpuset 0-7)
+**환경 변수 `AMEVA_MMQ`**
 
-| 항목 | 결과 |
+| 값 | 동작 |
 |---|---|
-| 프롬프트 185토큰 | 74.2 t/s (QMM 21.1) |
-| 프롬프트 368토큰 | 69.2 t/s (QMM 20.3) |
-| 디코드 | 14.0~14.5 t/s |
-| CPU 디코드 | 34.2 t/s |
-| ggml-vulkan | 7.0 t/s, 출력이 `!!!!`로 깨짐 |
+| 미설정 | 지원 시 켜고, stderr에 한 줄 출력 |
+| 1 | 반드시 사용합니다. 미지원이면 중단(abort) |
+| 0 | 끕니다(f32 QGEMM) |
 
-- 정합성 도구 기준 CPU batch는 88.5 t/s입니다.
+- 활성값 int8은 엔진 스크래치 버퍼에 기록하며, FA 분할 부분합과 같은 버퍼를 씁니다.
+- 계수기: `ggml_backend_ameva_get_mmq_mul_mat_count()`를 추가했습니다. qmv 계수기는 재배열 경로 전체를 셉니다.
 
-**모델별 S20 정합성 실행의 디코드** (AMEVA / CPU, 상한 525 MHz 구간 포함)
+### 2.3 연산 융합 (write-through)
 
-| 모델 | AMEVA | CPU |
+인접 노드 쌍을 디스패치 하나로 계산합니다.
+
+| 쌍 | 처리 |
+|---|---|
+| RMS_NORM → 1행 가중치 MUL | `ameva_rms_norm`이 y와 y·w를 함께 씁니다. |
+| MUL_MAT(QMV, 1행) → N벡터 ADD | bias·residual을 에필로그에서 더합니다. |
+| MUL_MAT(QMV, 1행) → SWIGLU(split) | 곱이 gate일 때와 up일 때를 모두 처리합니다. |
+
+- 첫 노드의 결과도 그대로 씁니다. 백엔드는 그래프 분할 하나만 보므로, 중간 결과를 다른 곳에서 쓰는지 알 수 없기 때문입니다.
+- 연산은 비융합 노드와 같은 f32 연산입니다. 결과 비트가 같아야 하며, `ameva_fuse_check`의 해시로 확인합니다.
+
+**메모리 겹침 안전장치**
+- 문제: ggml 할당기는 두 번째 노드의 출력을, 첫 노드에서 수명이 끝난 입력(활성값)의 메모리에 둘 수 있습니다. 융합 디스패치에서 이 경우 경쟁 조건이 생깁니다.
+- 대책: 출력과 입력의 바이트 범위가 겹치면 융합하지 않습니다. 같은 원소를 같은 스레드가 읽고 쓰는 정확한 in-place 별칭만 허용합니다.
+
+**예상 효과와 설정**
+- 효과는 계산값이며 실측 전입니다. Qwen 0.5B는 토큰당 534 디스패치 중 약 193개, Llama 1B는 약 80개가 줄어듭니다(재배열 + 1행 기준).
+- `AMEVA_FUSE=0`으로 끕니다.
+- 계수기: `ggml_backend_ameva_get_fused_pair_count()`, 프로파일에서는 `fused_pairs`
+
+### 2.4 파이프라인 캐시 (첫 토큰 지연)
+
+- 측정된 문제: S25에서 커널 16개 생성에 1.75초가 걸렸습니다(2.5절).
+- 런타임
+  - 컨텍스트별 `VkPipelineCache`를 두고 모든 커널 생성에 사용합니다.
+  - `ac_runtime_pipeline_cache_merge`: 헤더의 vendor, device, UUID가 다르면 `AC_ERR_INVALID_ARGUMENT`로 거부합니다.
+  - `ac_runtime_pipeline_cache_get_data`
+- 엔진
+  - 시작 시 `$HOME/.cache/ameva/ggml-ameva-pipelines.bin`을 읽습니다.
+  - 종료(teardown) 시 데이터가 늘었을 때만 저장합니다. 프로세스별 임시 파일을 쓴 뒤 rename합니다.
+  - `AMEVA_PIPELINE_CACHE=0`이면 끄고, 경로를 주면 그 경로를 씁니다.
+  - 기기나 드라이버가 다른 데이터는 한 줄 출력 후 쓰지 않고, 종료 시 새로 씁니다.
+
+### 2.5 오늘 S25에서 측정한 사실 (Adreno 830, 상한 832 MHz, cpuset 0-1,4-5)
+
+**2단위 동시 적재(UPL) 기각.** 디코드 t/s, 같은 조건에서 번갈아 2회 측정했습니다.
+
+| UPL | Qwen 0.5B | Llama-1B |
 |---|---|---|
-| Qwen 0.5B | 17.7 | 20.4 |
-| Llama 1B | 6.8 | 13.9 |
-| Gemma 2B | 5.5 | 5.8 |
+| 1 | 59.2~60.2 | 41.9~42.1 |
+| 2 | 46.7~46.9 | 41.5~41.7 |
+| 4 | 28.3~28.6 | 31.0~31.1 |
 
-- 배치 채점(프롬프트형): Qwen 76.5, Gemma 19.1(CPU 14.4)
+- 기본값은 1입니다. 빌드 옵션 `AMEVA_BUILD_QMV_UPL`로만 바꿀 수 있습니다.
+- 분기 제거 디코더는 측정 오차 범위 안이었습니다.
 
-## 3. 중단 지점
+**S25의 GEMV 대역폭**
+- q4_K 28~40 GB/s, 출력 투영 q6_K 약 57 GB/s
+- 이전 보고의 "4~7 GB/s"는 S20·A35 수치였습니다.
 
-1. **QMV 행당 레인 수:** 엔진 기본값을 "K별 16/32/64"에서 "항상 16"으로 바꿨습니다.
-   - S20 `out-g3`에 빌드되어 있고, 정확성 480/480은 통과했습니다.
-   - 성능은 발열 상한 구간에서만 측정되었습니다.
-   - 정상 클럭에서 `decode_bench.sh`로 다시 재야 합니다(이전 수동 측정: 16 고정 17.9~18.9 t/s).
-2. **커널 헤더**는 S20 생성본(glslang 16.6.0)으로 저장소에 동기화되어 있습니다. 64×32 QGEMM, 타일 FA가 반영되어 있습니다.
-3. **S20 GPU 상한**은 07:20 기준 525 MHz입니다. 정상 상한은 587 MHz입니다.
+**CPU 기록 비용**
+- 커널을 처음 생성하는 비용이 평균에 섞여 커 보였습니다(110 ms × 16).
+- 정상 상태는 노드당 약 7 µs입니다. S25 디코드의 병목은 GPU입니다.
 
-## 4. 다음 작업 (우선순위 순)
+**결함 1건 수정**
+- 바인딩 한계를 64 KiB로 낮춘 시험에서 디스패치 용량을 과소 산정하는 결함이 드러났습니다(`AC_ERR_DEVICE_BUSY`).
+- 용량은 이제 타임스탬프 풀이 없을 때 런타임 최대값입니다.
 
-### 4.1 다른 기기에서 재검증
+**같은 S25에서 다른 세션이 측정한 값 (out-g3, 16:33)**
+- Qwen 0.5B: 디코드 67.4 t/s(CPU 34.9), 프롬프트 287 t/s(CPU 59.2)
+- `test-backend-ops` 1692/1692(기본·전체 재배열 모두)
+- 3모델 정합성: 모든 개별 로그가 PASS입니다(Gemma 디코드 20.4 대 CPU 12.0). 요약 파일의 rc=127은 래퍼 스크립트 문제입니다.
 
-- 대상: A35, S25 (복구 시)
-- 목적: tpr 16 기본값, 64×32 QGEMM, 타일 FA를 Mali와 Adreno 830에서 확인합니다.
-- 명령 (기기에서)
-  ```
-  cd ~/abi-lab && bash src/scripts/termux/lab/g2_build.sh $HOME/abi-lab/out-g3
-  (nohup bash tbo_run.sh > /dev/null 2>&1 &)     # OUT=$HOME/abi-lab/out-g3 로 지정
-  OUT=$HOME/abi-lab/out-g3 nohup bash parity_three.sh <tag> &
-  OUT=$HOME/abi-lab/out-g3 bash decode_bench.sh <gguf> <tag> gpu; ... prompt_bench.sh ...
-  ```
-  - S25에는 `~/abi-lab`이 이미 있습니다.
-  - A35는 `out-g2`에 QGEMM 빌드(FA 이전)가 있습니다.
-- 완료 기준: qmm_check 480/480, `test-backend-ops` 전체 통과, parity 3모델 PASS
+### 2.6 기타
 
-### 4.2 디코드 GEMV
+- `test_batch_graph_kat`: 정렬 위반 시험을 기기 정렬값에 맞췄습니다(S20은 4바이트).
+- `ac_vk_event.cpp`: 커밋된 파일에 `<string.h>`가 빠져 있어 추가했습니다(`strcmp`).
+- `tbo_paths.sh`
+  - `-o UNARY`는 아무 시험도 고르지 않았습니다(0/0). 시험 이름이 함수명이기 때문이며, `TANH`로 바꿨습니다.
+  - MMQ 비교 실행을 추가했습니다: `AMEVA_REPACK_ALL=1 AMEVA_MMQ=0`
+- `build_ameva_kernels.py`
+  - `#include`를 따라가며 바인딩을 셉니다.
+  - QGEMM·MMQ·FA 계열과 이름 있는 op 변형(`OPS_DEFINED`)을 추가했습니다.
+  - `--spirv-val none` 옵션을 추가했습니다(검증 생략, 헤더 두 번째 줄에 기록).
 
-- 목표: K=4864 형상(q4_K 4~7 GB/s, q6_K 7~12 GB/s)의 효율을 출력 투영 수준(20 GB/s, S20)에 가깝게 높입니다.
-- 후보
-  - q4_K 스케일 해석 분기 제거
-  - 행당 레인 8 (Adreno에서 3% 이득)
-  - 단위 2개 동시 적재로 메모리 수준 병렬성 확대
+## 3. 실기기 검증 런북 (별도 세션용)
 
-### 4.3 프롬프트 GEMM
+**중요:** 저장소의 `ggml_ameva_kernels_spv.h`는 Windows 로컬에서 `--spirv-val none`으로 생성한 것입니다(spirv-val 미실행). 기기의 `g2_build.sh`가 spirv-val을 포함해 다시 생성합니다. 그 생성본을 저장소에 반영하십시오.
 
-- 현재 S20 약 48 G FMA/s로 이론치의 약 16%입니다.
-- 레지스터를 늘리는 방향(스레드당 8×4)은 Adreno에서 실패했습니다.
-- 후보
-  - 256스레드 × 4×4로 타일만 키우기
-  - K 단계 64(배리어 절반)
-  - 활성값을 int8로 양자화한 정수 내적(MMQ, `VK_KHR_shader_integer_dot_product`, A35 지원)
-    - 정밀도는 CPU의 Q8 경로와 같아집니다. 정책 결정이 필요합니다(§7).
+### 3.1 동기화와 빌드 (S25 기준, A35·S20·S21 동일)
 
-### 4.4 디스패치·배리어 감소
+```
+# PC에서
+tar czf - include src adapters/llama/ggml-ameva scripts tests tools CMakeLists.txt | ssh s25 'cd ~/abi-lab/src && tar xzf -'
+# 기기에서 (다른 세션과 겹치지 않는 OUT 이름)
+cd ~/abi-lab && for f in decode_bench.sh prompt_bench.sh tbo_paths.sh parity_three.sh llm_parity_run.sh llm_parity_setup.sh ab_decode.sh; do cp src/scripts/termux/lab/$f .; done
+bash src/scripts/termux/lab/g2_build.sh $HOME/abi-lab/out-v1
+OUT=$HOME/abi-lab/out-v1 bash llm_parity_setup.sh
+```
 
-- 현재 토큰당 534 디스패치입니다.
-- 연산 융합 후보: RMS_NORM+MUL, gate/up+SwiGLU, 잔차 ADD
-- FA 디코드 키 분할: 긴 컨텍스트에서 KV 헤드당 워크그룹 하나라서 직렬 구간이 깁니다.
+**판정 (`g2_build.sh` 출력)**
 
-### 4.5 바인딩 한계를 넘는 원소별 연산의 청크 분할
+| 줄 | 기준 |
+|---|---|
+| 커널 헤더 | `wrote ... (30 qmm, 24 qmv, 12 qgemm, 12 mmq, 3 fa variants, 12 op kernels)`, 오류 없음 |
+| `AMEVA_QMM_CHECK` | PASS (516/516) |
+| `through ameva_mmq` | 정수 내적 지원 기기에서는 0보다 커야 합니다. 그때는 `AMEVA_MMQ=0` 줄도 PASS여야 합니다. |
+| `AMEVA_KVQ_CHECK` | PASS |
+| `AMEVA_CHUNK_CHECK` | PASS |
+| `fuse on` / `fuse off` | 둘 다 PASS |
+| `AMEVA_FUSE_BITEXACT` | PASS |
+| 배치 KAT | `AMUDA_BATCH_GRAPH_KAT=PASS` |
 
-- 현상: S20(128 MiB)에서 Gemma 배치 256의 logit SCALE/TANH(262 MB)가 CPU로 갑니다.
+**미지원 기기:** `ggml-ameva: MMQ unavailable ...` 한 줄이 출력되고 `through ameva_mmq`가 0이면 정상입니다. S20 Adreno 650은 지원 여부가 미확인입니다.
 
-### 4.6 이월 과제
+### 3.2 적합성 시험
 
-- 정확도 판정 모드(`--ref-model`)
-- `$PREFIX/lib` 설치
-- CLAUDE.md 4장 갱신
-- STT 배포
-- 배포기 RUNPATH
+```
+(OUT=$HOME/abi-lab/out-v1 nohup bash tbo_paths.sh v1 > /dev/null 2>&1 &)
+cat ~/abi-lab/results/tbop_v1.txt    # TBOP_DONE 이 마지막 줄
+```
+
+- 판정: 모든 줄이 `rc=0`이고 `N/N tests passed`, FAIL 없음
+- 새로 시험되는 범위
+  - `SET_ROWS`·`CPY`·`FLASH_ATTN_EXT`의 q8_0/q4_0 케이스(기본 실행)
+  - MMQ(`repack_all`)
+  - 융합 패턴(`MUL_MAT_VEC_FUSION` 등, `repack_all`)
+
+### 3.3 실모델 정합성
+
+```
+OUT=$HOME/abi-lab/out-v1 nohup bash parity_three.sh v1 &                                   # f16 KV, MMQ 기본
+OUT=$HOME/abi-lab/out-v1 bash llm_parity_run.sh ~/.cache/termux-llamacpp/models/qwen2.5-0.5b-instruct-q4_k_m.gguf v1_kvq8 --kv q8_0
+OUT=$HOME/abi-lab/out-v1 bash llm_parity_run.sh ~/.cache/termux-llamacpp/models/qwen2.5-0.5b-instruct-q4_k_m.gguf v1_kvq4 --kv q4_0
+```
+
+- 판정: `AMEVA_LLM_PARITY=PASS`(KLD 평균 0.01 이하). MMQ 조건은 사용자 기준입니다.
+- 참고값: f16 KV일 때 KLD는 지금까지 Qwen 2.57e-3, Llama 2.40e-3, Gemma 5.40e-3였습니다.
+- `--kv q8_0`은 CPU도 같은 q8_0 KV를 쓰므로 비교가 공정합니다.
+- 프로파일 줄 `mmq_mul_mat=`이 0보다 큰지(배치 채점 경로), `fused_pairs=`가 0보다 큰지 확인합니다.
+
+### 3.4 성능 (같은 조건에서 번갈아 측정, cpuset·클럭 기록)
+
+```
+M=~/.cache/termux-llamacpp/models/qwen2.5-0.5b-instruct-q4_k_m.gguf
+OUT=$HOME/abi-lab/out-v1 bash prompt_bench.sh $M v1_mmq gpu
+AMEVA_MMQ=0 OUT=$HOME/abi-lab/out-v1 bash prompt_bench.sh $M v1_nommq gpu
+bash ab_decode.sh $M 2 out-g3 out-v1                              # 융합 전후 디코드
+AMEVA_FUSE=0 OUT=$HOME/abi-lab/out-v1 bash decode_bench.sh $M v1_nofuse gpu
+# 파이프라인 캐시: 같은 명령을 두 번 실행해 첫 실행과 두 번째의 prompt eval time 비교
+rm -f ~/.cache/ameva/ggml-ameva-pipelines.bin; OUT=$HOME/abi-lab/out-v1 bash decode_bench.sh $M pc1 gpu; OUT=$HOME/abi-lab/out-v1 bash decode_bench.sh $M pc2 gpu; ls -la ~/.cache/ameva/
+```
+
+**기록 항목**
+- 프롬프트 t/s: MMQ 대 f32 QGEMM. 정수 내적이 accelerated인지 보고 줄과 함께 기록합니다.
+- 디코드 t/s: 융합 전후
+- 첫 토큰(prompt eval) 지연: 캐시 유무
+- `AMEVA_PROFILE=1`의 `dispatches`/`graphs` 감소
+
+**양자화 KV 실사용**
+
+```
+llama-completion --device AMEVA0 -ngl 99 -fa on -ctk q8_0 -ctv q8_0 ...
+```
+
+중단 없이 생성되는지, 출력이 f16 KV와 같은 양상인지 확인합니다. `-ctk q4_0 -ctv q4_0`도 같은 방법으로 확인합니다.
+
+## 4. 남은 과제 (우선순위 순)
+
+1. **§3 실기기 검증 (전 기기)**
+   - 실패하면 해당 기능의 환경 변수로 끈 상태와 비교해 원인을 분리합니다: `AMEVA_MMQ=0`, `AMEVA_FUSE=0`, `AMEVA_PIPELINE_CACHE=0`, `--kv f16`
+2. **MMQ 타일 조정:** 실측 후 BM 64 등 공유 메모리 여유를 활용합니다(현재 약 4.5 KB 사용).
+3. **융합 확대:** QKV GEMV 합치기, ROPE+SET_ROWS, 프롬프트 경로 에필로그. 1번 실측에서 이득이 확인된 뒤 진행합니다.
+4. **양자화 KV 타입 확대:** q4_1, q5_0, q5_1, iq4_nl.
+5. 이월 항목
+   - FA 끔 경로(SOFT_MAX 등)
+   - 정확도 판정 모드(`--ref-model`)
+   - `$PREFIX/lib` 설치(승인 필요)
+   - 배포기 RUNPATH(별도 저장소)
+   - STT 배포
+   - whisper.cpp 서브모듈 여부(결정 필요)
 
 ## 5. 환경과 명령
 
-- 기기 작업 디렉터리 구조는 이전 문서 §5와 같습니다.
-- S20 `~/abi-lab`
+**로컬 검사 도구 (Windows, 저장소 밖)**
+- 위치: `%TEMP%\claude\tools`
+  - `glslang` 16.6.0(Khronos main-tot 바이너리)
+  - zig 0.13.0(clang 18)
+  - Vulkan-Headers 1.3.280
+  - llama.cpp b8471 헤더: `%TEMP%\claude\llsrc\stage\pkg`
+- 사용법
+  - C++ 구문·형 검사: `bash $TEMP/claude/tools/syn.sh <파일...>` (aarch64-linux, `-Wall -Wextra`)
+  - 커널 헤더 생성: `python scripts/build_ameva_kernels.py --glslang <glslang.exe> --spirv-val none`
+- spirv-val은 공식 바이너리가 배포되지 않아 로컬에 없습니다.
+- 주의: `zig cc`는 FileNotFound로 실패합니다. 반드시 `zig clang`에 libc·libc++ 경로와 매크로를 직접 넘기십시오(syn.sh 참조).
 
-  | 경로 | 내용 |
-  |---|---|
-  | `out-g2` | QGEMM, 이전 FA |
-  | `out-g3` | QGEMM 64×32, 타일 FA, tpr 16. 최신 |
-  | `rt098` | ggml 0.9.8 링크 |
-  | `tbo` | test-backend-ops |
-  | `results` | 결과 로그 |
+**새 환경 변수**
 
-- 기기 셸
-  - A35: zsh. 따옴표 없는 변수가 분리되지 않으므로 bash 스크립트로 실행하십시오.
-  - S20: bash
-- 실행 중인 라이브러리를 덮어쓰지 마십시오. `test-backend-ops` 등이 도는 중에는 다른 `OUT` 디렉터리에 빌드합니다.
-- 환경 변수
+| 변수 | 의미 |
+|---|---|
+| `AMEVA_MMQ` | 0 / 1 |
+| `AMEVA_FUSE` | 0 / 1 |
+| `AMEVA_PIPELINE_CACHE` | 0 / 경로 |
+| `AMEVA_BINDING_LIMIT` | 시험 전용, 바이트 단위(4096 이상) |
+| `AMEVA_FA_SPLIT_KEYS` | 0 또는 64의 배수 |
+| `AMEVA_BUILD_QMV_UPL` | 빌드 시 1/2/4 |
 
-  | 변수 | 의미 |
-  |---|---|
-  | `AMEVA_REPACK` | 재배열 사용 여부 |
-  | `AMEVA_REPACK_ALL` | 모든 버퍼의 대상 텐서 재배열(시험용) |
-  | `AMEVA_QMV_TPR` | QMV 행당 레인 수 4/8/16/32/64 |
-  | `AMEVA_QGEMM_MIN_M` | QGEMM을 쓰기 시작하는 활성값 행 수 2~65535 |
-  | `AMEVA_PROFILE` | 1·2 |
-  | `AMEVA_TRACE` | 그래프별 기록 |
+## 6. 알려진 위험과 주의사항
 
-## 6. 알려진 문제와 주의사항
-
-**측정 조건이 결과를 2~3배 바꿉니다.**
-- ssh로 띄운 Termux는 cpuset이 바뀝니다.
-  - A35에서 `0-2`(A55 3개)였다가 이후 `0-7`이 되었습니다.
-  - CPU 디코드 6.15 → 34 t/s, AMEVA 기록 비용 디스패치당 64 → 약 8 µs로 달라졌습니다.
-  - 이전 보고의 "A35에서 AMEVA가 CPU의 2.1배"는 이 조건 때문이었고, 정정했습니다. CPU(A78 4코어)가 디코드 34 t/s로 더 빠릅니다.
-- Adreno 클럭 상한(`/sys/class/kgsl/kgsl-3d0/max_gpuclk`)은 연속 실행 약 1시간 후 305 MHz까지 내려갑니다.
-- A/B 비교는 같은 조건에서 번갈아 측정하십시오.
-
-**Adreno 650 레지스터 절벽**
-- QGEMM에서 스레드당 vec4 누산기 8개와 역양자화 출력 8개(vec4)가 동시에 살아 있으면 6배 느려졌습니다.
-- 셰이더 통계 확장이 없어 스필을 직접 확인하지는 못했습니다. Mali-G68도 `VK_KHR_pipeline_executable_properties`가 없습니다.
-
-**Mali 컴파일러**
-- COLS=8 단위 루프 안의 경계 분기가 2배 느린 코드를 만들었습니다(§2.1의 2번 항목).
-
-**S20 장치 한계**
-- `maxStorageBufferRange` 128 MiB, 오프셋 정렬 4바이트, 서브그룹 128입니다.
-
-**non-host 버퍼(재배열)**
-- 양자화 KV 캐시·순환 모델은 llama.cpp 스케줄러가 명시적으로 중단합니다. `AMEVA_REPACK=0`으로 실행하십시오.
-
-**정합성 도구와 llama-completion의 기록 시간 차이**는 미해명입니다(이전 문서 §6).
+- **정수 내적 성능:** MMQ가 f32 QGEMM보다 빠르다는 보장은 없습니다.
+  - Adreno·Mali에서 `dotPacked4x8EXT`가 accelerated가 아니면 에뮬레이션됩니다.
+  - 느리면 기본값 정책(accelerated일 때만 켜기 등)을 다시 정해야 합니다.
+- **GLSL 오버로드:** `dotPacked4x8EXT(uint,uint)`는 부호 없는 판입니다. MMQ는 `int` 인자 판(부호 있음)을 씁니다. 로컬 glslang에서 확인했습니다.
+- **같은 기기를 여러 세션이 함께 쓰면** 디렉터리와 측정이 충돌합니다. 빌드 디렉터리와 태그를 분리하고, 측정 중에는 다른 GPU 작업이 없는지 확인하십시오(S20의 `sd-cli` 사례).
+- **파이프라인 캐시는 파일을 씁니다:** `~/.cache/ameva`. 읽기 전용 HOME 등에서는 한 줄 경고만 출력하고 계속 동작합니다.
+- **`AMEVA_REPACK_ALL=1`에서는 KV 형태 텐서도 재배열됩니다.** 그 결과 양자화 KV 연산은 "not supported"로 건너뜁니다. 시험 설정의 특성이며, 실사용과 무관합니다.
 
 ## 7. 사용자 협의가 필요한 결정
 
-1. **재배열 기본값 정책.** 양자화 KV·순환 모델 지원과의 관계입니다(이전 문서 §7).
-2. **프롬프트 GEMM에 활성값 int8 양자화(MMQ)를 쓸지 여부**
-   - 현재: f32 역양자화 + f32 FMA. CPU보다 정확합니다.
-   - MMQ로 가면 속도는 크게 오를 수 있습니다. 대신 CPU와 같은 Q8 근사가 들어갑니다.
-3. **디코드 성능 목표.**
-   - A35처럼 CPU가 강하고 GPU 대역폭이 낮은 기기에서는 GPU 디코드가 CPU를 넘기 어렵습니다(유효 대역폭 GPU 5~9 GB/s, CPU 약 12.7 GB/s).
-   - GPU 오프로드의 가치를 무엇으로 볼지 정해야 합니다: 프롬프트 처리 가속, CPU 해방, 전력.
-4. 이월 항목: whisper.cpp 서브모듈 여부, 배포기 RUNPATH, 설치 시점, A53 보류
+1. **MMQ 기본값 정책.** 정수 내적이 가속되지 않는 기기에서 MMQ가 느릴 경우, 기본값을 "accelerated일 때만"으로 바꿀지 정해야 합니다(실측 후).
+2. **로컬 생성 헤더를 커밋할지 여부.** 기기 생성본(spirv-val 포함)으로 교체한 뒤 커밋하기를 권합니다.
+3. 이월 항목: whisper.cpp, RUNPATH, 설치 시점, A53
 
-## 8. 미커밋 변경 (이 단계 추가분)
+## 8. 미커밋 변경 (a6eee0f 이후)
 
-- 신규
-  - `adapters/llama/ggml-ameva/shaders/`: `ameva_qdecode.glsl`, `ameva_qgemm.comp`
-  - `scripts/termux/lab/`: `prompt_bench.sh`, `tbo_run.sh`, `parity_three.sh`, `qgemm_crossover.sh`, `wait_cool.sh`
-  - `docs/handover/20261003-0722.md`
 - 수정
-  - `shaders/ameva_flash_attn.comp` (타일 방식으로 재작성), `shaders/ameva_qmv.comp` (공용 디코더, 루프 구조)
-  - `ggml-ameva.cpp`: QGEMM 경로, FA 인코더·계약, tpr 16
-  - `scripts/build_ameva_kernels.py`: include를 따라가는 파싱, QGEMM·FA 계열
-  - `ggml_ameva_kernels_spv.h`: 재생성
-  - `tests/`: `ameva_qmm_check.cpp` (QGEMM 형상), `ameva_mm_bench.cpp`, `test_batch_graph_kat.cpp`
-  - `scripts/termux/lab/`: `decode_bench.sh`, `llm_parity_setup.sh`
-- 이전 단계 목록은 `docs/handover/20261002-2248.md` §8, `docs/handover/20261002-1740.md` §8에 있습니다. 전체는 `git status --short`로 확인하십시오.
+  - `adapters/llama/ggml-ameva/`
+    - `ggml-ameva.cpp`: 양자화 KV, MMQ, 융합, 파이프라인 캐시, 계측, 용량
+    - `ggml-ameva-device.cpp`, `ggml-ameva-impl.h`, `ggml-ameva.h`: 계수기
+    - `ggml_ameva_kernels_spv.h`: 로컬 생성, spirv-val 미실행
+  - 셰이더: `ameva_cpy.comp`, `ameva_flash_attn.comp`, `ameva_qdecode.glsl`, `ameva_qmv.comp`, `ameva_rms_norm.comp`
+  - 런타임: `include/ac_context.h`, `include/ac_runtime.h`, `src/backend/vulkan/ac_vk_context.cpp`, `ac_vk_pipeline.cpp`, `ac_vk_event.cpp`, `src/runtime/ac_runtime.cpp`
+  - 스크립트: `scripts/build_ameva_kernels.py`, `scripts/termux/lab/g2_build.sh`
+  - 시험: `tests/ameva_llm_parity.cpp`, `tests/ameva_qmm_check.cpp`
+- 신규
+  - 셰이더: `ameva_mmq.comp`, `ameva_quant_a8.comp`, `ameva_set_rows_q.comp`
+  - 시험: `tests/ameva_kvq_check.cpp`, `ameva_fuse_check.cpp`, `ameva_chunk_check.cpp`
+  - 스크립트: `scripts/termux/lab/tbo_paths.sh`, `ab_decode.sh`
+  - 문서: `docs/handover/20261003-2040.md`

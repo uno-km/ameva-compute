@@ -14,7 +14,12 @@
 #include <cstring>
 #include <ctime>
 #include <mutex>
+#include <string>
 #include <vector>
+
+#include <cerrno>
+#include <sys/stat.h>
+#include <unistd.h>
 
 // =============================================================================
 // AMEVA graph engine
@@ -63,6 +68,18 @@ static std::atomic<uint64_t> g_prof_graphs{0}, g_prof_nodes{0}, g_prof_dispatche
 static std::atomic<uint64_t> g_prof_encode_ns{0}, g_prof_wait_ns{0}, g_prof_gpu_ns{0}, g_prof_gpu_samples{0};
 // parts of encode: contract pass, batch begin, intermediate submissions, final submission (the rest is recording)
 static std::atomic<uint64_t> g_prof_contract_ns{0}, g_prof_begin_ns{0}, g_prof_flush_ns{0}, g_prof_submit_ns{0};
+// parts of recording: time inside ac_runtime_batch_barrier and ac_runtime_batch_dispatch_bindings (the rest is the
+// engine: contract checks of the encoders, bindings, hazard tracking)
+static std::atomic<uint64_t> g_prof_rt_barrier_ns{0}, g_prof_rt_dispatch_ns{0};
+// CPU time of ameva_encode per ggml op (AMEVA_PROFILE >= 1)
+static std::atomic<uint64_t> g_prof_enc_ns[GGML_OP_COUNT], g_prof_enc_nodes[GGML_OP_COUNT];
+// pipeline creation (first use of every kernel, inside encoding); excluded from the encode figures above
+static std::atomic<uint64_t> g_prof_kcreate_ns{0}, g_prof_kcreate_n{0};
+static std::atomic<uint64_t> g_prof_fused{0}; // node pairs fused (ameva_find_fusion)
+
+int64_t ggml_backend_ameva_get_fused_pair_count(void) {
+    return (int64_t)g_prof_fused.load();
+}
 
 static inline uint64_t ameva_now_ns() {
     struct timespec ts;
@@ -150,6 +167,8 @@ void ameva_audit_decline(const struct ggml_tensor* op, const char* why) {
             why);
 }
 
+static bool ameva_fuse_enabled(void);
+
 static void ameva_profile_report(void) {
     if (ameva_profile_level() == 0) return;
     const uint64_t graphs = g_prof_graphs.load(), gs = g_prof_gpu_samples.load();
@@ -185,7 +204,23 @@ static void ameva_profile_report(void) {
                      e = g_prof_encode_ns.load() / 1e6 / graphs;
         fprintf(stderr, "AMEVA_PROFILE encode_ms contract=%.3f begin=%.3f record=%.3f flush=%.3f submit=%.3f\n", c, b,
                 e - c - b - f - sm, f, sm);
+        const double rb = g_prof_rt_barrier_ns.load() / 1e6 / graphs, rd = g_prof_rt_dispatch_ns.load() / 1e6 / graphs;
+        const double kc = g_prof_kcreate_ns.load() / 1e6 / graphs;
+        fprintf(stderr, "AMEVA_PROFILE record_ms runtime_barrier=%.3f runtime_dispatch=%.3f kernel_create=%.3f "
+                        "engine=%.3f (kernel creation: %llu kernels, %.1f ms in total)\n",
+                rb, rd, kc, e - c - b - f - sm - rb - rd - kc, (unsigned long long)g_prof_kcreate_n.load(),
+                g_prof_kcreate_ns.load() / 1e6);
+        for (int op = 0; op < GGML_OP_COUNT; ++op) {
+            const uint64_t n = g_prof_enc_nodes[op].load();
+            if (!n) continue;
+            fprintf(stderr, "AMEVA_PROFILE encode_op op=%s nodes_per_graph=%.1f ms_per_graph=%.3f us_per_node=%.2f\n",
+                    ggml_op_name((enum ggml_op)op), (double)n / graphs, g_prof_enc_ns[op].load() / 1e6 / graphs,
+                    g_prof_enc_ns[op].load() / 1e3 / n);
+        }
     }
+    fprintf(stderr, "AMEVA_PROFILE mmq_mul_mat=%lld fused_pairs=%llu (AMEVA_FUSE=%s)\n",
+            (long long)ggml_backend_ameva_get_mmq_mul_mat_count(), (unsigned long long)g_prof_fused.load(),
+            ameva_fuse_enabled() ? "1" : "0");
     fprintf(stderr, "AMEVA_PROFILE repack=%s repacked_tensors=%lld repacked_mib=%.1f qmv_mul_mat=%lld\n",
             ameva_repack_enabled() ? "on" : "off", (long long)ggml_backend_ameva_get_repacked_tensor_count(),
             ggml_backend_ameva_get_repacked_bytes() / 1048576.0, (long long)ggml_backend_ameva_get_qmv_mul_mat_count());
@@ -209,6 +244,7 @@ static AcDeviceLimits s_limits = {};
 static AcKernel* s_qmm[AMEVA_QMM_VARIANT_COUNT] = {};
 static AcKernel* s_qmv[AMEVA_QMV_VARIANT_COUNT] = {};
 static AcKernel* s_qgemm[AMEVA_QGEMM_VARIANT_COUNT] = {};
+static AcKernel* s_mmq[AMEVA_MMQ_VARIANT_COUNT] = {};
 static AcKernel* s_fa[AMEVA_FA_VARIANT_COUNT] = {};
 static AcKernel* s_ops[AMEVA_K_COUNT] = {};
 static AcBuffer* s_status = nullptr; // [0] out-of-range index count, [1] lowest offending node
@@ -219,6 +255,86 @@ static uint64_t s_scratch_bytes = 0;
 static uint32_t* s_status_map = nullptr;
 static std::mutex s_mutex;          // context, kernel and status-buffer creation, teardown
 static std::mutex s_compute_mutex;  // graph_compute (the status buffer is shared)
+
+// Pipeline cache file: compiled pipelines of earlier runs, so that the first graph does not compile every kernel
+// again (Adreno 830: about 110 ms per kernel). AMEVA_PIPELINE_CACHE unset: $HOME/.cache/ameva/ggml-ameva-pipelines.bin;
+// =0: no cache file; any other value: that path. Data of another device or driver version is rejected by the runtime
+// (header check) and replaced at exit. Saved at teardown when this run added pipelines (the data grew).
+static std::string s_pcache_path;
+static size_t s_pcache_loaded_bytes = 0;
+
+static std::string ameva_pipeline_cache_path(void) {
+    const char* e = getenv("AMEVA_PIPELINE_CACHE");
+    if (e && strcmp(e, "0") == 0) return std::string();
+    if (e && *e) return std::string(e);
+    const char* home = getenv("HOME");
+    if (!home || !*home) {
+        fprintf(stderr, "ggml-ameva: pipeline cache off: HOME is not set (set AMEVA_PIPELINE_CACHE=<file>)\n");
+        return std::string();
+    }
+    return std::string(home) + "/.cache/ameva/ggml-ameva-pipelines.bin";
+}
+
+// called with s_mutex held, right after the context was created
+static void ameva_pipeline_cache_load(AcContext* ctx) {
+    s_pcache_path = ameva_pipeline_cache_path();
+    if (s_pcache_path.empty()) return;
+    FILE* f = fopen(s_pcache_path.c_str(), "rb");
+    if (!f) return; // first run: nothing saved yet
+    std::vector<uint8_t> data;
+    uint8_t chunk[65536];
+    size_t n;
+    while ((n = fread(chunk, 1, sizeof(chunk), f)) > 0 && data.size() < (64u << 20)) data.insert(data.end(), chunk, chunk + n);
+    const bool read_error = ferror(f) != 0;
+    fclose(f);
+    if (read_error || data.empty()) {
+        fprintf(stderr, "ggml-ameva: pipeline cache %s could not be read: not used\n", s_pcache_path.c_str());
+        return;
+    }
+    const AcResult r = ac_runtime_pipeline_cache_merge(ctx, data.data(), data.size());
+    if (r == AC_SUCCESS) {
+        s_pcache_loaded_bytes = data.size();
+    } else if (r == AC_ERR_INVALID_ARGUMENT) {
+        fprintf(stderr, "ggml-ameva: pipeline cache %s is for another device or driver: not used (rewritten at exit)\n",
+                s_pcache_path.c_str());
+    } else {
+        fprintf(stderr, "ggml-ameva: pipeline cache %s could not be merged (code %d): not used\n", s_pcache_path.c_str(),
+                (int)r);
+    }
+}
+
+// called with s_mutex held, before the kernels and the context are destroyed
+static void ameva_pipeline_cache_save(void) {
+    if (!s_ctx || s_pcache_path.empty()) return;
+    size_t size = 0;
+    if (ac_runtime_pipeline_cache_get_data(s_ctx, nullptr, &size) != AC_SUCCESS || size == 0) return;
+    if (size == s_pcache_loaded_bytes) return; // nothing new this run
+    std::vector<uint8_t> data(size);
+    AcResult r = ac_runtime_pipeline_cache_get_data(s_ctx, data.data(), &size);
+    if (r != AC_SUCCESS) {
+        fprintf(stderr, "ggml-ameva: pipeline cache data unavailable (code %d): not saved\n", (int)r);
+        return;
+    }
+    const size_t slash = s_pcache_path.find_last_of('/');
+    if (slash != std::string::npos && slash > 0) {
+        // create the directory and its parent (~/.cache, ~/.cache/ameva); an existing directory is fine
+        const std::string dir = s_pcache_path.substr(0, slash);
+        const size_t up = dir.find_last_of('/');
+        if (up != std::string::npos && up > 0) mkdir(dir.substr(0, up).c_str(), 0700);
+        mkdir(dir.c_str(), 0700);
+    }
+    // per-process temporary file: concurrent processes each rename a complete file into place
+    const std::string tmp = s_pcache_path + ".tmp." + std::to_string((long long)getpid());
+    FILE* f = fopen(tmp.c_str(), "wb");
+    bool ok = f && fwrite(data.data(), 1, size, f) == size;
+    if (f) ok = (fclose(f) == 0) && ok;
+    if (ok) ok = rename(tmp.c_str(), s_pcache_path.c_str()) == 0;
+    if (!ok) {
+        fprintf(stderr, "ggml-ameva: pipeline cache %s could not be written (%s)\n", s_pcache_path.c_str(),
+                strerror(errno));
+        remove(tmp.c_str());
+    }
+}
 
 AcContext* ameva_get_ac_context() {
     std::lock_guard<std::mutex> lock(s_mutex);
@@ -245,6 +361,7 @@ AcContext* ameva_get_ac_context() {
             s_ctx = nullptr;
             return nullptr;
         }
+        ameva_pipeline_cache_load(s_ctx);
     }
     return s_ctx;
 }
@@ -287,7 +404,10 @@ static AcKernel* ameva_make_kernel(const char* name, const uint32_t* spirv, size
     };
     AcKernelDesc kdesc = { AC_ABI_VERSION, sizeof(AcKernelDesc), spirv, bytes, &meta, 0, nullptr };
     AcKernel* k = nullptr;
+    const uint64_t t0 = ameva_now_ns();
     AcResult res = ac_runtime_kernel_create(s_ctx, &kdesc, &k);
+    g_prof_kcreate_ns.fetch_add(ameva_now_ns() - t0);
+    g_prof_kcreate_n.fetch_add(1);
     if (res != AC_SUCCESS) {
         fprintf(stderr, "ggml-ameva: failed to create kernel %s (code %d)\n", name, res);
         return nullptr;
@@ -330,6 +450,27 @@ static AcKernel* ameva_qgemm_kernel(int idx) {
                                          AMEVA_QGEMM_PUSH_CONSTANT_BYTES, AMEVA_QGEMM_LOCAL_SIZE_X);
     }
     return s_qgemm[idx];
+}
+
+static AcKernel* ameva_mmq_kernel(int idx) {
+    static char names[AMEVA_MMQ_VARIANT_COUNT][40];
+    std::lock_guard<std::mutex> lock(s_mutex);
+    if (!s_mmq[idx] && s_ctx) {
+        const AmevaMmqVariant& v = kAmevaMmqVariants[idx];
+        snprintf(names[idx], sizeof(names[idx]), "ameva_mmq_%s", v.type_name);
+        s_mmq[idx] = ameva_make_kernel(names[idx], v.spirv, v.spirv_bytes, v.spirv_sha256, AMEVA_MMQ_BINDINGS,
+                                       AMEVA_MMQ_PUSH_CONSTANT_BYTES, AMEVA_MMQ_LOCAL_SIZE_X);
+    }
+    return s_mmq[idx];
+}
+
+static int ameva_mmq_find(enum ggml_type type) {
+    const char* tn = ggml_type_name(type);
+    if (!tn) return -1;
+    for (int i = 0; i < AMEVA_MMQ_VARIANT_COUNT; ++i) {
+        if (strcmp(kAmevaMmqVariants[i].type_name, tn) == 0) return i;
+    }
+    return -1;
 }
 
 static AcKernel* ameva_fa_kernel(int idx) {
@@ -416,6 +557,7 @@ static bool ameva_scratch_reserve(uint64_t bytes) {
 void ggml_backend_ameva_teardown(void) {
     std::lock_guard<std::mutex> clock(s_compute_mutex);
     std::lock_guard<std::mutex> lock(s_mutex);
+    ameva_pipeline_cache_save();
     if (s_scratch) {
         AcResult r = ac_runtime_buffer_destroy(s_scratch);
         if (r != AC_SUCCESS) fprintf(stderr, "ggml-ameva: scratch buffer destroy failed (code %d)\n", r);
@@ -445,6 +587,13 @@ void ggml_backend_ameva_teardown(void) {
         }
     }
     for (AcKernel*& k : s_qgemm) {
+        if (k) {
+            ac_runtime_kernel_destroy(k);
+            k = nullptr;
+            ameva_increment_kernel_destroy_count();
+        }
+    }
+    for (AcKernel*& k : s_mmq) {
         if (k) {
             ac_runtime_kernel_destroy(k);
             k = nullptr;
@@ -495,6 +644,22 @@ static int ameva_qmm_find(enum ggml_type type, uint32_t ncols) {
 
 static bool is_f32(const struct ggml_tensor* t) { return t && t->type == GGML_TYPE_F32; }
 static bool is_f16(const struct ggml_tensor* t) { return t && t->type == GGML_TYPE_F16; }
+// quantized KV-cache types the engine writes (SET_ROWS, CPY) and reads (FLASH_ATTN_EXT, CPY), in ggml layout
+static bool is_kvq(const struct ggml_tensor* t) {
+    return t && (t->type == GGML_TYPE_Q8_0 || t->type == GGML_TYPE_Q4_0);
+}
+// element type code of K / V in ameva_flash_attn (kv_types) and of the source in ameva_cpy (src_type):
+// 0 f32, 1 f16, 2 q8_0, 3 q4_0, -1 none of these
+static int kv_type_code(const struct ggml_tensor* t) {
+    if (!t) return -1;
+    switch (t->type) {
+        case GGML_TYPE_F32: return 0;
+        case GGML_TYPE_F16: return 1;
+        case GGML_TYPE_Q8_0: return 2;
+        case GGML_TYPE_Q4_0: return 3;
+        default: return -1;
+    }
+}
 static bool rows_contiguous(const struct ggml_tensor* t) { return t && t->nb[0] == ggml_type_size(t->type); }
 static bool fits_u32(int64_t v) { return v >= 0 && v <= (int64_t)UINT32_MAX; }
 
@@ -704,7 +869,8 @@ const char* ameva_op_unsupported_reason(const struct ggml_tensor* op) {
         }
         case GGML_OP_SET_ROWS: {
             const struct ggml_tensor *a = op->src[0], *idx = op->src[1];
-            if (!is_f32(a) || !(is_f16(op) || is_f32(op))) return "set_rows type pair";
+            if (!is_f32(a) || !(is_f16(op) || is_f32(op) || is_kvq(op))) return "set_rows type pair";
+            if (is_kvq(op) && op->ne[0] % 32) return "set_rows quantized rows not whole blocks";
             if (!idx || (idx->type != GGML_TYPE_I64 && idx->type != GGML_TYPE_I32) || !rows_contiguous(idx))
                 return "set_rows index type";
             if (op->ne[0] != a->ne[0] || !rows_contiguous(a) || !rows_contiguous(op)) return "set_rows rows";
@@ -726,7 +892,17 @@ const char* ameva_op_unsupported_reason(const struct ggml_tensor* op) {
         case GGML_OP_CONT:
         case GGML_OP_DUP: {
             const struct ggml_tensor* a = op->src[0];
-            if (!(is_f32(a) || is_f16(a)) || !(is_f32(op) || is_f16(op))) return "copy between types other than f32/f16";
+            if (is_kvq(op)) {
+                // f32 -> q8_0 / q4_0 of the same shape (the KV-cache shift writes the rotated K back)
+                if (!is_f32(a) || !ggml_are_same_shape(a, op)) return "copy to a quantized type from other than f32 of the same shape";
+                if (!rows_contiguous(a) || !rows_contiguous(op) || op->ne[0] % 32) return "copy to a quantized type: rows not whole blocks";
+            } else if (is_kvq(a)) {
+                // q8_0 / q4_0 -> f32 / f16 (the KV-cache shift casts K to f32)
+                if (!(is_f32(op) || is_f16(op))) return "copy from a quantized type to other than f32/f16";
+                if (!rows_contiguous(a) || a->ne[0] % 32) return "copy from a quantized type: rows not whole blocks";
+            } else if (!(is_f32(a) || is_f16(a)) || !(is_f32(op) || is_f16(op))) {
+                return "copy between types other than f32/f16/q8_0/q4_0";
+            }
             if (ggml_nelements(a) != ggml_nelements(op)) return "copy element counts differ";
             if (!fits_binding(a) || !fits_binding(op)) return "tensor exceeds a buffer binding";
             if (!fits_kernel_indexing(a) || !fits_kernel_indexing(op)) return "exceeds 32-bit indexing";
@@ -735,8 +911,9 @@ const char* ameva_op_unsupported_reason(const struct ggml_tensor* op) {
         case GGML_OP_FLASH_ATTN_EXT: {
             const struct ggml_tensor *q = op->src[0], *k = op->src[1], *v = op->src[2], *m = op->src[3];
             if (op->src[4]) return "attention sinks";
-            if (!is_f32(q) || !is_f32(op) || !k || !v || k->type != v->type || !(is_f16(k) || is_f32(k)))
-                return "flash_attn types";
+            if (!is_f32(q) || !is_f32(op) || kv_type_code(k) < 0 || kv_type_code(v) < 0) return "flash_attn types";
+            if ((is_kvq(k) && q->ne[0] % 32) || (is_kvq(v) && v->ne[0] % 32))
+                return "flash_attn quantized K/V head size not a multiple of 32";
             if (m && !is_f16(m)) return "flash_attn mask not f16";
             if (q->ne[0] != k->ne[0] || ameva_fa_find((uint32_t)q->ne[0], (uint32_t)v->ne[0]) < 0)
                 return "head size above 256";
@@ -823,9 +1000,13 @@ struct AmevaRecorder {
     double mac_since_flush = 0;
     uint32_t dispatches_since_flush = 0;
     uint64_t flush_ns = 0;        // time spent in intermediate submissions
+    uint64_t rt_barrier_ns = 0;   // time inside ac_runtime_batch_barrier
+    uint64_t rt_dispatch_ns = 0;  // time inside ac_runtime_batch_dispatch_bindings
     int node = 0;
     int64_t mul_mat_nodes = 0;    // counted once the graph completed
     int64_t qmv_nodes = 0;
+    int64_t mmq_nodes = 0;
+    int64_t fused_pairs = 0;      // node pairs computed by one dispatch sequence (ameva_find_fusion)
     bool profile_kinds = false;   // AMEVA_PROFILE=2: remember the op kind of every dispatch
     uint16_t kind = 0;
     std::vector<uint16_t> kinds;
@@ -848,12 +1029,17 @@ static const char* ameva_record(AmevaRecorder& rec, AcKernel* kernel, const Amev
     for (int i = 0; i < nreads && !hazard; ++i) hazard = range_hits(rec.written, reads[i]);
     for (int i = 0; i < nwrites && !hazard; ++i) hazard = range_hits(rec.written, writes[i]) || range_hits(rec.read, writes[i]);
     if (hazard) {
-        if (ac_runtime_batch_barrier(rec.batch) != AC_SUCCESS) return "barrier recording failed";
+        const uint64_t tb = ameva_now_ns();
+        const AcResult br = ac_runtime_batch_barrier(rec.batch);
+        rec.rt_barrier_ns += ameva_now_ns() - tb;
+        if (br != AC_SUCCESS) return "barrier recording failed";
         rec.written.clear();
         rec.read.clear();
         rec.barriers++;
     }
+    const uint64_t td = ameva_now_ns();
     AcResult r = ac_runtime_batch_dispatch_bindings(rec.batch, kernel, bindings, nbind, pc, pc_size, grid);
+    rec.rt_dispatch_ns += ameva_now_ns() - td;
     if (r != AC_SUCCESS) {
         static char msg[96];
         snprintf(msg, sizeof(msg), "dispatch recording failed (code %d)", (int)r);
@@ -927,6 +1113,142 @@ static uint32_t ameva_qgemm_min_rows(void) {
     return v;
 }
 
+// Epilogue of a token-generation MUL_MAT (ameva_qmv, one activation row) that also computes the node consuming the
+// product (graph-engine fusion): mode 1 ADD (out = v + e), 2 SWIGLU with the product as gate (out = silu(v) * e),
+// 3 SWIGLU with the product as up projection (out = silu(e) * v). e and out are f32 vectors of N elements.
+struct AmevaEpilogue {
+    uint32_t mode;
+    const struct ggml_tensor* e;
+    const struct ggml_tensor* out;
+};
+
+// MMQ (int8 activations x repacked weights with packed integer dot products) for the MUL_MATs that would run
+// ameva_qgemm. AMEVA_MMQ unset: on when the device enabled VK_KHR_shader_integer_dot_product, otherwise off with one
+// line on stderr; AMEVA_MMQ=1: required (abort when the device lacks it); AMEVA_MMQ=0: off (f32 ameva_qgemm).
+// Accuracy: the activations are rounded to int8 per 32 elements (the CPU backend rounds them to q8_0 / q8_K as well).
+static bool ameva_mmq_enabled(void) {
+    static int mode = -1;
+    static std::once_flag once;
+    std::call_once(once, [] {
+        const char* e = getenv("AMEVA_MMQ");
+        if (e && *e && strcmp(e, "0") != 0 && strcmp(e, "1") != 0) {
+            GGML_ABORT("ggml-ameva: AMEVA_MMQ must be 0 or 1 (got \"%s\")", e);
+        }
+        const bool supported = s_limits.integer_dot_product != 0;
+        if (e && strcmp(e, "0") == 0) {
+            mode = 0;
+            fprintf(stderr, "ggml-ameva: MMQ off (AMEVA_MMQ=0): prompt MUL_MAT runs the f32 tiled kernel\n");
+        } else if (supported) {
+            mode = 1;
+            fprintf(stderr, "ggml-ameva: MMQ on (VK_KHR_shader_integer_dot_product, 4x8 packed accelerated: %s)\n",
+                    s_limits.integer_dot_product_accelerated ? "yes" : "no");
+        } else if (e && strcmp(e, "1") == 0) {
+            GGML_ABORT("ggml-ameva: AMEVA_MMQ=1 but the device does not offer VK_KHR_shader_integer_dot_product");
+        } else {
+            mode = 0;
+            fprintf(stderr, "ggml-ameva: MMQ unavailable (no VK_KHR_shader_integer_dot_product): prompt MUL_MAT runs "
+                            "the f32 tiled kernel\n");
+        }
+    });
+    return mode == 1;
+}
+
+// Scratch bytes per activation unit of 32: 32 int8 + d and two half sums (shaders/ameva_quant_a8.comp)
+static const uint64_t kMmqUnitBytes = 40;
+
+static uint32_t ameva_qgemm_min_rows(void);
+
+// Whether MUL_MAT `node` runs ameva_mmq, and then the activation rows quantized per chunk (one scratch fill) and the
+// scratch bytes of a chunk.
+static bool ameva_mmq_plan(const struct ggml_tensor* node, uint32_t* chunk_rows, uint64_t* scratch_bytes) {
+    const struct ggml_tensor *src0 = node->src[0], *src1 = node->src[1];
+    if (node->op != GGML_OP_MUL_MAT || !ameva_repacked_base(src0)) return false;
+    if ((uint64_t)src1->ne[1] < ameva_qgemm_min_rows() || ameva_mmq_find(src0->type) < 0 || !ameva_mmq_enabled())
+        return false;
+    const uint64_t U = (uint64_t)src0->ne[0] / 32, M = (uint64_t)src1->ne[1];
+    const uint64_t span = ameva_max_binding_span();
+    const uint64_t s1 = st(src1, 1), sd = st(node, 1);
+    const uint64_t rows_fit = std::min<uint64_t>(span / (s1 * 4), span / (sd * 4));
+    const uint64_t r = std::max<uint64_t>(1, std::min<uint64_t>({ M, rows_fit, span / (U * kMmqUnitBytes), 65535ull * 32 }));
+    *chunk_rows = (uint32_t)r;
+    *scratch_bytes = r * U * kMmqUnitBytes;
+    return true;
+}
+
+// MUL_MAT with ameva_mmq: per chunk of activation rows, ameva_quant_a8 fills the scratch buffer (int8 values at 0,
+// scales and half sums after them), then ameva_mmq runs over the weight slices.
+static const char* enc_mul_mat_mmq(AmevaRecorder& rec, const struct ggml_tensor* node, uint32_t chunk_rows) {
+    const struct ggml_tensor* src0 = node->src[0];
+    const struct ggml_tensor* src1 = node->src[1];
+    const struct ggml_tensor* base = ameva_repacked_base(src0);
+    const uint32_t K = (uint32_t)src0->ne[0], N = (uint32_t)src0->ne[1], M = (uint32_t)src1->ne[1];
+    const uint32_t U = K / 32;
+    const int vi = ameva_mmq_find(src0->type);
+    AcKernel* kernel = vi >= 0 ? ameva_mmq_kernel(vi) : nullptr;
+    AcKernel* quant = ameva_op_kernel(AMEVA_K_QUANT_A8);
+    if (!kernel || !quant) return "no ameva_mmq / ameva_quant_a8 kernel";
+    AmevaRepackLayout L = {};
+    AmevaRepackRegions R = {};
+    if (!ameva_repack_layout(base->type, &L) || !ameva_repack_regions(base->type, base->ne[0], ggml_nrows(base), &R))
+        return "repacked weight without a layout";
+    const size_t row_bytes = ggml_row_size(src0->type, K);
+    const uint64_t first_row = (uint64_t)((const char*)src0->data - (const char*)base->data) / row_bytes;
+    if (!s_scratch || (uint64_t)chunk_rows * U * kMmqUnitBytes > s_scratch_bytes) return "MMQ scratch not reserved";
+    const uint64_t span = ameva_max_binding_span();
+    // weight rows per dispatch: one binding per region, 65535 workgroups of 64 rows, kDispatchMac over a chunk
+    uint64_t slice_cap = std::min<uint64_t>(span / R.q_row, 65535ull * 64);
+    const uint64_t mac_rows = (uint64_t)(kDispatchMac / ((double)chunk_rows * (double)K));
+    slice_cap = std::min<uint64_t>(slice_cap, std::max<uint64_t>(64, mac_rows & ~63ull));
+    const uint32_t rows_per_slice = (uint32_t)std::max<uint64_t>(1, std::min<uint64_t>((uint64_t)N, slice_cap));
+    const uint32_t s1 = st(src1, 1), sd = st(node, 1);
+    const char* e = nullptr;
+    for (uint32_t m0 = 0; m0 < M; m0 += chunk_rows) {
+        const uint32_t mc = std::min(chunk_rows, M - m0);
+        AmevaBind b1;
+        e = ameva_bind_span(src1, (uint64_t)m0 * s1 * 4, ((uint64_t)(mc - 1) * s1 + K) * 4, 4, &b1);
+        if (e) return e;
+        if (b1.elem % 4 != 0) return "activation offset not a multiple of 16 bytes";
+        const uint64_t aq_bytes = (uint64_t)mc * U * 32;
+        AmevaBind bs = {};
+        bs.b.buffer = s_scratch;
+        bs.b.offset = 0;
+        bs.b.range = std::min<uint64_t>(s_scratch_bytes, s_limits.max_storage_buffer_range) & ~3ull;
+        bs.key = s_scratch;
+        bs.lo = 0;
+        bs.hi = (uint64_t)mc * U * kMmqUnitBytes;
+        const uint32_t pcq[6] = { mc, K, b1.elem, s1, 0u, (uint32_t)(aq_bytes / 8) };
+        const AcBufferBinding bindq[3] = { b1.b, bs.b, bs.b };
+        e = ameva_record(rec, quant, &b1, 1, &bs, 1, bindq, 3, pcq, sizeof(pcq), ameva_grid_1d((uint64_t)mc * U, 64),
+                         (double)mc * K);
+        if (e) return e;
+        for (uint32_t n0 = 0; n0 < N; n0 += rows_per_slice) {
+            const uint32_t nc = std::min(rows_per_slice, N - n0);
+            const uint64_t row = first_row + n0;
+            AmevaBind w[3];
+            e = ameva_bind_span(base, R.q + row * R.q_row, (uint64_t)nc * R.q_row, L.qb == 8 ? 8 : 16, &w[0]);
+            if (!e) e = ameva_bind_span(base, R.s + row * R.s_row, (uint64_t)nc * R.s_row, 2, &w[2]);
+            if (!e) {
+                if (R.h_row) e = ameva_bind_span(base, R.h + row * R.h_row, (uint64_t)nc * R.h_row, L.hb == 8 ? 8 : 4, &w[1]);
+                else w[1] = w[2];
+            }
+            AmevaBind bd;
+            if (!e) e = ameva_bind_span(node, ((uint64_t)m0 * sd + n0) * 4, ((uint64_t)(mc - 1) * sd + nc) * 4, 4, &bd);
+            if (e) return e;
+            const uint32_t pc[10] = { mc, K, nc, w[0].elem, R.h_row ? w[1].elem : 0u, w[2].elem * 2,
+                                      0u, (uint32_t)(aq_bytes / 8), bd.elem, sd };
+            const AcBufferBinding bind[6] = { w[0].b, w[1].b, w[2].b, bs.b, bs.b, bd.b };
+            const AmevaBind reads[4] = { w[0], w[1], w[2], bs };
+            e = ameva_record(rec, kernel, reads, 4, &bd, 1, bind, 6, pc, sizeof(pc),
+                             { (nc + 63) / 64, (mc + 31) / 32, 1 }, (double)mc * nc * K);
+            if (e) return e;
+        }
+    }
+    rec.mul_mat_nodes++;
+    rec.qmv_nodes++;
+    rec.mmq_nodes++;
+    return nullptr;
+}
+
 // Lanes per weight row of ameva_qmv: 16 for every row length. Measured with Qwen2.5-0.5B Q4_K_M token generation
 // (2026-10-03): Adreno 650 per-kernel times with 8 / 16 / 64 lanes: q4_K 896x4864 336 / 356 / 611 us, q8_0
 // 151936x896 7.3 / 8.2 / 11.4 ms; Mali-G68 decode 14.0 / 14.5 t/s with 8 / 16 lanes, 14.1 with 64 lanes for
@@ -949,7 +1271,16 @@ static uint32_t ameva_qmv_tpr(uint32_t units) {
 
 // MUL_MAT. Weights are multiplied in slices of rows that fit one binding (per region for repacked weights) and at most
 // 65535 workgroups; activation rows in chunks (see below). Repacked weights bind their Q, H and S regions.
-static const char* enc_mul_mat(AmevaRecorder& rec, const struct ggml_tensor* node) {
+static const char* enc_mul_mat(AmevaRecorder& rec, const struct ggml_tensor* node,
+                               const AmevaEpilogue* ep = nullptr) {
+    {
+        uint32_t chunk_rows = 0;
+        uint64_t scratch_bytes = 0;
+        if (ameva_mmq_plan(node, &chunk_rows, &scratch_bytes)) {
+            if (ep) return "epilogue on a prompt-sized MUL_MAT";
+            return enc_mul_mat_mmq(rec, node, chunk_rows);
+        }
+    }
     const struct ggml_tensor* src0 = node->src[0];
     const struct ggml_tensor* src1 = node->src[1];
     const struct ggml_tensor* base = ameva_repacked_base(src0);
@@ -965,6 +1296,13 @@ static const char* enc_mul_mat(AmevaRecorder& rec, const struct ggml_tensor* nod
     uint32_t tpr = 0;
     uint64_t slice_row_bytes = row_bytes;
     const bool gemm = base && M >= ameva_qgemm_min_rows();
+    if (ep && (!base || gemm || M != 1)) return "epilogue outside the one-row ameva_qmv path";
+    AmevaBind be = {}, beo = {};
+    if (ep) {
+        const char* ee = ameva_bind(ep->e, 4, &be);
+        if (!ee) ee = ameva_bind(ep->out, 4, &beo);
+        if (ee) return ee;
+    }
     if (base) {
         if (gemm) {
             const int gi = ameva_qgemm_find(src0->type);
@@ -1041,11 +1379,15 @@ static const char* enc_mul_mat(AmevaRecorder& rec, const struct ggml_tensor* nod
                 const AmevaBind reads[4] = { w[0], w[1], w[2], b1 };
                 e = ameva_record(rec, kernel, reads, 4, &bd, 1, bind, 5, pc, sizeof(pc), grid, mac);
             } else if (base) {
-                const uint32_t pc[11] = { mc, K, nc, w[0].elem, R.h_row ? w[1].elem : 0u, w[2].elem * 2,
-                                          b1.elem, bd.elem, s1, sd, tpr };
-                const AcBufferBinding bind[5] = { w[0].b, w[1].b, w[2].b, b1.b, bd.b };
-                const AmevaBind reads[4] = { w[0], w[1], w[2], b1 };
-                e = ameva_record(rec, kernel, reads, 4, &bd, 1, bind, 5, pc, sizeof(pc), grid, mac);
+                const uint32_t pc[14] = { mc, K, nc, w[0].elem, R.h_row ? w[1].elem : 0u, w[2].elem * 2,
+                                          b1.elem, bd.elem, s1, sd, tpr, ep ? ep->mode : 0u,
+                                          ep ? be.elem + n0 : 0u, ep ? beo.elem + n0 : 0u };
+                const AcBufferBinding bind[7] = { w[0].b, w[1].b, w[2].b, b1.b, bd.b, ep ? be.b : b1.b,
+                                                  ep ? beo.b : bd.b };
+                const AmevaBind reads[5] = { w[0], w[1], w[2], b1, be };
+                const AmevaBind writes[2] = { bd, beo };
+                e = ameva_record(rec, kernel, reads, ep ? 5 : 4, writes, ep ? 2 : 1, bind, 7, pc, sizeof(pc), grid,
+                                 mac);
             } else {
                 const uint32_t pc[8] = { mc, K, nc, w[0].elem * 2, b1.elem, bd.elem, s1, sd };
                 const AcBufferBinding bind[3] = { w[0].b, b1.b, bd.b };
@@ -1152,21 +1494,29 @@ static const char* enc_glu(AmevaRecorder& rec, const struct ggml_tensor* node) {
                         (double)ggml_nelements(node));
 }
 
-static const char* enc_rms_norm(AmevaRecorder& rec, const struct ggml_tensor* node) {
+// RMS_NORM; with mul (the following MUL node, fused) also mul = node * w for a norm weight w of one row
+static const char* enc_rms_norm(AmevaRecorder& rec, const struct ggml_tensor* node,
+                                const struct ggml_tensor* mul = nullptr, const struct ggml_tensor* w = nullptr) {
     const struct ggml_tensor* a = node->src[0];
     AcKernel* kernel = ameva_op_kernel(AMEVA_K_RMS_NORM);
     if (!kernel) return "no ameva_rms_norm kernel";
-    AmevaBind ba, bd;
+    AmevaBind ba, bd, bw = {}, bo = {};
     const char* e = ameva_bind(a, 4, &ba);
     if (!e) e = ameva_bind(node, 4, &bd);
+    if (!e && mul) e = ameva_bind(w, 4, &bw);
+    if (!e && mul) e = ameva_bind(mul, 4, &bo);
     if (e) return e;
     const uint64_t nrows = (uint64_t)node->ne[1] * node->ne[2] * node->ne[3];
-    const uint32_t pc[13] = { (uint32_t)node->ne[0], (uint32_t)node->ne[1], (uint32_t)node->ne[2], (uint32_t)nrows,
+    const uint32_t pc[19] = { (uint32_t)node->ne[0], (uint32_t)node->ne[1], (uint32_t)node->ne[2], (uint32_t)nrows,
                               ba.elem, st(a, 1), st(a, 2), st(a, 3),
-                              bd.elem, st(node, 1), st(node, 2), st(node, 3), fbits(op_param_f32(node, 0)) };
-    const AcBufferBinding bind[2] = { ba.b, bd.b };
-    return ameva_record(rec, kernel, &ba, 1, &bd, 1, bind, 2, pc, sizeof(pc), ameva_grid_groups(nrows),
-                        2.0 * (double)ggml_nelements(node));
+                              bd.elem, st(node, 1), st(node, 2), st(node, 3), fbits(op_param_f32(node, 0)),
+                              mul ? 1u : 0u, mul ? bw.elem : 0u, mul ? bo.elem : 0u,
+                              mul ? st(mul, 1) : 0u, mul ? st(mul, 2) : 0u, mul ? st(mul, 3) : 0u };
+    const AcBufferBinding bind[4] = { ba.b, bd.b, mul ? bw.b : ba.b, mul ? bo.b : bd.b };
+    const AmevaBind reads[2] = { ba, bw };
+    const AmevaBind writes[2] = { bd, bo };
+    return ameva_record(rec, kernel, reads, mul ? 2 : 1, writes, mul ? 2 : 1, bind, 4, pc, sizeof(pc),
+                        ameva_grid_groups(nrows), (mul ? 3.0 : 2.0) * (double)ggml_nelements(node));
 }
 
 static const char* enc_rope(AmevaRecorder& rec, const struct ggml_tensor* node) {
@@ -1211,8 +1561,38 @@ static AmevaBind ameva_status_bind(void) {
     return s;
 }
 
+// f32 rows -> q8_0 / q4_0 blocks with ameva_set_rows_q: SET_ROWS (idx given) or a same-shape CPY (idx == nullptr)
+static const char* enc_store_quantized(AmevaRecorder& rec, const struct ggml_tensor* node,
+                                       const struct ggml_tensor* a, const struct ggml_tensor* idx) {
+    AcKernel* kernel = ameva_op_kernel(node->type == GGML_TYPE_Q8_0 ? AMEVA_K_SET_ROWS_Q8_0 : AMEVA_K_SET_ROWS_Q4_0);
+    if (!kernel) return "no ameva_set_rows_q kernel";
+    AmevaBind ba, bi, bd;
+    const char* e = ameva_bind(a, 4, &ba);
+    if (!e && idx) e = ameva_bind(idx, 4, &bi);
+    if (!e) e = ameva_bind(node, 2, &bd); // dst addressed in bytes: elem * 2
+    if (e) return e;
+    if (!idx) bi = ba; // binding 1 is not read in identity mode
+    const AmevaBind bs = ameva_status_bind();
+    const uint32_t mode = !idx ? 0u : (idx->type == GGML_TYPE_I64 ? 2u : 1u);
+    const uint32_t nb = (uint32_t)(a->ne[0] / 32);
+    const uint32_t pc[21] = { nb, (uint32_t)a->ne[1], (uint32_t)a->ne[2], (uint32_t)a->ne[3],
+                              ba.elem, st(a, 1), st(a, 2), st(a, 3),
+                              idx ? bi.elem : 0u, idx ? (uint32_t)(idx->nb[0] / 4) : 0u,
+                              idx ? (uint32_t)(idx->nb[1] / 4) : 0u, idx ? (uint32_t)(idx->nb[2] / 4) : 0u,
+                              idx ? (uint32_t)idx->ne[1] : 1u, idx ? (uint32_t)idx->ne[2] : 1u, mode,
+                              (uint32_t)node->ne[1],
+                              bd.elem * 2u, (uint32_t)node->nb[1], (uint32_t)node->nb[2], (uint32_t)node->nb[3],
+                              (uint32_t)rec.node };
+    const AcBufferBinding bind[4] = { ba.b, bi.b, bs.b, bd.b };
+    const AmevaBind reads[2] = { ba, bi };
+    const uint64_t blocks = (uint64_t)nb * a->ne[1] * a->ne[2] * a->ne[3];
+    return ameva_record(rec, kernel, reads, idx ? 2 : 1, &bd, 1, bind, 4, pc, sizeof(pc), ameva_grid_1d(blocks, 64),
+                        (double)ggml_nelements(a));
+}
+
 static const char* enc_set_rows(AmevaRecorder& rec, const struct ggml_tensor* node) {
     const struct ggml_tensor *a = node->src[0], *idx = node->src[1];
+    if (is_kvq(node)) return enc_store_quantized(rec, node, a, idx);
     AcKernel* kernel = ameva_op_kernel(AMEVA_K_SET_ROWS);
     if (!kernel) return "no ameva_set_rows kernel";
     const bool f16 = node->type == GGML_TYPE_F16;
@@ -1259,18 +1639,22 @@ static const char* enc_get_rows(AmevaRecorder& rec, const struct ggml_tensor* no
 
 static const char* enc_cpy(AmevaRecorder& rec, const struct ggml_tensor* node) {
     const struct ggml_tensor* a = node->src[0];
+    if (is_kvq(node)) return enc_store_quantized(rec, node, a, nullptr);
     AcKernel* kernel = ameva_op_kernel(AMEVA_K_CPY);
     if (!kernel) return "no ameva_cpy kernel";
-    const bool sf16 = a->type == GGML_TYPE_F16, df16 = node->type == GGML_TYPE_F16;
+    const int stype = kv_type_code(a);
+    const bool sq = stype >= 2, df16 = node->type == GGML_TYPE_F16;
     AmevaBind ba, bd;
-    const char* e = ameva_bind(a, sf16 ? 2 : 4, &ba);
+    const char* e = ameva_bind(a, (stype == 0) ? 4 : 2, &ba); // f16 in halves; quantized in bytes (elem * 2)
     if (!e) e = ameva_bind(node, df16 ? 2 : 4, &bd);
     if (e) return e;
+    // a quantized source is addressed in bytes: offset and strides in bytes, a_s0 = block size
     const uint32_t pc[19] = { (uint32_t)a->ne[0], (uint32_t)a->ne[1], (uint32_t)a->ne[2], (uint32_t)a->ne[3],
-                              ba.elem, st(a, 0), st(a, 1), st(a, 2),
-                              st(a, 3), (uint32_t)node->ne[0], (uint32_t)node->ne[1], (uint32_t)node->ne[2],
-                              bd.elem, st(node, 0), st(node, 1), st(node, 2),
-                              st(node, 3), sf16 ? 1u : 0u, df16 ? 1u : 0u };
+                              sq ? ba.elem * 2u : ba.elem, sq ? (uint32_t)a->nb[0] : st(a, 0),
+                              sq ? (uint32_t)a->nb[1] : st(a, 1), sq ? (uint32_t)a->nb[2] : st(a, 2),
+                              sq ? (uint32_t)a->nb[3] : st(a, 3), (uint32_t)node->ne[0], (uint32_t)node->ne[1],
+                              (uint32_t)node->ne[2], bd.elem, st(node, 0), st(node, 1), st(node, 2),
+                              st(node, 3), (uint32_t)stype, df16 ? 1u : 0u };
     const AcBufferBinding bind[2] = { ba.b, bd.b };
     return ameva_record(rec, kernel, &ba, 1, &bd, 1, bind, 2, pc, sizeof(pc), ameva_grid_1d(ggml_nelements(a), 256),
                         (double)ggml_nelements(a));
@@ -1320,11 +1704,12 @@ static const char* enc_flash_attn(AmevaRecorder& rec, const struct ggml_tensor* 
     AcKernel* kernel = fi >= 0 ? ameva_fa_kernel(fi) : nullptr;
     if (!kernel) return "no ameva_flash_attn kernel";
     const AmevaFaVariant& fv = kAmevaFaVariants[fi];
-    const bool kv16 = k->type == GGML_TYPE_F16;
+    // K / V: f32 in words, f16 in halves, q8_0 / q4_0 in bytes (bound in halves: elem * 2)
+    const int kt = kv_type_code(k), vt = kv_type_code(v);
     AmevaBind bq, bk, bv, bm, bo;
     const char* e = ameva_bind(q, 4, &bq);
-    if (!e) e = ameva_bind(k, kv16 ? 2 : 4, &bk);
-    if (!e) e = ameva_bind(v, kv16 ? 2 : 4, &bv);
+    if (!e) e = ameva_bind(k, kt == 0 ? 4 : 2, &bk);
+    if (!e) e = ameva_bind(v, vt == 0 ? 4 : 2, &bv);
     if (!e) e = ameva_bind(m ? m : q, m ? 2 : 4, &bm);
     if (!e) e = ameva_bind(node, 4, &bo);
     if (e) return e;
@@ -1336,10 +1721,11 @@ static const char* enc_flash_attn(AmevaRecorder& rec, const struct ggml_tensor* 
     uint32_t n_split = 1;
     const uint32_t split_keys = ameva_fa_split_keys(node, &n_split);
     uint32_t pc[31] = { (uint32_t)q->ne[0], (uint32_t)v->ne[0], (uint32_t)k->ne[1], (uint32_t)q->ne[1],
-                        n_head, n_head_kv, kv16 ? 1u : 0u, m ? 1u : 0u,
-                        bq.elem, st(q, 1), st(q, 2), bk.elem,
-                        st(k, 1), st(k, 2), bv.elem, st(v, 1),
-                        st(v, 2), m ? bm.elem : 0u, m ? st(m, 1) : 0u, m ? st(m, 2) : 0u,
+                        n_head, n_head_kv, (uint32_t)kt | ((uint32_t)vt << 4u), m ? 1u : 0u,
+                        bq.elem, st(q, 1), st(q, 2), kt >= 2 ? bk.elem * 2u : bk.elem,
+                        kt >= 2 ? (uint32_t)k->nb[1] : st(k, 1), kt >= 2 ? (uint32_t)k->nb[2] : st(k, 2),
+                        vt >= 2 ? bv.elem * 2u : bv.elem, vt >= 2 ? (uint32_t)v->nb[1] : st(v, 1),
+                        vt >= 2 ? (uint32_t)v->nb[2] : st(v, 2), m ? bm.elem : 0u, m ? st(m, 1) : 0u, m ? st(m, 2) : 0u,
                         m ? (uint32_t)m->ne[2] : 1u, bo.elem, fbits(op_param_f32(node, 0)), fbits(op_param_f32(node, 2)),
                         fbits(max_bias), fbits(m0), fbits(m1), n_head_log2, 0u, split_keys, 0u };
     const AmevaBind reads[4] = { bq, bk, bv, bm };
@@ -1385,6 +1771,86 @@ static const char* enc_flash_attn(AmevaRecorder& rec, const struct ggml_tensor* 
         if (e) return e;
     }
     return nullptr;
+}
+
+// Graph-engine fusion of adjacent node pairs (AMEVA_FUSE=0 disables it). The fused dispatch computes node i+1 as well
+// and still writes node i's output ("write-through"), so the result stays correct whoever else reads node i (the
+// backend sees one split of the graph, so other uses of an intermediate cannot be ruled out). Pairs:
+//   RMS_NORM -> MUL by a one-row weight            ameva_rms_norm with mul
+//   MUL_MAT (ameva_qmv, one row) -> ADD of an N-vector  (bias, residual)   ameva_qmv epilogue
+//   MUL_MAT (ameva_qmv, one row) -> SWIGLU (split) with an N-vector           ameva_qmv epilogue
+// Each saves one dispatch and its barrier; the values are those of the unfused nodes (same f32 operations).
+static bool ameva_fuse_enabled(void) {
+    static const bool on = [] {
+        const char* e = getenv("AMEVA_FUSE");
+        if (!e || !*e) return true;
+        if (strcmp(e, "0") == 0) return false;
+        if (strcmp(e, "1") == 0) return true;
+        GGML_ABORT("ggml-ameva: AMEVA_FUSE must be 0 or 1 (got \"%s\")", e);
+    }();
+    return on;
+}
+
+enum AmevaFuseKind { AMEVA_FUSE_NONE = 0, AMEVA_FUSE_RMS_MUL, AMEVA_FUSE_MM_EPILOGUE };
+
+struct AmevaFusion {
+    AmevaFuseKind kind;
+    const struct ggml_tensor* w;  // RMS_MUL: norm weight
+    AmevaEpilogue ep;             // MM_EPILOGUE
+};
+
+// f32 vector of exactly n elements in one contiguous row
+static bool is_f32_vector(const struct ggml_tensor* t, int64_t n) {
+    return is_f32(t) && rows_contiguous(t) && t->ne[0] == n && ggml_nelements(t) == n;
+}
+
+// byte ranges of two tensors in the same buffer intersect
+static bool tensors_overlap(const struct ggml_tensor* a, const struct ggml_tensor* b) {
+    if (!a || !b || !a->data || !b->data || a->buffer != b->buffer) return false;
+    const char *a0 = (const char*)a->data, *b0 = (const char*)b->data;
+    return a0 < b0 + ggml_nbytes(b) && b0 < a0 + ggml_nbytes(a);
+}
+// the same elements in the same layout (an in-place result): element k is read and written by the same invocation
+static bool tensors_alias(const struct ggml_tensor* a, const struct ggml_tensor* b) {
+    return a->buffer == b->buffer && a->data == b->data && ggml_are_same_shape(a, b) && ggml_are_same_stride(a, b);
+}
+// the output of the fused second node may only overlap a tensor the dispatch reads or writes element by element at
+// the same index (in-place); any other overlap (e.g. memory of an input that died at the first node, reused by the
+// allocator) would let one workgroup overwrite data another one still reads
+static bool fused_output_safe(const struct ggml_tensor* out, const struct ggml_tensor* t, bool allow_alias) {
+    return !tensors_overlap(out, t) || (allow_alias && tensors_alias(out, t));
+}
+
+static AmevaFusion ameva_find_fusion(const struct ggml_tensor* n0, const struct ggml_tensor* n1) {
+    AmevaFusion f = { AMEVA_FUSE_NONE, nullptr, { 0, nullptr, nullptr } };
+    if (!n1 || ggml_is_empty(n1)) return f;
+    if (n0->op == GGML_OP_RMS_NORM && n1->op == GGML_OP_MUL && n1->src[0] == n0 && n1->src[1] != n0) {
+        const struct ggml_tensor* w = n1->src[1];
+        if (is_f32_vector(w, n0->ne[0]) && is_f32(n1) && ggml_are_same_shape(n1, n0) && rows_contiguous(n1) &&
+            fused_output_safe(n1, n0->src[0], true) && fused_output_safe(n1, n0, true) &&
+            fused_output_safe(n1, w, false)) {
+            f.kind = AMEVA_FUSE_RMS_MUL;
+            f.w = w;
+        }
+        return f;
+    }
+    if (n0->op != GGML_OP_MUL_MAT || !ameva_repacked_base(n0->src[0]) || n0->src[1]->ne[1] != 1) return f;
+    const int64_t N = n0->ne[0];
+    if (!is_f32_vector(n1, N)) return f;
+    const struct ggml_tensor* other = n1->src[0] == n0 ? n1->src[1] : (n1->src[1] == n0 ? n1->src[0] : nullptr);
+    if (!other || other == n0 || !is_f32_vector(other, N)) return f;
+    // the activation row is read by every workgroup: the epilogue output must not overlap it at all
+    if (!fused_output_safe(n1, n0->src[1], false) || !fused_output_safe(n1, n0, true) ||
+        !fused_output_safe(n1, other, true)) return f;
+    if (n1->op == GGML_OP_ADD) {
+        f.ep = { 1u, other, n1 };
+    } else if (n1->op == GGML_OP_GLU && n1->src[1] && glu_code(n1) == 2) {  // SWIGLU, split form: silu(src0) * src1
+        f.ep = { n1->src[0] == n0 ? 2u : 3u, other, n1 };
+    } else {
+        return f;
+    }
+    f.kind = AMEVA_FUSE_MM_EPILOGUE;
+    return f;
 }
 
 static const char* ameva_encode(AmevaRecorder& rec, const struct ggml_tensor* node) {
@@ -1472,12 +1938,19 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
         return GGML_STATUS_FAILED;
     }
 
-    // scratch for flash-attention key splits: the largest need of any node, before anything is recorded
+    // scratch for flash-attention key splits and MMQ activations: the largest need of any node, before anything is
+    // recorded
     uint64_t scratch_need = 0;
     for (int i = 0; i < n_nodes; i++) {
         struct ggml_tensor* node = ggml_graph_node(cgraph, i);
-        if (node && node->op == GGML_OP_FLASH_ATTN_EXT && !ggml_is_empty(node))
+        if (!node || ggml_is_empty(node)) continue;
+        if (node->op == GGML_OP_FLASH_ATTN_EXT) {
             scratch_need = std::max<uint64_t>(scratch_need, ameva_fa_scratch_bytes(node));
+        } else if (node->op == GGML_OP_MUL_MAT) {
+            uint32_t rows = 0;
+            uint64_t bytes = 0;
+            if (ameva_mmq_plan(node, &rows, &bytes)) scratch_need = std::max<uint64_t>(scratch_need, bytes);
+        }
     }
     if (scratch_need && !ameva_scratch_reserve(scratch_need)) {
         fprintf(stderr, "ggml-ameva: scratch of %llu bytes unavailable (FAIL-FAST)\n", (unsigned long long)scratch_need);
@@ -1492,10 +1965,14 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
     }
 
     AmevaRecorder rec;
-    // MUL_MAT and attention may split into several dispatches; recording checks the capacity per dispatch and a graph
-    // that exceeds it fails with AC_ERR_DEVICE_BUSY instead of being cut silently
-    const uint32_t capacity = (uint32_t)std::min<uint64_t>(AC_BATCH_MAX_DISPATCHES, (uint64_t)work * 8 + 256);
+    // Nodes may split into many dispatches (weight row slices, activation row chunks, attention tiles, row chunks of
+    // large unary ops); recording checks the capacity per dispatch and a graph that exceeds it fails with
+    // AC_ERR_DEVICE_BUSY instead of being cut silently. The capacity sizes nothing but the per-dispatch timestamp pool,
+    // so it is the runtime maximum unless AMEVA_PROFILE=2 asks for those timestamps.
     rec.profile_kinds = ameva_profile_level() >= 2;
+    const uint32_t capacity = rec.profile_kinds
+                                  ? (uint32_t)std::min<uint64_t>(AC_BATCH_MAX_DISPATCHES, (uint64_t)work * 64 + 1024)
+                                  : (uint32_t)AC_BATCH_MAX_DISPATCHES;
     const AcBatchDesc bdesc = { AC_ABI_VERSION, sizeof(AcBatchDesc), capacity,
                                 AC_BATCH_FLAG_EXPLICIT_BARRIERS | AC_BATCH_FLAG_TIMESTAMPS |
                                     (rec.profile_kinds ? AC_BATCH_FLAG_DISPATCH_TIMESTAMPS : 0u) };
@@ -1519,7 +1996,12 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
             char kind[48];
             if (node->op == GGML_OP_MUL_MAT) {
                 const bool rp = ameva_repacked_base(node->src[0]) != nullptr;
-                const char* path = !rp ? "qmm" : (node->src[1]->ne[1] >= (int64_t)ameva_qgemm_min_rows() ? "qgemm" : "qmv");
+                uint32_t mmq_rows = 0;
+                uint64_t mmq_bytes = 0;
+                const char* path = !rp ? "qmm"
+                                       : ameva_mmq_plan(node, &mmq_rows, &mmq_bytes)
+                                             ? "mmq"
+                                             : (node->src[1]->ne[1] >= (int64_t)ameva_qgemm_min_rows() ? "qgemm" : "qmv");
                 snprintf(kind, sizeof(kind), "MUL_MAT %s %s %s %lldx%lld", ggml_type_name(node->src[0]->type),
                          node->src[1]->ne[1] == 1 ? "M=1" : "M>1", path, (long long)node->src[0]->ne[1],
                          (long long)node->src[0]->ne[0]);
@@ -1528,10 +2010,27 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
             }
             rec.kind = ameva_kind_id(kind);
         }
-        if (const char* e = ameva_encode(rec, node)) {
+        const uint64_t te = ameva_now_ns(), kc0 = g_prof_kcreate_ns.load(std::memory_order_relaxed);
+        const AmevaFusion fz = ameva_fuse_enabled() && i + 1 < n_nodes
+                                   ? ameva_find_fusion(node, ggml_graph_node(cgraph, i + 1))
+                                   : AmevaFusion{ AMEVA_FUSE_NONE, nullptr, { 0, nullptr, nullptr } };
+        const char* enc_err = fz.kind == AMEVA_FUSE_RMS_MUL
+                                  ? enc_rms_norm(rec, node, ggml_graph_node(cgraph, i + 1), fz.w)
+                                  : fz.kind == AMEVA_FUSE_MM_EPILOGUE ? enc_mul_mat(rec, node, &fz.ep)
+                                                                      : ameva_encode(rec, node);
+        if (node->op >= 0 && node->op < GGML_OP_COUNT) {
+            const uint64_t kc = g_prof_kcreate_ns.load(std::memory_order_relaxed) - kc0;
+            g_prof_enc_ns[node->op].fetch_add(ameva_now_ns() - te - kc, std::memory_order_relaxed);
+            g_prof_enc_nodes[node->op].fetch_add(1, std::memory_order_relaxed);
+        }
+        if (const char* e = enc_err) {
             fprintf(stderr, "ggml-ameva: node %d (%s, op %s): %s (FAIL-FAST)\n", i, node->name, ggml_op_desc(node), e);
             ac_runtime_batch_destroy(rec.batch);
             return GGML_STATUS_FAILED;
+        }
+        if (fz.kind != AMEVA_FUSE_NONE) {
+            ++i; // node i + 1 was computed by the dispatches of node i
+            rec.fused_pairs++;
         }
     }
     AcBatchStats stats = {};
@@ -1629,12 +2128,16 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
     g_prof_contract_ns.fetch_add(t_contract - t0);
     g_prof_begin_ns.fetch_add(t_begin - t_contract);
     g_prof_flush_ns.fetch_add(rec.flush_ns);
+    g_prof_rt_barrier_ns.fetch_add(rec.rt_barrier_ns);
+    g_prof_rt_dispatch_ns.fetch_add(rec.rt_dispatch_ns);
     g_prof_submit_ns.fetch_add(t1 - t_submit);
     g_prof_wait_ns.fetch_add(t2 - t1);
     for (int i = 0; i < work; ++i) ameva_increment_gpu_op_count(); // counted only after the GPU finished
     g_prof_mul_mat.fetch_add((uint64_t)rec.mul_mat_nodes);
     ameva_count_mul_mat(rec.mul_mat_nodes);
     ameva_count_qmv_mul_mat(rec.qmv_nodes);
+    ameva_count_mmq_mul_mat(rec.mmq_nodes);
+    g_prof_fused.fetch_add((uint64_t)rec.fused_pairs);
     return GGML_STATUS_SUCCESS;
 }
 

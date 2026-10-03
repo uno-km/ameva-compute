@@ -502,7 +502,28 @@ typedef struct {
     uint32_t subgroup_size;              /* 0: not reported by the driver */
     uint32_t timestamps_supported;
     float timestamp_period_ns;
+    /* Appended fields: filled only when struct_size covers them (a caller built with an older header passes the
+       smaller size and receives the fields up to timestamp_period_ns). */
+    uint32_t integer_dot_product;             /* 1: shaders may use packed int8 dot products
+                                                 (VK_KHR_shader_integer_dot_product enabled) */
+    uint32_t integer_dot_product_accelerated; /* 1: the driver reports the signed 4x8 packed form as accelerated */
 } AcDeviceLimits;
+
+/**
+ * @brief Merge saved pipeline cache data into the context's pipeline cache, which every kernel creation uses (a
+ * kernel whose pipeline is in the cache is created without compiling its shader again).
+ * @param data Data from ac_runtime_pipeline_cache_get_data of an earlier context on the same device and driver.
+ * @return AC_SUCCESS; AC_ERR_INVALID_ARGUMENT when the data names another device or driver version (Vulkan header:
+ *         vendor ID, device ID, pipelineCacheUUID) or is malformed (the cache is left as it was).
+ */
+AcResult ac_runtime_pipeline_cache_merge(AcContext* ctx, const void* data, size_t size);
+
+/**
+ * @brief Copy the context's pipeline cache data (to be saved and merged into a later context).
+ * @param data NULL: *inout_size receives the size. Otherwise up to *inout_size bytes are written and *inout_size is
+ *             set to the bytes written; AC_ERR_INVALID_BUFFER_SIZE when the buffer cannot hold the whole cache.
+ */
+AcResult ac_runtime_pipeline_cache_get_data(AcContext* ctx, void* data, size_t* inout_size);
 
 /**
  * @brief Report the device limits that govern buffer binding and dispatch geometry.

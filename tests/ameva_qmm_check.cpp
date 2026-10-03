@@ -14,6 +14,11 @@
 // For the weight placements the repacked-tensor and qmv counters must move exactly as expected (ground truth that
 // the repacked path ran, or that a type without a repacked layout did not take it), and reading the weight back
 // through the buffer interface must return the uploaded ggml bytes.
+// A case that ran ameva_mmq (the mmq counter moved: int8 activations) is compared with a reference that rounds the
+// activations the same way (per row and 32 elements: d = amax / 127, q = round(x / d), ties to even); an element whose
+// x / d lies within 1e-4 of a rounding boundary may round either way on the GPU (Vulkan division is not correctly
+// rounded), so its |w| d is added to the allowed error. Weight decoding errors stay orders of magnitude above that.
+// With AMEVA_MMQ=1 every repacked case with at least 8 activation rows must take ameva_mmq.
 // Exit 0 only if every case passes and supports_op accepted every case.
 #include "ggml.h"
 #include "ggml-alloc.h"
@@ -42,16 +47,37 @@ static const char* placement_name(Placement p) {
 struct Result {
     bool supported;
     bool pass;
+    bool mmq;   // ran ameva_mmq
     double max_rel;
     const char* why; // first failed check other than the numeric bound
 };
+
+// activation row x (K values) as ameva_quant_a8 rounds it: xq[k] = q_k * d of its 32-element unit; amb[k] = d when
+// x_k / d lies within 1e-4 of a rounding boundary (the GPU may round it the other way), else 0
+static void quant_a8_ref(const float* x, int K, std::vector<double>& xq, std::vector<double>& amb) {
+    xq.assign(K, 0.0);
+    amb.assign(K, 0.0);
+    for (int u = 0; u < K / 32; ++u) {
+        float amax = 0.0f;
+        for (int k = 0; k < 32; ++k) amax = std::max(amax, std::fabs(x[32 * u + k]));
+        const float d = amax / 127.0f;
+        const float id = d != 0.0f ? 1.0f / d : 0.0f;
+        for (int k = 0; k < 32; ++k) {
+            const float v = x[32 * u + k] * id;
+            const double q = std::max(-127.0, std::min(127.0, (double)std::nearbyint(v)));
+            xq[32 * u + k] = q * (double)d;
+            const double frac = (double)v - std::floor((double)v);
+            if (std::fabs(frac - 0.5) < 1e-4) amb[32 * u + k] = d;
+        }
+    }
+}
 
 static bool repackable(enum ggml_type t) {
     return t != GGML_TYPE_F32 && t != GGML_TYPE_F16 && t != GGML_TYPE_BF16;
 }
 
 static Result run_case(ggml_backend_t be, enum ggml_type type, int M, int N, int K, Placement place, bool repack_on) {
-    Result res = {false, false, 0.0, nullptr};
+    Result res = {false, false, false, 0.0, nullptr};
     const int VIEW_ROW0 = 3, VIEW_EXTRA = 5; // the view takes rows [3, 3 + N) of a weight with N + 5 rows
     const int NW = place == VIEW ? N + VIEW_EXTRA : N;
     std::vector<float> wf((size_t)NW * K), af((size_t)M * K), wref((size_t)NW * K);
@@ -93,6 +119,7 @@ static Result run_case(ggml_backend_t be, enum ggml_type type, int M, int N, int
     }
     const int64_t repacked0 = ggml_backend_ameva_get_repacked_tensor_count();
     const int64_t qmv0 = ggml_backend_ameva_get_qmv_mul_mat_count();
+    const int64_t mmq0 = ggml_backend_ameva_get_mmq_mul_mat_count();
     if (place == SPLIT) {
         // the first write ends inside a row and is not the whole tensor
         const size_t cut = wbytes / 3 + 1;
@@ -116,8 +143,14 @@ static Result run_case(ggml_backend_t be, enum ggml_type type, int M, int N, int
     const bool expect_repacked = repack_on && place != RESIDENT && repackable(type);
     const int64_t d_repacked = ggml_backend_ameva_get_repacked_tensor_count() - repacked0;
     const int64_t d_qmv = ggml_backend_ameva_get_qmv_mul_mat_count() - qmv0;
+    const int64_t d_mmq = ggml_backend_ameva_get_mmq_mul_mat_count() - mmq0;
+    res.mmq = d_mmq == 1;
+    static const bool mmq_required = getenv("AMEVA_MMQ") && strcmp(getenv("AMEVA_MMQ"), "1") == 0;
     if (d_repacked != (expect_repacked ? 1 : 0)) res.why = "repacked tensor count did not move as expected";
     else if (d_qmv != (expect_repacked ? 1 : 0)) res.why = "qmv MUL_MAT count did not move as expected";
+    else if (d_mmq != 0 && d_mmq != 1) res.why = "mmq MUL_MAT count moved by more than one";
+    else if (res.mmq && !expect_repacked) res.why = "ameva_mmq ran on weights that are not repacked";
+    else if (mmq_required && expect_repacked && M >= 8 && !res.mmq) res.why = "AMEVA_MMQ=1 but ameva_mmq did not run";
     if (!res.why) {
         // the buffer interface returns the ggml bytes that were uploaded, whatever the stored layout
         std::vector<uint8_t> back(wbytes);
@@ -135,16 +168,21 @@ static Result run_case(ggml_backend_t be, enum ggml_type type, int M, int N, int
     bool pass = true;
     double max_rel = 0.0;
     const int r0 = place == VIEW ? VIEW_ROW0 : 0;
+    std::vector<double> xq, amb;
     for (int m = 0; m < M; ++m) {
+        if (res.mmq) quant_a8_ref(af.data() + (size_t)m * K, K, xq, amb);
         for (int n = 0; n < N; ++n) {
-            double ref = 0.0, mag = 0.0;
+            double ref = 0.0, mag = 0.0, extra = 0.0;
             for (int k = 0; k < K; ++k) {
-                const double p = (double)wref[(size_t)(r0 + n) * K + k] * (double)af[(size_t)m * K + k];
+                const double wk = (double)wref[(size_t)(r0 + n) * K + k];
+                const double p = wk * (res.mmq ? xq[k] : (double)af[(size_t)m * K + k]);
                 ref += p;
                 mag += std::fabs(p);
+                if (res.mmq) extra += std::fabs(wk) * amb[k];
             }
             const double g = got[(size_t)m * N + n];
-            const double rel = std::fabs(g - ref) / (mag + 1e-30);
+            const double err = std::max(0.0, std::fabs(g - ref) - extra * 1.0001);
+            const double rel = err / (mag + 1e-30);
             if (!std::isfinite(g) || rel > 1e-5) pass = false;
             if (rel > max_rel) max_rel = rel;
         }
@@ -171,22 +209,26 @@ int main() {
     // M = 1: one-column kernels; 5 and 3: ameva_qmv with 8 activation columns (partial tile); 8, 13, 33 and 40:
     // repacked weights through ameva_qgemm (from 8 activation rows), partial 64-row and 32-column tiles. Odd N
     // exercises the row bound; K = 2560 and 4096 give long rows (many units per lane in ameva_qmv).
-    const Shape shapes[] = {{1, 37, 256},  {5, 64, 512},   {8, 16, 256},  {13, 33, 768},
-                            {1, 70, 2560}, {3, 19, 4096}, {40, 70, 512}, {33, 130, 256}};
+    // K = 544 (17 units of 32, an odd count) runs the leftover-unit loop of ameva_qmv; it is not a whole number of
+    // 256-weight blocks, so the k-quant types skip it.
+    const Shape shapes[] = {{1, 37, 256},  {5, 64, 512},   {8, 16, 256},  {13, 33, 768},  {1, 70, 2560},
+                            {3, 19, 4096}, {40, 70, 512}, {33, 130, 256}, {1, 21, 544}};
     const Placement places[] = {RESIDENT, WEIGHTS, SPLIT, VIEW};
     printf("repacking %s\n", repack_on ? "on" : "off (AMEVA_REPACK=0)");
 
-    int total = 0, failed = 0;
+    int total = 0, failed = 0, total_mmq = 0;
     for (enum ggml_type t : types) {
         double worst = 0.0;
         bool type_ok = true;
-        int cases = 0;
+        int cases = 0, mmq_cases = 0;
         for (const Shape& s : shapes) {
+            if (s.K % ggml_blck_size(t) != 0) continue; // not a whole number of blocks of this type
             for (Placement p : places) {
                 ++total;
                 ++cases;
                 const Result r = run_case(be, t, s.M, s.N, s.K, p, repack_on);
                 const bool ok = r.supported && r.pass;
+                mmq_cases += r.mmq ? 1 : 0;
                 if (!ok) {
                     ++failed;
                     type_ok = false;
@@ -197,10 +239,12 @@ int main() {
                 if (r.max_rel > worst) worst = r.max_rel;
             }
         }
-        printf("QMM type=%-6s cases=%d max_rel_err=%.3g status=%s\n", ggml_type_name(t), cases, worst,
-               type_ok ? "PASS" : "FAIL");
+        total_mmq += mmq_cases;
+        printf("QMM type=%-6s cases=%d mmq_cases=%d max_rel_err=%.3g status=%s\n", ggml_type_name(t), cases,
+               mmq_cases, worst, type_ok ? "PASS" : "FAIL");
     }
     ggml_backend_free(be);
-    printf("AMEVA_QMM_CHECK=%s (%d/%d cases)\n", failed ? "FAIL" : "PASS", total - failed, total);
+    printf("AMEVA_QMM_CHECK=%s (%d/%d cases, %d through ameva_mmq)\n", failed ? "FAIL" : "PASS", total - failed, total,
+           total_mmq);
     return failed ? 1 : 0;
 }

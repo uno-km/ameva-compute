@@ -12,6 +12,7 @@
 #include "ac_kernel.h"
 #include "ac_event.h"
 #include "ac_dispatch.h"
+#include <stddef.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -1154,6 +1155,18 @@ void ac_runtime_batch_destroy(
 /* Graph Batch Additions                                                     */
 /* ========================================================================= */
 
+AcResult ac_runtime_pipeline_cache_merge(AcContext* ctx, const void* data, size_t size) {
+    if (!ctx || ctx->magic != AC_MAGIC_CONTEXT || !ctx->vk_ctx) return AC_ERR_INVALID_CONTEXT;
+    if (!data) return AC_ERR_NULL_POINTER;
+    return ac_vk_pipeline_cache_merge(ctx->vk_ctx, data, size);
+}
+
+AcResult ac_runtime_pipeline_cache_get_data(AcContext* ctx, void* data, size_t* inout_size) {
+    if (!ctx || ctx->magic != AC_MAGIC_CONTEXT || !ctx->vk_ctx) return AC_ERR_INVALID_CONTEXT;
+    if (!inout_size) return AC_ERR_NULL_POINTER;
+    return ac_vk_pipeline_cache_get_data(ctx->vk_ctx, data, inout_size);
+}
+
 AcResult ac_runtime_context_get_limits(const AcContext* ctx, AcDeviceLimits* out_limits) {
     if (!ctx || ctx->magic != AC_MAGIC_CONTEXT || !ctx->vk_ctx) {
         return AC_ERR_INVALID_CONTEXT;
@@ -1161,7 +1174,10 @@ AcResult ac_runtime_context_get_limits(const AcContext* ctx, AcDeviceLimits* out
     if (!out_limits) {
         return AC_ERR_NULL_POINTER;
     }
-    if (out_limits->abi_version != AC_ABI_VERSION || out_limits->struct_size != sizeof(AcDeviceLimits)) {
+    /* the fields up to timestamp_period_ns form the first version of the struct; later fields are appended */
+    const size_t base_size = offsetof(AcDeviceLimits, integer_dot_product);
+    if (out_limits->abi_version != AC_ABI_VERSION || out_limits->struct_size < base_size ||
+        out_limits->struct_size > sizeof(AcDeviceLimits)) {
         return AC_ERR_INVALID_ARGUMENT;
     }
     const AcVkContext* vk = ctx->vk_ctx;
@@ -1179,6 +1195,10 @@ AcResult ac_runtime_context_get_limits(const AcContext* ctx, AcDeviceLimits* out
     out_limits->subgroup_size = vk->subgroup_size;
     out_limits->timestamps_supported = (l->timestampComputeAndGraphics && vk->timestamp_valid_bits > 0) ? 1u : 0u;
     out_limits->timestamp_period_ns = l->timestampPeriod;
+    if (out_limits->struct_size >= offsetof(AcDeviceLimits, integer_dot_product_accelerated) + sizeof(uint32_t)) {
+        out_limits->integer_dot_product = vk->integer_dot_product;
+        out_limits->integer_dot_product_accelerated = vk->integer_dot_product_accelerated;
+    }
     return AC_SUCCESS;
 }
 

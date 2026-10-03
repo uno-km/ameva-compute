@@ -188,7 +188,7 @@ AcResult ac_vk_kernel_create_with_specialization(
         pipelineInfo.stage.pSpecializationInfo = NULL;
     }
 
-    vk_res = vkCreateComputePipelines(ctx->device, VK_NULL_HANDLE, 1, &pipelineInfo, NULL, &compute_pipeline);
+    vk_res = vkCreateComputePipelines(ctx->device, ctx->pipeline_cache, 1, &pipelineInfo, NULL, &compute_pipeline);
     if (vk_res != VK_SUCCESS) {
         ret = AC_ERR_KERNEL_BUILD_FAILED;
         goto cleanup;

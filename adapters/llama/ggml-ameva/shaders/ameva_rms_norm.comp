@@ -1,6 +1,8 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 // AMEVA RMS_NORM, f32: y = x / sqrt(mean(x^2) + eps) per row of ne0 elements (ggml_compute_forward_rms_norm_f32).
+// With mul != 0 (the graph engine's fusion of the following MUL by a norm weight w of one row) it also writes
+// o = y * w[k] for every row, the multiplication of ameva_binary, so both outputs equal those of the unfused nodes.
 // One workgroup per row; the sum of squares is reduced in shared memory (ggml accumulates in double on the CPU,
 // the f32 tree reduction differs from it by rounding only).
 layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
@@ -9,12 +11,16 @@ layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
 
 layout(std430, binding = 0) readonly buffer A { uint a[]; };
 layout(std430, binding = 1) writeonly buffer D { uint d[]; };
+layout(std430, binding = 2) readonly buffer W { uint w[]; };   // norm weight (any range when mul == 0)
+layout(std430, binding = 3) writeonly buffer O { uint o[]; };  // y * w (any range when mul == 0)
 
 layout(push_constant) uniform PushConstants {
     uint ne0, ne1, ne2, nrows;
     uint a_off, a_s1, a_s2, a_s3;
     uint d_off, d_s1, d_s2, d_s3;
     uint eps; // float bits
+    uint mul, w_off, o_off;
+    uint o_s1, o_s2, o_s3;
 } pc;
 
 shared float red[128];
@@ -41,7 +47,10 @@ void main() {
     }
     const float mean = red[0] / float(pc.ne0);
     const float scale = 1.0 / sqrt(mean + uintBitsToFloat(pc.eps));
+    const uint ob = pc.o_off + i1 * pc.o_s1 + i2 * pc.o_s2 + i3 * pc.o_s3;
     for (uint k = tid; k < pc.ne0; k += 128u) {
-        d[db + k] = floatBitsToUint(uintBitsToFloat(a[ab + k]) * scale);
+        const float y = uintBitsToFloat(a[ab + k]) * scale;
+        d[db + k] = floatBitsToUint(y);
+        if (pc.mul != 0u) o[ob + k] = floatBitsToUint(y * uintBitsToFloat(w[pc.w_off + k]));
     }
 }
