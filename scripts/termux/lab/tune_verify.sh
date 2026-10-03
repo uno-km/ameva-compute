@@ -7,8 +7,9 @@
 #   2. ameva_qmm_check with every layout fixed (ameva_qmv rows x tpr, mali_qmv); test-backend-ops MUL_MAT with
 #      AMEVA_REPACK_ALL=1 and measured layouts (every one-row shape is measured, nothing kept)
 #   3. Qwen2.5-0.5B Q4_K_M: first run (measures, writes the tune file), second run (reads it)
-#   4. ROUNDS rounds (default 3), each: measured layouts, default ameva_qmv (rows 4, tpr 16), mali_qmv, the earlier
-#      build ~/abi-lab/out-a1 with ameva_qmv when present (macro-sized kernel: no specialization constant), CPU
+#   4. ROUNDS rounds (default 3), each: measured layouts, default ameva_qmv (rows 4, tpr 16), mali_qmv, an earlier
+#      build with ameva_qmv when present (PREV, default ~/abi-lab/out-a1, else ~/abi-lab/out-g2: the regression
+#      reference for the default layout), CPU
 #   5. AMEVA_PROFILE=2: GPU time per MUL_MAT shape with the measured layouts
 #   6. the greedy text of every mode of round 1
 set -u
@@ -21,6 +22,8 @@ S=$LAB/results/tunev_$TAG.txt
 M=$HOME/.cache/termux-llamacpp/models/qwen2.5-0.5b-instruct-q4_k_m.gguf
 DB=$SRC/scripts/termux/lab/decode_bench.sh
 TF=$LAB/results/qmv_tune_$TAG.txt
+PREV=${PREV:-$LAB/out-a1}
+[ -f "$PREV/libggml-ameva.so" ] || PREV=$LAB/out-g2
 mkdir -p "$LAB/results"
 cd "$LAB" || exit 1
 : > "$S"
@@ -29,7 +32,7 @@ tps() { grep "       eval time" "$1" | sed -E 's/.*, +([0-9.]+) tokens per secon
 gms() { grep "AMEVA_PROFILE per_graph_ms" "$1" | sed -E 's/.*gpu=([0-9.]+).*/\1/'; }
 RT="$OUT"
 [ -d "$LAB/rt098" ] && RT="$LAB/rt098:$OUT"
-say "device $(getprop ro.product.model) android $(getprop ro.build.version.release)" \
+say "device $(getprop ro.product.model) android $(getprop ro.build.version.release) prev=$PREV" \
     "$(grep Cpus_allowed_list /proc/self/status | tr -s '\t' ' ')" \
     "other llama/whisper/test processes at start: $(ps -A -o comm 2>/dev/null | grep -cE 'llama|whisper|test-backend|ameva_')"
 
@@ -77,7 +80,7 @@ say "--- tune file"
 cat "$TF" >> "$S" 2>&1
 
 for r in $(seq 1 "$ROUNDS"); do
-    for mode in tuned qmv mali a1 cpu; do
+    for mode in tuned qmv mali prev cpu; do
         f=$LAB/results/bench_tunev_${TAG}_${mode}_$r.log
         case $mode in
             tuned) AMEVA_PROFILE=1 OUT="$OUT" bash "$DB" "$M" "tunev_${TAG}_${mode}_$r" gpu > /dev/null 2>&1 ;;
@@ -85,8 +88,8 @@ for r in $(seq 1 "$ROUNDS"); do
                      > /dev/null 2>&1 ;;
             mali) AMEVA_QMV_KERNEL=mali AMEVA_PROFILE=1 OUT="$OUT" bash "$DB" "$M" "tunev_${TAG}_${mode}_$r" gpu \
                       > /dev/null 2>&1 ;;
-            a1) [ -f "$LAB/out-a1/libggml-ameva.so" ] || continue
-                AMEVA_MALI_QMV=0 AMEVA_PROFILE=1 OUT="$LAB/out-a1" bash "$DB" "$M" "tunev_${TAG}_${mode}_$r" gpu \
+            prev) [ -f "$PREV/libggml-ameva.so" ] || continue
+                AMEVA_MALI_QMV=0 AMEVA_PROFILE=1 OUT="$PREV" bash "$DB" "$M" "tunev_${TAG}_${mode}_$r" gpu \
                     > /dev/null 2>&1 ;;
             cpu) OUT="$OUT" bash "$DB" "$M" "tunev_${TAG}_${mode}_$r" cpu > /dev/null 2>&1 ;;
         esac
@@ -102,7 +105,7 @@ grep 'kind="MUL_MAT .*M=1' "$f" | sed 's/AMEVA_PROFILE //' >> "$S"
 grep "AMEVA_PROFILE qmv_layout" "$f" | sed 's/AMEVA_PROFILE //' >> "$S"
 
 say "--- greedy text, round 1"
-for mode in tuned qmv mali a1 cpu; do
+for mode in tuned qmv mali prev cpu; do
     o=$LAB/results/bench_tunev_${TAG}_${mode}_1.out
     [ -f "$o" ] && say "$mode md5=$(md5sum < "$o" | cut -c1-12) $(tr '\n' ' ' < "$o" | cut -c1-200)"
 done

@@ -246,8 +246,7 @@ static void ameva_profile_report(void) {
 static AcContext* s_ctx = nullptr;
 static AcDeviceLimits s_limits = {};
 static AcKernel* s_qmm[AMEVA_QMM_VARIANT_COUNT] = {};
-static AcKernel* s_qmv[AMEVA_QMV_VARIANT_COUNT] = {};          // prompt variants (cols > 1)
-static AcKernel* s_qmv_rows[AMEVA_QMV_VARIANT_COUNT][3] = {};  // one-row variants, weight rows per lane group 1, 2, 4
+static AcKernel* s_qmv[AMEVA_QMV_VARIANT_COUNT] = {};
 static AcKernel* s_mali_qmv[AMEVA_MALI_QMV_VARIANT_COUNT] = {};
 static char s_device_name[128] = "?";
 // Device and driver identity for measurements kept across runs: vendor ID, device ID and pipelineCacheUUID from the
@@ -452,15 +451,13 @@ static const AcRuntimeBindingDesc kBindings[8] = {
     { 4, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE }, { 5, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE },
     { 6, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE }, { 7, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE }};
 
-// One compute pipeline; nspec 32-bit specialization constants (schema and values), none when nspec is 0.
+// One compute pipeline with the workgroup size `local` of its module
 static AcKernel* ameva_make_kernel_ex(const char* name, const uint32_t* spirv, size_t bytes, const char* sha,
-                                      uint32_t bindings, uint32_t push_bytes, AcDim3 local,
-                                      const AcSpecConstantSchemaEntry* schema, const AcSpecConstant* spec,
-                                      uint32_t nspec) {
+                                      uint32_t bindings, uint32_t push_bytes, AcDim3 local) {
     AcKernelRuntimeMetadata meta = {
-        name, "main", bindings, kBindings, push_bytes, local, 0, sha, nspec, nspec ? schema : nullptr
+        name, "main", bindings, kBindings, push_bytes, local, 0, sha, 0, nullptr
     };
-    AcKernelDesc kdesc = { AC_ABI_VERSION, sizeof(AcKernelDesc), spirv, bytes, &meta, nspec, nspec ? spec : nullptr };
+    AcKernelDesc kdesc = { AC_ABI_VERSION, sizeof(AcKernelDesc), spirv, bytes, &meta, 0, nullptr };
     AcKernel* k = nullptr;
     const uint64_t t0 = ameva_now_ns();
     AcResult res = ac_runtime_kernel_create(s_ctx, &kdesc, &k);
@@ -476,7 +473,7 @@ static AcKernel* ameva_make_kernel_ex(const char* name, const uint32_t* spirv, s
 
 static AcKernel* ameva_make_kernel(const char* name, const uint32_t* spirv, size_t bytes, const char* sha,
                                    uint32_t bindings, uint32_t push_bytes, uint32_t local_x) {
-    return ameva_make_kernel_ex(name, spirv, bytes, sha, bindings, push_bytes, { local_x, 1, 1 }, nullptr, nullptr, 0);
+    return ameva_make_kernel_ex(name, spirv, bytes, sha, bindings, push_bytes, { local_x, 1, 1 });
 }
 
 static AcKernel* ameva_qmm_kernel(int idx) {
@@ -491,56 +488,17 @@ static AcKernel* ameva_qmm_kernel(int idx) {
     return s_qmm[idx];
 }
 
-// ameva_qmv, prompt variants (activation rows per workgroup > 1)
+// ameva_qmv variant idx (weight type, activation rows per workgroup, weight rows per lane group)
 static AcKernel* ameva_qmv_kernel(int idx) {
     static char names[AMEVA_QMV_VARIANT_COUNT][40];
     std::lock_guard<std::mutex> lock(s_mutex);
     if (!s_qmv[idx] && s_ctx) {
         const AmevaQmvVariant& v = kAmevaQmvVariants[idx];
-        snprintf(names[idx], sizeof(names[idx]), "ameva_qmv_%s_c%u", v.type_name, v.cols);
+        snprintf(names[idx], sizeof(names[idx]), "ameva_qmv_%s_c%u_r%u", v.type_name, v.cols, v.rows);
         s_qmv[idx] = ameva_make_kernel(names[idx], v.spirv, v.spirv_bytes, v.spirv_sha256, AMEVA_QMV_BINDINGS,
                                        AMEVA_QMV_PUSH_CONSTANT_BYTES, AMEVA_QMV_LOCAL_SIZE_X);
     }
     return s_qmv[idx];
-}
-
-// Does the SPIR-V module decorate a specialization constant with SpecId `id`? (OpDecorate <target> SpecId <id>)
-static bool spirv_has_spec_id(const uint32_t* words, size_t bytes, uint32_t id) {
-    const size_t n = bytes / 4;
-    for (size_t i = 5; i < n;) {
-        const uint32_t op = words[i] & 0xFFFFu, len = words[i] >> 16;
-        if (len == 0) return false;
-        if (op == 71u && len >= 4 && i + 3 < n && words[i + 2] == 1u && words[i + 3] == id) return true;
-        i += len;
-    }
-    return false;
-}
-
-// ameva_qmv, one-row variant idx with `rows` (1, 2 or 4) weight rows per lane group: specialization constant 0 of
-// shaders/ameva_qmv.comp, one pipeline per value
-static AcKernel* ameva_qmv_rows_kernel(int idx, uint32_t rows) {
-    static char names[AMEVA_QMV_VARIANT_COUNT][3][40];
-    const int ri = rows == 1 ? 0 : rows == 2 ? 1 : rows == 4 ? 2 : -1;
-    if (ri < 0 || kAmevaQmvVariants[idx].cols != 1) return nullptr;
-    std::lock_guard<std::mutex> lock(s_mutex);
-    if (!s_qmv_rows[idx][ri] && s_ctx) {
-        const AmevaQmvVariant& v = kAmevaQmvVariants[idx];
-        // a header generated before the rows became a specialization constant would ignore the value while the
-        // host sizes the grid for it
-        if (!spirv_has_spec_id(v.spirv, v.spirv_bytes, 0)) {
-            fprintf(stderr, "ggml-ameva: ameva_qmv_%s_c1 has no specialization constant 0 (weight rows per lane group): "
-                            "kernel header out of date, regenerate it with scripts/build_ameva_kernels.py\n",
-                    v.type_name);
-            return nullptr;
-        }
-        snprintf(names[idx][ri], sizeof(names[idx][ri]), "ameva_qmv_%s_c1_r%u", v.type_name, rows);
-        const AcSpecConstantSchemaEntry schema = { 0, AC_SPEC_CONSTANT_U32, v.rows, 1, 4, 0 };
-        const AcSpecConstant spec = { 0, AC_SPEC_CONSTANT_U32, rows };
-        s_qmv_rows[idx][ri] = ameva_make_kernel_ex(names[idx][ri], v.spirv, v.spirv_bytes, v.spirv_sha256,
-                                                   AMEVA_QMV_BINDINGS, AMEVA_QMV_PUSH_CONSTANT_BYTES,
-                                                   { AMEVA_QMV_LOCAL_SIZE_X, 1, 1 }, &schema, &spec, 1);
-    }
-    return s_qmv_rows[idx][ri];
 }
 
 static AcKernel* ameva_mali_qmv_kernel(int idx) {
@@ -551,8 +509,7 @@ static AcKernel* ameva_mali_qmv_kernel(int idx) {
         snprintf(names[idx], sizeof(names[idx]), "mali_qmv_%s", v.type_name);
         s_mali_qmv[idx] = ameva_make_kernel_ex(names[idx], v.spirv, v.spirv_bytes, v.spirv_sha256,
                                                AMEVA_MALI_QMV_BINDINGS, AMEVA_MALI_QMV_PUSH_CONSTANT_BYTES,
-                                               { AMEVA_MALI_QMV_LOCAL_SIZE_X, AMEVA_MALI_QMV_LOCAL_SIZE_Y, 1 },
-                                               nullptr, nullptr, 0);
+                                               { AMEVA_MALI_QMV_LOCAL_SIZE_X, AMEVA_MALI_QMV_LOCAL_SIZE_Y, 1 });
     }
     return s_mali_qmv[idx];
 }
@@ -703,15 +660,6 @@ void ggml_backend_ameva_teardown(void) {
             ameva_increment_kernel_destroy_count();
         }
     }
-    for (auto& per_rows : s_qmv_rows) {
-        for (AcKernel*& k : per_rows) {
-            if (k) {
-                ac_runtime_kernel_destroy(k);
-                k = nullptr;
-                ameva_increment_kernel_destroy_count();
-            }
-        }
-    }
     for (AcKernel*& k : s_mali_qmv) {
         if (k) {
             ac_runtime_kernel_destroy(k);
@@ -848,11 +796,14 @@ static int glu_code(const struct ggml_tensor* op) {
     return -1;
 }
 
-static int ameva_qmv_find(enum ggml_type type, uint32_t cols) {
+// ameva_qmv variant of a weight type: `cols` activation rows per workgroup (1 or 8), `rows` weight rows per lane group
+// (cols 1: 4, 2 or 1; cols 8: 1)
+static int ameva_qmv_find(enum ggml_type type, uint32_t cols, uint32_t rows) {
     const char* tn = ggml_type_name(type);
     if (!tn) return -1;
     for (int i = 0; i < AMEVA_QMV_VARIANT_COUNT; ++i) {
-        if (kAmevaQmvVariants[i].cols == cols && strcmp(kAmevaQmvVariants[i].type_name, tn) == 0) return i;
+        const AmevaQmvVariant& v = kAmevaQmvVariants[i];
+        if (v.cols == cols && v.rows == rows && strcmp(v.type_name, tn) == 0) return i;
     }
     return -1;
 }
@@ -877,7 +828,7 @@ static int ameva_qgemm_find(enum ggml_type type) {
 
 // Weights of this type may be stored repacked: every kernel that reads repacked weights exists for it.
 bool ameva_qmv_has_type(enum ggml_type type) {
-    return ameva_qmv_find(type, 1) >= 0 && ameva_qmv_find(type, 8) >= 0 && ameva_qgemm_find(type) >= 0;
+    return ameva_qmv_find(type, 1, 4) >= 0 && ameva_qmv_find(type, 8, 1) >= 0 && ameva_qgemm_find(type) >= 0;
 }
 
 // MUL_MAT: weights in the repacked layout run on ameva_qmv, all others on ameva_qmm. Both kernels take the same
@@ -1436,7 +1387,7 @@ static uint32_t ameva_qmv_tpr(uint32_t units) {
 // =============================================================================
 // MUL_MAT of one activation row with a repacked weight runs one of these layouts:
 //   ameva_qmv  64 invocations per workgroup; `tpr` lanes per weight row (push constant) and `rows` weight rows per
-//              lane group (specialization constant 0), so (64 / tpr) * rows weight rows per workgroup
+//              lane group (one module per value: 4, 2, 1), so (64 / tpr) * rows weight rows per workgroup
 //   mali_qmv   32 lanes per weight row, 4 weight rows per workgroup of 128 invocations
 // The fastest layout depends on the device, its driver and the shape, and what the driver reports does not decide
 // it: Mali-G68 (r32p1, r38p1) and Mali-G78 (r38p0) report the same subgroup size (16, fixed) and the same limits, yet
@@ -1586,11 +1537,17 @@ static bool ameva_qmv_choice(const struct ggml_tensor* node, AmevaQmvConfig* out
     return true;
 }
 
-// first 16 hex digits of the SPIR-V SHA-256 of both families for a weight type ("-": no kernel)
-static void ameva_qmv_kernel_ids(int type, char qmv[17], char mali[17]) {
-    const int vi = ameva_qmv_find((enum ggml_type)type, 1), mvi = ameva_mali_qmv_find((enum ggml_type)type);
-    snprintf(qmv, 17, "%.16s", vi >= 0 ? kAmevaQmvVariants[vi].spirv_sha256 : "-");
-    snprintf(mali, 17, "%.16s", mvi >= 0 ? kAmevaMaliQmvVariants[mvi].spirv_sha256 : "-");
+// Kernel build of a weight type: SPIR-V SHA-256 prefixes of its three one-row ameva_qmv modules (rows 4, 2, 1; 7 hex
+// digits each) and of its mali_qmv module (16 hex digits); "-" where there is no kernel
+static void ameva_qmv_kernel_ids(int type, char qmv[24], char mali[24]) {
+    static const uint32_t kRows[3] = { 4, 2, 1 };
+    int n = 0;
+    for (uint32_t r : kRows) {
+        const int vi = ameva_qmv_find((enum ggml_type)type, 1, r);
+        n += snprintf(qmv + n, 24 - (size_t)n, "%.7s", vi >= 0 ? kAmevaQmvVariants[vi].spirv_sha256 : "-");
+    }
+    const int mvi = ameva_mali_qmv_find((enum ggml_type)type);
+    snprintf(mali, 24, "%.16s", mvi >= 0 ? kAmevaMaliQmvVariants[mvi].spirv_sha256 : "-");
 }
 
 static int ameva_type_from_name(const char* name) {
@@ -1660,7 +1617,7 @@ static void ameva_qmv_tune_file_read(void) {
             bad = "invalid entry";
             break;
         }
-        char cq[17], cm[17];
+        char cq[24], cm[24];
         ameva_qmv_kernel_ids(type, cq, cm);
         if (strcmp(cq, qs) != 0 || strcmp(cm, ms) != 0) {
             ++stale; // measured with other kernels
@@ -1688,7 +1645,7 @@ static void ameva_qmv_tune_file_write(void) {
     std::string out = "ggml-ameva-qmv-tune 1\ndevice " + s_device_key + " " + s_device_name + "\n";
     char line[256];
     for (const AmevaQmvShape& s : s_qmv_shapes) {
-        char qs[17], ms[17];
+        char qs[24], ms[24];
         ameva_qmv_kernel_ids(s.type, qs, ms);
         snprintf(line, sizeof(line), "%s %u %u %s %s %u %u %u %.3f %.3f\n", ggml_type_name((enum ggml_type)s.type),
                  s.K, s.N, qs, ms, (unsigned)s.config.mali, (unsigned)s.config.rows, (unsigned)s.config.tpr, s.us,
@@ -1708,10 +1665,10 @@ static const char* ameva_qmv_tune_shape(const struct ggml_tensor* node, AmevaQmv
     const struct ggml_tensor* src0 = node->src[0];
     const struct ggml_tensor* base = ameva_repacked_base(src0);
     const uint32_t K = (uint32_t)src0->ne[0], N = (uint32_t)src0->ne[1];
-    const int vi = ameva_qmv_find(src0->type, 1), mvi = ameva_mali_qmv_find(src0->type);
+    const int mvi = ameva_mali_qmv_find(src0->type);
     AmevaRepackLayout L = {};
     AmevaRepackRegions R = {};
-    if (!base || vi < 0) return "no ameva_qmv kernel for this weight";
+    if (!base) return "no ameva_qmv kernel for this weight";
     if (!ameva_repack_layout(base->type, &L) || !ameva_repack_regions(base->type, base->ne[0], ggml_nrows(base), &R))
         return "repacked weight without a layout";
     const uint64_t first_row = (uint64_t)((const char*)src0->data - (const char*)base->data) / ggml_row_size(src0->type, K);
@@ -1725,7 +1682,8 @@ static const char* ameva_qmv_tune_shape(const struct ggml_tensor* node, AmevaQmv
     std::vector<Cand> cands;
     char cs[48];
     auto add = [&](const AmevaQmvConfig& c) {
-        AcKernel* k = c.mali ? ameva_mali_qmv_kernel(mvi) : ameva_qmv_rows_kernel(vi, c.rows);
+        const int vi = c.mali ? -1 : ameva_qmv_find(src0->type, 1, c.rows);
+        AcKernel* k = c.mali ? ameva_mali_qmv_kernel(mvi) : vi >= 0 ? ameva_qmv_kernel(vi) : nullptr;
         if (k) cands.push_back({ c, k, 0.0, true });
         else if (!cands.empty())
             fprintf(stderr, "ggml-ameva: WARNING: GEMV layout %s left out: kernel creation failed\n",
@@ -1979,14 +1937,14 @@ static const char* enc_mul_mat(AmevaRecorder& rec, const struct ggml_tensor* nod
                 kernel = mvi >= 0 ? ameva_mali_qmv_kernel(mvi) : nullptr;
                 if (!kernel) return "no mali_qmv kernel";
             } else {
-                const int vi = ameva_qmv_find(src0->type, 1);
-                kernel = vi >= 0 ? ameva_qmv_rows_kernel(vi, cfg.rows) : nullptr;
+                const int vi = ameva_qmv_find(src0->type, 1, cfg.rows);
+                kernel = vi >= 0 ? ameva_qmv_kernel(vi) : nullptr;
                 if (!kernel) return "no ameva_qmv kernel";
             }
             tpr = cfg.mali ? 32u : cfg.tpr;
             rows_per_wg = qmv_rows_per_wg(cfg);
         } else {
-            const int vi = ameva_qmv_find(src0->type, ncols);
+            const int vi = ameva_qmv_find(src0->type, ncols, 1);
             kernel = vi >= 0 ? ameva_qmv_kernel(vi) : nullptr;
             if (!kernel) return "no ameva_qmv kernel";
             tpr = ameva_qmv_tpr(K / 32);
