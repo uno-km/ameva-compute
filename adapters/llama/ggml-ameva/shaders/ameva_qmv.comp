@@ -6,13 +6,13 @@
 // ggml scale bytes of every block. A unit's quants are one aligned 8/16/32-byte load (the ggml block layout needs 4..9
 // unaligned 32-bit loads), and the dequantized values are exactly those of ggml's dequantize_row_<type>.
 //
-// Variants: -DTYPE_<T>, -DROWS=<weight rows per lane group>, -DCOLS=<activation rows per workgroup>, -DUPL=<units per
-// lane and step, COLS == 1>.
+// Variants: -DTYPE_<T>, -DCOLS=<activation rows per workgroup>, -DUPL=<units per lane and step, COLS == 1>.
 //   COLS == 1 (token generation): the activation vec4 of a lane's UPL units stay in registers and serve ROWS weight
-//   rows.
-//   COLS  > 1 (prompt): every decoded unit is dotted with COLS activation rows read from memory.
-// Work split: the 64 invocations of a workgroup form 64/tpr groups of tpr lanes (tpr from the host: 16, or
-// AMEVA_QMV_TPR). A group owns ROWS consecutive weight rows; its lanes stride over the units of those rows, so
+//   rows. ROWS (weight rows per lane group: 1, 2 or 4) is specialization constant 0, chosen by the host per shape
+//   together with tpr (ggml-ameva.cpp, token-generation GEMV selection).
+//   COLS  > 1 (prompt): every decoded unit is dotted with COLS activation rows read from memory; ROWS is 1.
+// Work split: the 64 invocations of a workgroup form 64/tpr groups of tpr lanes (tpr from the host: 4 .. 64). A group
+// owns ROWS consecutive weight rows; its lanes stride over the units of those rows, so
 // neighbouring lanes read neighbouring units, and the partial sums are reduced in shared memory (no subgroup
 // operations: subgroup sizes differ between Adreno and Mali).
 // Per unit the lane computes s = sum_i dot(w[i], a[i]) and adds s to its accumulator, as ameva_qmm does.
@@ -27,12 +27,16 @@
 // the unfused nodes. ep_mode 0: no epilogue (bindings 5 and 6 are not read).
 //   grid: (ceil(N / (ROWS * 64 / tpr)), ceil(M / COLS))
 
-#ifndef ROWS
-#define ROWS 4
-#endif
 #ifndef COLS
 #define COLS 1
 #endif
+#if COLS == 1
+layout(constant_id = 0) const uint ROWS = 4u;
+#else
+#define ROWS 1u
+#endif
+// accumulators per invocation
+#define RC (ROWS * uint(COLS))
 #ifndef UPL
 // COLS == 1: consecutive units per lane and step. Adreno 830 (S25, 2026-10-03), Qwen2.5-0.5B / Llama-3.2-1B Q4_K_M
 // token generation: UPL 1 59.2-60.2 / 41.9-42.1 t/s, UPL 2 46.7-46.9 / 41.5-41.7, UPL 4 28.3-28.6 / 31.0-31.1.
@@ -58,7 +62,7 @@ layout(push_constant) uniform PushConstants {
     uint e_off, eo_off;
 } pc;
 
-shared float red[ROWS * COLS * 64];
+shared float red[RC * 64u];
 
 void main() {
     const uint tid = gl_LocalInvocationID.x;
@@ -71,8 +75,8 @@ void main() {
     const uint U = pc.K >> 5u;
     const uint s_row = (pc.K / BLOCK_ELEMS) * SB;
 
-    float acc[ROWS * COLS];
-    [[unroll]] for (uint k = 0u; k < uint(ROWS * COLS); ++k) {
+    float acc[RC];
+    [[unroll]] for (uint k = 0u; k < RC; ++k) {
         acc[k] = 0.0;
     }
 
@@ -129,9 +133,6 @@ void main() {
 #else
     // One weight row per lane group and its bounds test outside the unit loop: with the test inside (as in the
     // token-generation loop above) the Mali-G68 compiler produced code that ran this loop at half the speed.
-#if ROWS != 1
-#error "COLS > 1 takes one weight row per lane group"
-#endif
     if (row0 < pc.N) {
         for (uint u = lane; u < U; u += tpr) {
             const uint b = u / UPB;
@@ -152,13 +153,13 @@ void main() {
     }
 #endif
 
-    [[unroll]] for (uint k = 0u; k < uint(ROWS * COLS); ++k) {
+    [[unroll]] for (uint k = 0u; k < RC; ++k) {
         red[k * 64u + tid] = acc[k];
     }
     barrier();
     for (uint st = tpr >> 1u; st > 0u; st >>= 1u) {
         if (lane < st) {
-            [[unroll]] for (uint k = 0u; k < uint(ROWS * COLS); ++k) {
+            [[unroll]] for (uint k = 0u; k < RC; ++k) {
                 red[k * 64u + tid] += red[k * 64u + tid + st];
             }
         }

@@ -7,7 +7,11 @@
 * QMM family (shaders/ameva_qmm.comp): one variant per weight type and activation-column tile (-DTYPE_<T>
   -DNCOLS=<n>), with the block geometry the host checks against ggml_row_size().
 * QMV family (shaders/ameva_qmv.comp): MUL_MAT on weights stored in the AMEVA repacked layout
-  (ggml-ameva-repack.h), one variant per weight type and work shape (-DTYPE_<T> -DCOLS=<c> -DROWS=<r>).
+  (ggml-ameva-repack.h), one variant per weight type and work shape (-DTYPE_<T> -DCOLS=<c>). The token-generation
+  variant (COLS=1) takes its weight rows per lane group as specialization constant 0 (default 4; the host creates
+  one pipeline per value it uses), the prompt variant has one row per lane group.
+* MALI_QMV family (shaders/mali_qmv.comp): token-generation MUL_MAT on repacked weights in a 32 x 4 work split, one
+  variant per weight type (-DTYPE_<T>); the host chooses between it and the QMV layouts per device and shape.
 * QGEMM family (shaders/ameva_qgemm.comp): tiled MUL_MAT for many activation rows on repacked weights, one variant
   per weight type (-DTYPE_<T>).
 * MMQ family (shaders/ameva_mmq.comp): integer-dot-product MUL_MAT for many activation rows on repacked weights
@@ -69,8 +73,8 @@ QMV_TYPES = [
     ("iq4_nl", "TYPE_IQ4_NL"),
     ("iq4_xs", "TYPE_IQ4_XS"),
 ]
-# (COLS, ROWS): token generation (one activation row, 4 weight rows per lane group) and prompt processing
-# (8 activation rows per workgroup, 1 weight row per lane group)
+# (COLS, ROWS): token generation (one activation row; ROWS is the default of specialization constant 0, not a define)
+# and prompt processing (8 activation rows per workgroup, 1 weight row per lane group)
 QMV_SHAPES = [(1, 4), (8, 1)]
 # units per lane and step of the token-generation variant: the shader default unless AMEVA_BUILD_QMV_UPL is set
 # (kernel tuning: builds that differ only in it)
@@ -149,6 +153,23 @@ def compile_module(args, src, defines, out):
     return data, (int(m.group(1)) if m else None)
 
 
+def spec_defaults(data):
+    """{SpecId: default value} of the 32-bit integer specialization constants of a SPIR-V module."""
+    words = struct.unpack("<%dI" % (len(data) // 4), data)
+    spec_id, value = {}, {}
+    i = 5
+    while i < len(words):
+        op, n = words[i] & 0xFFFF, words[i] >> 16
+        if n == 0:
+            fail("malformed SPIR-V module")
+        if op == 71 and n >= 4 and words[i + 2] == 1:  # OpDecorate <id> SpecId <n>
+            spec_id[words[i + 1]] = words[i + 3]
+        elif op == 50 and n == 4:  # OpSpecConstant <type> <id> <value>
+            value[words[i + 2]] = words[i + 3]
+        i += n
+    return {sid: value.get(rid) for rid, sid in spec_id.items()}
+
+
 def emit_array(lines, var, data):
     words = struct.unpack("<%dI" % (len(data) // 4), data)
     lines.append("static const uint32_t %s[] = {" % var)
@@ -191,7 +212,7 @@ def main():
         for name, define in QMV_TYPES:
             for cols, rows in QMV_SHAPES:
                 spv = os.path.join(tmp, "qmv_%s_c%d.spv" % (name, cols))
-                defs = [define, "COLS=%d" % cols, "ROWS=%d" % rows]
+                defs = [define, "COLS=%d" % cols]
                 if cols == 1 and QMV_UPL:
                     if QMV_UPL not in ("1", "2", "4"):
                         fail("AMEVA_BUILD_QMV_UPL must be 1, 2 or 4 (got %r)" % QMV_UPL)
@@ -199,6 +220,10 @@ def main():
                 data, rsize = compile_module(args, vsrc, defs, spv)
                 if rsize is not None and rsize != vpush:
                     fail("ameva_qmv %s: reflection says %d push-constant bytes, source %d" % (name, rsize, vpush))
+                want = {0: rows} if cols == 1 else {}
+                if spec_defaults(data) != want:
+                    fail("ameva_qmv %s cols=%d: specialization constants %r, expected %r" %
+                         (name, cols, spec_defaults(data), want))
                 var = "kAmevaQmv_%s_c%d" % (name, cols)
                 emit_array(lines, var, data)
                 qmv.append((name, cols, rows, var, len(data), hashlib.sha256(data).hexdigest()))
@@ -281,7 +306,7 @@ def main():
               "typedef struct {",
               "    const char* type_name;   /* ggml_type_name() of the weight type (stored repacked) */",
               "    uint32_t cols;           /* activation rows per workgroup */",
-              "    uint32_t rows;           /* weight rows per lane group */",
+              "    uint32_t rows;           /* weight rows per lane group (cols 1: default of specialization constant 0) */",
               "    const uint32_t* spirv;", "    size_t spirv_bytes;", "    const char* spirv_sha256;",
               "} AmevaQmvVariant;", "",
               "static const AmevaQmvVariant kAmevaQmvVariants[] = {"]

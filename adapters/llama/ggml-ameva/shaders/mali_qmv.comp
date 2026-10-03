@@ -2,8 +2,13 @@
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_control_flow_attributes : require
 
-// AMEVA Mali-Optimized QMV: 128 threads (32x4), zero stack-spill streaming architecture.
-// Designed to keep registers < 24 per lane for 100% occupancy on ARM Mali Valhall / Bifrost GPUs.
+// mali_qmv: token-generation MUL_MAT (one activation row) on a weight stored in the AMEVA repacked layout, as
+// ameva_qmv with COLS == 1, in another work split: 128 invocations (32 x 4), one weight row per 32 lanes, every lane
+// one 32-weight unit per step, partial sums reduced in shared memory. Written for low register use per lane on Mali.
+// One of the layouts the host chooses from per device and shape (ggml-ameva.cpp, token-generation GEMV selection):
+// measured 2026-10-03, it ran Qwen2.5-0.5B decode 6-11x faster than ameva_qmv (4 rows x 16 lanes) on Mali-G78
+// (r38p0) and up to 2.2x slower on Mali-G68 MP4 (r32p1).
+// Same bindings and push constants as ameva_qmv (tpr is not read).
 
 layout(local_size_x = 32, local_size_y = 4, local_size_z = 1) in;
 
