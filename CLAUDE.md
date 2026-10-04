@@ -62,11 +62,17 @@ evidence/poc_cuda_like/<timestamp>/
 
 ## 4. 현재 진행 중인 최우선 과제
 
-- **[최우선] 2026-10-03 개발분 실기기 검증**: MMQ(int8 정수 내적, `AMEVA_MMQ`), 양자화 KV 캐시(q8_0/q4_0),
+- **[최우선] ggml-ameva를 ameva-runtime llama 번들의 네이티브 GPU 경로로 내장** (사용자 결정 2026-10-04):
+  업스트림 llama.cpp Vulkan 백엔드에 의존하지 않는다. ameva-runtime 2.7.9 번들의 ggml-vulkan(b8471)은 플래시 어텐션을
+  켜면 손상된 텍스트를 내고, 끄면 Mali에서 디스크립터 세트 assert로 중단한다(ameva-runtime `RELEASE_NOTES.md` Known issues 1).
+  번들의 ggml(b8471, 0.9.8)에 맞춰 `libggml-ameva.so`와 `libac_runtime.so.2`를 빌드해 번들 `lib/`에 넣고,
+  런타임 라우터에 AMEVA 경로(`GGML_BACKEND_PATH`, `--device AMEVA0`)를 추가한다. 판정은 5대 기기에서 CPU와 같은 텍스트이며 수치를 기록한다.
+  계획과 진행 상태는 ameva-runtime `docs/handover/LATEST.md`.
+- **[다음] 2026-10-03 개발분 실기기 검증**: MMQ(int8 정수 내적, `AMEVA_MMQ`), 양자화 KV 캐시(q8_0/q4_0),
   연산 융합(`AMEVA_FUSE`), 파이프라인 캐시(`AMEVA_PIPELINE_CACHE`). 로컬 검사(구문·셰이더 컴파일)만 통과한 상태이다.
   런북과 판정 기준은 `docs/handover/LATEST.md` §3. 기기 생성 커널 헤더(spirv-val 포함)로 저장소 헤더를 교체한다.
   MMQ 수용 기준(사용자 결정): CPU 대비 KLD 평균 ≤ 0.01.
-- **[다음]** 실측 결과에 따른 MMQ 기본값 정책, 융합 확대(QKV 합치기, ROPE+SET_ROWS), 양자화 KV 타입 확대.
+- **[그다음]** 실측 결과에 따른 MMQ 기본값 정책, 융합 확대(QKV 합치기, ROPE+SET_ROWS), 양자화 KV 타입 확대.
 - 현재 기준선(S25 Adreno 830, Qwen2.5-0.5B Q4_K_M, 커밋 a6eee0f): 디코드 59~67 t/s(CPU 35~50), 프롬프트 368토큰 287 t/s(CPU 59).
   측정 시 `Cpus_allowed_list`와 Adreno `max_gpuclk`를 함께 기록한다(조건에 따라 2~3배 차이).
 
