@@ -63,18 +63,27 @@ evidence/poc_cuda_like/<timestamp>/
 ## 4. 현재 진행 중인 최우선 과제
 
 - **[최우선] ggml-ameva를 ameva-runtime llama 번들의 네이티브 GPU 경로로 내장** (사용자 결정 2026-10-04):
-  업스트림 llama.cpp Vulkan 백엔드에 의존하지 않는다. ameva-runtime 2.7.9 번들의 ggml-vulkan(b8471)은 플래시 어텐션을
-  켜면 손상된 텍스트를 내고, 끄면 Mali에서 디스크립터 세트 assert로 중단한다(ameva-runtime `RELEASE_NOTES.md` Known issues 1).
-  번들의 ggml(b8471, 0.9.8)에 맞춰 `libggml-ameva.so`와 `libac_runtime.so.2`를 빌드해 번들 `lib/`에 넣고,
-  런타임 라우터에 AMEVA 경로(`GGML_BACKEND_PATH`, `--device AMEVA0`)를 추가한다. 판정은 5대 기기에서 CPU와 같은 텍스트이며 수치를 기록한다.
-  계획과 진행 상태는 ameva-runtime `docs/handover/LATEST.md`.
-- **[다음] 2026-10-03 개발분 실기기 검증**: MMQ(int8 정수 내적, `AMEVA_MMQ`), 양자화 KV 캐시(q8_0/q4_0),
-  연산 융합(`AMEVA_FUSE`), 파이프라인 캐시(`AMEVA_PIPELINE_CACHE`). 로컬 검사(구문·셰이더 컴파일)만 통과한 상태이다.
-  런북과 판정 기준은 `docs/handover/LATEST.md` §3. 기기 생성 커널 헤더(spirv-val 포함)로 저장소 헤더를 교체한다.
-  MMQ 수용 기준(사용자 결정): CPU 대비 KLD 평균 ≤ 0.01.
-- **[그다음]** 실측 결과에 따른 MMQ 기본값 정책, 융합 확대(QKV 합치기, ROPE+SET_ROWS), 양자화 KV 타입 확대.
-- 현재 기준선(S25 Adreno 830, Qwen2.5-0.5B Q4_K_M, 커밋 a6eee0f): 디코드 59~67 t/s(CPU 35~50), 프롬프트 368토큰 287 t/s(CPU 59).
-  측정 시 `Cpus_allowed_list`와 Adreno `max_gpuclk`를 함께 기록한다(조건에 따라 2~3배 차이).
+  업스트림 llama.cpp Vulkan 백엔드에 의존하지 않는다. 구현과 실기기 검증을 마쳤고 게시하지 않았다
+  (ameva-runtime 브랜치 `feat/ggml-ameva-bundle`, 2.8.0 후보, 번들 핀 `d459daa9c55c...`, 백엔드 `c8aa8fd`).
+  판정 기준은 CPU 대비 KLD 평균 ≤ 0.01과 그리디 텍스트이며, 수치는 프롬프트 처리와 토큰 생성을 따로 기록한다.
+  남은 것: S20·S21의 스크래치 `-b vulkan` 재시험(측정 중 기기 세션 종료, 원인 미확인), A35 재시험,
+  `c8aa8fd`의 `test-backend-ops` 전체, 사용자의 게시 승인. 상태는 ameva-runtime `docs/handover/LATEST.md`.
+- **[다음] Mali 토큰 생성 속도**: 확장(`VK_KHR_shader_integer_dot_product`)이 없는 S21·A53에서 정수 내적을
+  32비트 정수 곱으로 구현한다(`ameva_mmq`·`ameva_mmvq` 대응). 수용 기준은 KLD 평균 ≤ 0.01.
+  근거와 나머지 과제(출력 투영, CPU 기록 시간, Mali의 1B 프롬프트)는 `docs/handover/LATEST.md` 4장.
+- 현재 기준선(2026-10-04, Qwen2.5-0.5B Q4_K_M, `-c 2048 -t 4`, CPU / GPU t/s):
+  프롬프트 약 370토큰 — S25 49 / 1066, S20 83 / 238, A35 109 / 190, A53 55 / 67, S21 119 / 225.
+  토큰 생성 64토큰 — S25 33~49 / 72~75, S20 28~31 / 32.7, A35 36.6 / 19.0, A53 22.6 / 14.4, S21 46.2 / 22.5.
+  측정 시 `Cpus_allowed_list`와 GPU 클럭(Adreno `max_gpuclk`)을 함께 기록하고, 한 세션에서 번갈아 측정한다
+  (조건에 따라 2~3배 차이). 도구는 ameva-runtime `tools/fleet/lab/perf_matrix.sh`.
+
+### 종결 기록: 2026-10-03 개발분 실기기 검증 (2026-10-04 종결)
+- MMQ(`AMEVA_MMQ`): 확장을 제공하는 S25·S20·A35에서 f32 타일 커널 대비 프롬프트 2.6배·1.8배·2.0배. 지원 시 켜는 기본값 유지.
+- 연산 융합(`AMEVA_FUSE`): 5대 모두 속도 차이가 측정 오차 안. 확대(QKV 합치기 등)는 보류.
+- 양자화 KV 캐시: q8_0은 CPU와 같은 출력이고 속도 차이 없음, q4_0은 GPU·CPU 모두 품질 저하. 메모리 절감 용도.
+- 파이프라인 캐시: 유지. 커널 헤더는 기기 생성본(spirv-val 포함)으로 교체.
+- 토큰 생성 정수 내적 `ameva_mmvq`와 행당 스레드 4·2·1 레이아웃 추가(`c8aa8fd`): A35 12.5 → 19.0, S20 25.8 → 32.7 t/s.
+- 검증: `ameva_qmm_check` 516/516, KLD 기준 통과(인수인계서 `20261004-2240.md`).
 
 ### 종결 기록: Q5_0 native GEMV / 레이어 단위 GPU 그래프 실행 (2026-10-02~03 종결)
 - 가중치 재배열(12개 양자화 타입) + 전용 GEMV(`ameva_qmv`)·타일 GEMM(`ameva_qgemm`)으로 대체했고, 그래프 전체를 배치 1회로 실행한다
