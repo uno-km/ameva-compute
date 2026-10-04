@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 
@@ -99,13 +100,84 @@ static void sync_rows(ggml_backend_ameva_buffer_context* ctx, const ggml_tensor*
 
 enum class Access { Read, Write, Fill };
 
+// The repack codec reads and writes the fields of every block with small accesses spread over the three regions. The
+// buffer mapping is GPU memory that several drivers map uncached (the first HOST_VISIBLE | HOST_COHERENT type: Mali,
+// Turnip), where such accesses ran at 6 to 9 MB/s: Llama-3.2-1B Q4_K_M took 81 to 134 s to load and Gemma-2-2B up to
+// 294 s (Galaxy A35, A53, S21, S20, 2026-10-04; 5 and 12 s on the Galaxy S25). The codec therefore works on a staging
+// copy in ordinary memory, at most this many bytes of rows at a time, and the mapping is only written and read in whole
+// region ranges (one memcpy per region).
+static const uint64_t kStagingBytes = 4ull << 20;
+
+// Rows [r0, r0 + nr) of the repacked tensor at `t` with `rows` rows, between the mapping and `stage`, which holds those
+// rows as a repacked tensor of nr rows. In both, every region is row-major, so the rows are one range per region.
+static void stage_rows(const AmevaRepackRegions& R, int64_t r0, int64_t nr, uint8_t* t, uint8_t* stage, bool to_mapping) {
+    const uint64_t n = (uint64_t)nr, r = (uint64_t)r0;
+    const struct { uint64_t mapped, staged, len; } parts[3] = {
+        { R.q + r * R.q_row, 0, n * R.q_row },
+        { R.h + r * R.h_row, n * R.q_row, n * R.h_row },
+        { R.s + r * R.s_row, n * (R.q_row + R.h_row), n * R.s_row },
+    };
+    for (const auto& p : parts) {
+        if (p.len == 0) continue;
+        if (to_mapping) memcpy(t + p.mapped, stage + p.staged, p.len);
+        else memcpy(stage + p.staged, t + p.mapped, p.len);
+    }
+}
+
+static int64_t staging_rows(uint64_t row_bytes) {
+    return row_bytes >= kStagingBytes ? 1 : (int64_t)(kStagingBytes / row_bytes);
+}
+
+// Rows [r0, r0 + nr) of the repacked tensor at `t` (`rows` rows of K weights of `type`) from `ggml` (those rows in the
+// ggml layout). Not flushed.
+static void write_repacked(enum ggml_type type, int64_t K, int64_t rows, uint8_t* t, int64_t r0, int64_t nr,
+                           const uint8_t* ggml, const char* what, const char* name) {
+    const uint64_t row_bytes = ggml_row_size(type, K);
+    AmevaRepackRegions R;
+    if (!ameva_repack_regions(type, K, rows, &R)) {
+        GGML_ABORT("ggml-ameva-buffer: %s: no repacked layout for %s", what, name);
+    }
+    const int64_t chunk = staging_rows(row_bytes);
+    std::vector<uint8_t> stage((size_t)((uint64_t)std::min(chunk, nr) * row_bytes));
+    for (int64_t r = r0; r < r0 + nr; r += chunk) {
+        const int64_t n = std::min(chunk, r0 + nr - r);
+        if (!ameva_repack_rows(type, K, n, 0, n, ggml + (uint64_t)(r - r0) * row_bytes, stage.data())) {
+            GGML_ABORT("ggml-ameva-buffer: %s: repacking rows of %s failed", what, name);
+        }
+        stage_rows(R, r, n, t, stage.data(), true);
+    }
+}
+
+static void write_rows(const ggml_tensor* base, int64_t r0, int64_t nr, const uint8_t* ggml, const char* what) {
+    write_repacked(base->type, base->ne[0], ggml_nrows(base), (uint8_t*)base->data, r0, nr, ggml, what, base->name);
+}
+
+// Rows [r0, r0 + nr) of the repacked tensor `base` into `ggml` in the ggml layout. Not invalidated.
+static void read_rows(const ggml_tensor* base, int64_t r0, int64_t nr, uint8_t* ggml, const char* what) {
+    const int64_t K = base->ne[0], rows = ggml_nrows(base);
+    const uint64_t row_bytes = ggml_row_size(base->type, K);
+    AmevaRepackRegions R;
+    if (!ameva_repack_regions(base->type, K, rows, &R)) {
+        GGML_ABORT("ggml-ameva-buffer: %s: no repacked layout for %s", what, base->name);
+    }
+    const int64_t chunk = staging_rows(row_bytes);
+    std::vector<uint8_t> stage((size_t)((uint64_t)std::min(chunk, nr) * row_bytes));
+    for (int64_t r = r0; r < r0 + nr; r += chunk) {
+        const int64_t n = std::min(chunk, r0 + nr - r);
+        stage_rows(R, r, n, (uint8_t*)base->data, stage.data(), false);
+        if (!ameva_unrepack_rows(base->type, K, n, 0, n, stage.data(), ggml + (uint64_t)(r - r0) * row_bytes)) {
+            GGML_ABORT("ggml-ameva-buffer: %s: unpacking rows of %s failed", what, base->name);
+        }
+    }
+}
+
 // Bytes [off, off + size) of the ggml-layout image of the repacked tensor `base`: copied to `out` (Read), replaced by
 // `in` (Write) or set to `value` (Fill). Whole rows are converted; a range that does not cover whole rows is merged
 // into the rows it touches.
 static void repacked_access(ggml_backend_ameva_buffer_context* ctx, const ggml_tensor* base, uint64_t off, size_t size,
                             Access mode, const void* in, void* out, uint8_t value, const char* what) {
     if (size == 0) return;
-    const int64_t K = base->ne[0], rows = ggml_nrows(base);
+    const int64_t K = base->ne[0];
     const uint64_t row_bytes = ggml_row_size(base->type, K);
     if (off > ggml_nbytes(base) || size > ggml_nbytes(base) - off) {
         GGML_ABORT("ggml-ameva-buffer: %s range outside the repacked tensor %s", what, base->name);
@@ -113,28 +185,21 @@ static void repacked_access(ggml_backend_ameva_buffer_context* ctx, const ggml_t
     const int64_t r0 = (int64_t)(off / row_bytes);
     const int64_t r1 = (int64_t)((off + size + row_bytes - 1) / row_bytes);
     const uint64_t lo = off - (uint64_t)r0 * row_bytes;
-    uint8_t* t = (uint8_t*)base->data;
     if (mode == Access::Write && lo == 0 && size % row_bytes == 0) {
-        if (!ameva_repack_rows(base->type, K, rows, r0, r1 - r0, in, t)) {
-            GGML_ABORT("ggml-ameva-buffer: %s: repacking rows of %s failed", what, base->name);
-        }
+        write_rows(base, r0, r1 - r0, (const uint8_t*)in, what);
         sync_rows(ctx, base, r0, r1, true, what);
         return;
     }
     std::vector<uint8_t> img((size_t)((uint64_t)(r1 - r0) * row_bytes));
     sync_rows(ctx, base, r0, r1, false, what);
-    if (!ameva_unrepack_rows(base->type, K, rows, r0, r1 - r0, t, img.data())) {
-        GGML_ABORT("ggml-ameva-buffer: %s: unpacking rows of %s failed", what, base->name);
-    }
+    read_rows(base, r0, r1 - r0, img.data(), what);
     if (mode == Access::Read) {
         memcpy(out, img.data() + lo, size);
         return;
     }
     if (mode == Access::Write) memcpy(img.data() + lo, in, size);
     else memset(img.data() + lo, value, size);
-    if (!ameva_repack_rows(base->type, K, rows, r0, r1 - r0, img.data(), t)) {
-        GGML_ABORT("ggml-ameva-buffer: %s: repacking rows of %s failed", what, base->name);
-    }
+    write_rows(base, r0, r1 - r0, img.data(), what);
     sync_rows(ctx, base, r0, r1, true, what);
 }
 
@@ -160,9 +225,7 @@ static const ggml_tensor* resolve_for_write(ggml_backend_buffer_t buffer, ggml_t
         std::vector<uint8_t> img(nbytes);
         sync_range(ctx, t0, nbytes, false, what);
         memcpy(img.data(), tensor->data, nbytes);
-        if (!ameva_repack(tensor->type, K, rows, img.data(), tensor->data)) {
-            GGML_ABORT("ggml-ameva-buffer: %s: repacking %s failed", what, tensor->name);
-        }
+        write_rows(tensor, 0, rows, img.data(), what);
         sync_range(ctx, t0, nbytes, true, what);
     }
     tensor->extra = &s_repacked_tag;
@@ -291,9 +354,8 @@ static void ggml_backend_ameva_buffer_clear(ggml_backend_buffer_t buffer, uint8_
         std::vector<uint8_t> img;
         for (const AmevaRepackSpan& s : ctx->repacked) {
             img.assign((size_t)s.bytes, value);
-            if (!ameva_repack(s.type, s.K, s.rows, img.data(), (uint8_t*)ctx->mapped_ptr + s.off)) {
-                GGML_ABORT("ggml-ameva-buffer: clear: repacking a %s tensor failed", ggml_type_name(s.type));
-            }
+            write_repacked(s.type, s.K, s.rows, (uint8_t*)ctx->mapped_ptr + s.off, 0, s.rows, img.data(), "clear",
+                           ggml_type_name(s.type));
         }
     }
     sync_range(ctx, 0, buffer->size, true, "clear");
