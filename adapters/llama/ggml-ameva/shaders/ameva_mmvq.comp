@@ -1,7 +1,9 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_control_flow_attributes : require
+#ifndef EMU_DOT
 #extension GL_EXT_integer_dot_product : require
+#endif
 // AMEVA MMVQ: token-generation MUL_MAT (one activation row) with integer dot products. The weight is stored in the
 // AMEVA repacked layout (ggml-ameva-repack.h); the activation row is quantized per 32-element unit to int8 by
 // ameva_quant_a8 (d_a, q_a, sums of q_a per 16-element half), as for ameva_mmq.
@@ -23,6 +25,19 @@
 // Epilogue as ameva_qmv: eout[n] = v + e[n] (1), silu(v) * e[n] (2) or silu(e[n]) * v (3); ep_mode 0: none.
 //   grid: ceil(N / (ROWS * 64 / tpr))
 //   variants: -DTYPE_<T> (the 12 repacked types) x -DROWS=4, 2, 1
+//
+// -DEMU_DOT: the same sums without VK_KHR_shader_integer_dot_product (Mali-G78 r38p0 and Mali-G68 r32p1 do not offer
+// it), for the weight types whose decode_i8 values are unsigned and at most 63 (every repacked type except q8_0 and
+// the iq4 types). A weight word W holds four values w0..w3 as bytes, the activation groups come from ameva_quant_a8
+// -DEMU as unsigned bytes u = q + 128 in two words E = u2 | u0 << 16 and O = u3 | u1 << 16. Then, in 32-bit unsigned
+// arithmetic,
+//   (W & 0x00FF00FF) * E = w0 u2 + (w0 u0 + w2 u2) << 16      (the term w2 u0 << 32 is dropped by the wrap-around)
+//   ((W >> 8) & 0x00FF00FF) * O = w1 u3 + (w1 u1 + w3 u3) << 16
+// and the upper half of their sum is w0 u0 + w1 u1 + w2 u2 + w3 u3 exactly: the lower halves add up to at most
+// 2 * 63 * 255 < 2^16 (no carry), the upper halves to at most 4 * 63 * 255 < 2^16 (no overflow). The signed sum is
+// sum w q = sum w u - 128 sum w, with sum w from the same masked words. Two multiplications per four weights instead
+// of the four conversions and four multiply-adds of ameva_qmv; the results are those of the extension path.
+//   binding 3: AQ as written by ameva_quant_a8 -DEMU (4 uvec4 per unit); everything else as above.
 
 #ifndef ROWS
 #define ROWS 4
@@ -48,6 +63,9 @@ layout(push_constant) uniform PushConstants {
 #if defined(TYPE_Q2_K) || defined(TYPE_Q3_K) || defined(TYPE_Q6_K)
 #define HALF_SCALES // one scale and offset per 16-weight half
 #endif
+#if defined(EMU_DOT) && (defined(TYPE_Q8_0) || defined(TYPE_IQ4_NL) || defined(TYPE_IQ4_XS))
+#error "EMU_DOT needs unsigned decode_i8 values of at most 63"
+#endif
 
 shared float red[ROWS * 64];
 
@@ -68,8 +86,13 @@ void main() {
 
     for (uint u = lane; u < U; u += tpr) {
         const uint b = u / UPB;
+#ifdef EMU_DOT
+        const uvec4 e0 = aq[pc.aq_off + 4u * u], e1 = aq[pc.aq_off + 4u * u + 1u];
+        const uvec4 o0 = aq[pc.aq_off + 4u * u + 2u], o1 = aq[pc.aq_off + 4u * u + 3u];
+#else
         const ivec4 a0 = ivec4(aq[pc.aq_off + 2u * u]);
         const ivec4 a1 = ivec4(aq[pc.aq_off + 2u * u + 1u]);
+#endif
         const uvec2 e = ad[pc.ad_off + u];
         const float da = uintBitsToFloat(e.x);
         const float sa0 = da * float(bitfieldExtract(int(e.y), 0, 16));
@@ -81,10 +104,24 @@ void main() {
                 vec2 sc, mc;
                 decode_i8(pc.q_off + (n * U + u) * QPER, pc.h_off + n * U + u, pc.s_off + n * s_row + b * SB,
                           u - b * UPB, v, sc, mc);
+#ifdef EMU_DOT
+                uint d0 = 0u, d1 = 0u, s0 = 0u, s1 = 0u;
+                [[unroll]] for (uint w = 0u; w < 4u; ++w) {
+                    const uint we = v[w] & 0x00FF00FFu, wo = (v[w] >> 8u) & 0x00FF00FFu;
+                    d0 += (we * e0[w] + wo * o0[w]) >> 16u;
+                    s0 += we + wo;
+                    const uint xe = v[w + 4u] & 0x00FF00FFu, xo = (v[w + 4u] >> 8u) & 0x00FF00FFu;
+                    d1 += (xe * e1[w] + xo * o1[w]) >> 16u;
+                    s1 += xe + xo;
+                }
+                const int i0 = int(d0) - 128 * int((s0 & 0xFFFFu) + (s0 >> 16u));
+                const int i1 = int(d1) - 128 * int((s1 & 0xFFFFu) + (s1 >> 16u));
+#else
                 const int i0 = dotPacked4x8EXT(int(v[0]), a0.x) + dotPacked4x8EXT(int(v[1]), a0.y) +
                                dotPacked4x8EXT(int(v[2]), a0.z) + dotPacked4x8EXT(int(v[3]), a0.w);
                 const int i1 = dotPacked4x8EXT(int(v[4]), a1.x) + dotPacked4x8EXT(int(v[5]), a1.y) +
                                dotPacked4x8EXT(int(v[6]), a1.z) + dotPacked4x8EXT(int(v[7]), a1.w);
+#endif
 #if defined(HALF_SCALES)
                 acc[r] += da * (sc.x * float(i0) + sc.y * float(i1)) + mc.x * sa0 + mc.y * sa1;
 #else

@@ -7,6 +7,12 @@
 // One invocation per (row m, unit u); gi = m * U + u. Output (scratch of the graph engine):
 //   AQ[aq_off + 2 gi + h] (uvec4): q of elements 16h .. 16h + 15, byte k of component c = element 16h + 4c + k
 //   AD[ad_off + gi] (uvec2): x = bits of d, y = sum over elements 0..15 (int16, low half) | sum over 16..31 (high half)
+// -DEMU (for the kernels that emulate the integer dot product with 32-bit multiplies, ameva_mmvq -DEMU_DOT): the
+// values are stored as unsigned bytes u = q + 128 (1 .. 255), each group of four elements e0..e3 as two words whose
+// 16-bit fields pair with the fields of a weight word in one multiplication:
+//   AQ[aq_off + 4 gi + 0 .. 1] (uvec4 x 2): for the eight groups, u2 | u0 << 16
+//   AQ[aq_off + 4 gi + 2 .. 3] (uvec4 x 2): for the eight groups, u3 | u1 << 16
+//   AD as above (the sums are those of q, not of u).
 //
 //   binding 0: src1 F32 as vec4, binding 1: AQ, binding 2: AD
 //   push: M (rows), K, a_off, s1 (floats; multiples of 4), aq_off (uvec4), ad_off (uvec2)
@@ -40,10 +46,19 @@ void main() {
     const float d = amax / 127.0;
     const float id = d != 0.0 ? 1.0 / d : 0.0;
     uint w[8];
+#ifdef EMU
+    uint wo[8];
+#endif
     int s0 = 0, s1 = 0;
     [[unroll]] for (uint i = 0u; i < 8u; ++i) {
         const ivec4 q = clamp(ivec4(roundEven(x[i] * id)), ivec4(-127), ivec4(127));
+#ifdef EMU
+        const uvec4 u = uvec4(q + 128);
+        w[i] = u.z | (u.x << 16u);
+        wo[i] = u.w | (u.y << 16u);
+#else
         w[i] = (uint(q.x) & 0xFFu) | ((uint(q.y) & 0xFFu) << 8u) | ((uint(q.z) & 0xFFu) << 16u) | (uint(q.w) << 24u);
+#endif
         const int qs = q.x + q.y + q.z + q.w;
         if (i < 4u) {
             s0 += qs;
@@ -51,7 +66,14 @@ void main() {
             s1 += qs;
         }
     }
+#ifdef EMU
+    aq[pc.aq_off + 4u * gi] = uvec4(w[0], w[1], w[2], w[3]);
+    aq[pc.aq_off + 4u * gi + 1u] = uvec4(w[4], w[5], w[6], w[7]);
+    aq[pc.aq_off + 4u * gi + 2u] = uvec4(wo[0], wo[1], wo[2], wo[3]);
+    aq[pc.aq_off + 4u * gi + 3u] = uvec4(wo[4], wo[5], wo[6], wo[7]);
+#else
     aq[pc.aq_off + 2u * gi] = uvec4(w[0], w[1], w[2], w[3]);
     aq[pc.aq_off + 2u * gi + 1u] = uvec4(w[4], w[5], w[6], w[7]);
+#endif
     ad[pc.ad_off + gi] = uvec2(floatBitsToUint(d), (uint(s0) & 0xFFFFu) | (uint(s1) << 16u));
 }
