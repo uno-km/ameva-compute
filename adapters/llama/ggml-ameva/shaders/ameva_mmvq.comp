@@ -1,0 +1,130 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_EXT_integer_dot_product : require
+// AMEVA MMVQ: token-generation MUL_MAT (one activation row) with integer dot products. The weight is stored in the
+// AMEVA repacked layout (ggml-ameva-repack.h); the activation row is quantized per 32-element unit to int8 by
+// ameva_quant_a8 (d_a, q_a, sums of q_a per 16-element half), as for ameva_mmq.
+// For a weight unit decoded by decode_i8 (weight k = sc_h v_k + mc_h, h = k / 16) the unit's contribution is
+//   sum_h  d_a * sc_h * sum_{k in h} v_k q_a,k  +  mc_h * d_a * sum_{k in h} q_a,k
+// with the inner sums as exact integer dot products (dotPacked4x8EXT, signed 8-bit x 8-bit), eight per unit instead
+// of the 32 conversions and 32 multiply-adds per unit of ameva_qmv. The only difference from ameva_qmv is the rounding
+// of the activations to int8 (|error| <= d_a / 2 per element), as in ameva_mmq and in the CPU backend's q8 vec_dot.
+//
+// Work split as ameva_qmv with COLS == 1 and one unit loop (see the note in ameva_qmv.comp about a second unit loop
+// on the Mali r38 drivers): the 64 invocations form 64 / tpr groups of tpr lanes; a group owns ROWS consecutive
+// weight rows; its lanes stride over the units, so neighbouring lanes read neighbouring units. A lane loads the
+// quantized activations of its unit once and uses them for the ROWS rows. Partial sums are reduced in shared memory.
+//
+//   bindings 0..2: repacked weights (ameva_qdecode.glsl), binding 3: AQ (uvec4), binding 4: AD (uvec2),
+//   binding 5: dst F32, binding 6: epilogue operand F32, binding 7: epilogue output F32
+//   push: K, N (weight rows of this dispatch), q_off, h_off (Q / H vector elements), s_off (bytes, even),
+//         aq_off (uvec4), ad_off (uvec2), d_off (floats), tpr, ep_mode, e_off, eo_off (floats)
+// Epilogue as ameva_qmv: eout[n] = v + e[n] (1), silu(v) * e[n] (2) or silu(e[n]) * v (3); ep_mode 0: none.
+//   grid: ceil(N / (ROWS * 64 / tpr))
+//   variants: -DTYPE_<T> (the 12 repacked types) x -DROWS=4, 2, 1
+
+#ifndef ROWS
+#define ROWS 4
+#endif
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+#include "ameva_qdecode.glsl"
+
+layout(std430, binding = 3) readonly buffer BufAQ { uvec4 aq[]; };
+layout(std430, binding = 4) readonly buffer BufAD { uvec2 ad[]; };
+layout(std430, binding = 5) writeonly buffer BufD { float dst[]; };
+layout(std430, binding = 6) readonly buffer BufE { float epi[]; };
+layout(std430, binding = 7) writeonly buffer BufEO { float eout[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint K, N, q_off, h_off;
+    uint s_off, aq_off, ad_off, d_off;
+    uint tpr, ep_mode, e_off, eo_off;
+} pc;
+
+#if defined(TYPE_Q2_K) || defined(TYPE_Q3_K) || defined(TYPE_Q6_K)
+#define HALF_SCALES // one scale and offset per 16-weight half
+#endif
+
+shared float red[ROWS * 64];
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    qdecode_init(tid);
+    const uint tpr = pc.tpr;
+    const uint g = tid / tpr;
+    const uint lane = tid - g * tpr;
+    const uint row0 = (gl_WorkGroupID.x * (64u / tpr) + g) * uint(ROWS);
+    const uint U = pc.K >> 5u;
+    const uint s_row = (pc.K / BLOCK_ELEMS) * SB;
+
+    float acc[ROWS];
+    [[unroll]] for (uint r = 0u; r < uint(ROWS); ++r) {
+        acc[r] = 0.0;
+    }
+
+    for (uint u = lane; u < U; u += tpr) {
+        const uint b = u / UPB;
+        const ivec4 a0 = ivec4(aq[pc.aq_off + 2u * u]);
+        const ivec4 a1 = ivec4(aq[pc.aq_off + 2u * u + 1u]);
+        const uvec2 e = ad[pc.ad_off + u];
+        const float da = uintBitsToFloat(e.x);
+        const float sa0 = da * float(bitfieldExtract(int(e.y), 0, 16));
+        const float sa1 = da * float(bitfieldExtract(int(e.y), 16, 16));
+        [[unroll]] for (uint r = 0u; r < uint(ROWS); ++r) {
+            const uint n = row0 + r;
+            if (n < pc.N) {
+                uint v[8];
+                vec2 sc, mc;
+                decode_i8(pc.q_off + (n * U + u) * QPER, pc.h_off + n * U + u, pc.s_off + n * s_row + b * SB,
+                          u - b * UPB, v, sc, mc);
+                const int i0 = dotPacked4x8EXT(int(v[0]), a0.x) + dotPacked4x8EXT(int(v[1]), a0.y) +
+                               dotPacked4x8EXT(int(v[2]), a0.z) + dotPacked4x8EXT(int(v[3]), a0.w);
+                const int i1 = dotPacked4x8EXT(int(v[4]), a1.x) + dotPacked4x8EXT(int(v[5]), a1.y) +
+                               dotPacked4x8EXT(int(v[6]), a1.z) + dotPacked4x8EXT(int(v[7]), a1.w);
+#if defined(HALF_SCALES)
+                acc[r] += da * (sc.x * float(i0) + sc.y * float(i1)) + mc.x * sa0 + mc.y * sa1;
+#else
+                acc[r] += da * sc.x * float(i0 + i1) + mc.x * (sa0 + sa1);
+#endif
+            }
+        }
+    }
+
+    [[unroll]] for (uint r = 0u; r < uint(ROWS); ++r) {
+        red[r * 64u + tid] = acc[r];
+    }
+    barrier();
+    for (uint st = tpr >> 1u; st > 0u; st >>= 1u) {
+        if (lane < st) {
+            [[unroll]] for (uint r = 0u; r < uint(ROWS); ++r) {
+                red[r * 64u + tid] += red[r * 64u + tid + st];
+            }
+        }
+        barrier();
+    }
+    if (lane == 0u) {
+        [[unroll]] for (uint r = 0u; r < uint(ROWS); ++r) {
+            const uint n = row0 + r;
+            if (n < pc.N) {
+                const float val = red[r * 64u + tid];
+                dst[pc.d_off + n] = val;
+                if (pc.ep_mode != 0u) {
+                    const float e = epi[pc.e_off + n];
+                    float o;
+                    if (pc.ep_mode == 1u) {
+                        o = val + e;
+                    } else if (pc.ep_mode == 2u) {
+                        o = (val / (1.0 + exp(-val))) * e;
+                    } else {
+                        o = (e / (1.0 + exp(-e))) * val;
+                    }
+                    eout[pc.eo_off + n] = o;
+                }
+            }
+        }
+    }
+}

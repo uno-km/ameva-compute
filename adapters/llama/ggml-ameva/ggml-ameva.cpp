@@ -78,6 +78,7 @@ static std::atomic<uint64_t> g_prof_enc_ns[GGML_OP_COUNT], g_prof_enc_nodes[GGML
 // pipeline creation (first use of every kernel, inside encoding); excluded from the encode figures above
 static std::atomic<uint64_t> g_prof_kcreate_ns{0}, g_prof_kcreate_n{0};
 static std::atomic<uint64_t> g_prof_fused{0}; // node pairs fused (ameva_find_fusion)
+static std::atomic<uint64_t> g_prof_mmvq{0};  // one-row MUL_MATs run by ameva_mmvq
 
 int64_t ggml_backend_ameva_get_fused_pair_count(void) {
     return (int64_t)g_prof_fused.load();
@@ -221,9 +222,9 @@ static void ameva_profile_report(void) {
                     g_prof_enc_ns[op].load() / 1e3 / n);
         }
     }
-    fprintf(stderr, "AMEVA_PROFILE mmq_mul_mat=%lld fused_pairs=%llu (AMEVA_FUSE=%s)\n",
-            (long long)ggml_backend_ameva_get_mmq_mul_mat_count(), (unsigned long long)g_prof_fused.load(),
-            ameva_fuse_enabled() ? "1" : "0");
+    fprintf(stderr, "AMEVA_PROFILE mmq_mul_mat=%lld mmvq_mul_mat=%llu fused_pairs=%llu (AMEVA_FUSE=%s)\n",
+            (long long)ggml_backend_ameva_get_mmq_mul_mat_count(), (unsigned long long)g_prof_mmvq.load(),
+            (unsigned long long)g_prof_fused.load(), ameva_fuse_enabled() ? "1" : "0");
     fprintf(stderr, "AMEVA_PROFILE repack=%s repacked_tensors=%lld repacked_mib=%.1f qmv_mul_mat=%lld\n",
             ameva_repack_enabled() ? "on" : "off", (long long)ggml_backend_ameva_get_repacked_tensor_count(),
             ggml_backend_ameva_get_repacked_bytes() / 1048576.0, (long long)ggml_backend_ameva_get_qmv_mul_mat_count());
@@ -255,6 +256,7 @@ static char s_device_name[128] = "?";
 static std::string s_device_key;
 static AcKernel* s_qgemm[AMEVA_QGEMM_VARIANT_COUNT] = {};
 static AcKernel* s_mmq[AMEVA_MMQ_VARIANT_COUNT] = {};
+static AcKernel* s_mmvq[AMEVA_MMVQ_VARIANT_COUNT] = {};
 static AcKernel* s_fa[AMEVA_FA_VARIANT_COUNT] = {};
 static AcKernel* s_ops[AMEVA_K_COUNT] = {};
 static AcBuffer* s_status = nullptr; // [0] out-of-range index count, [1] lowest offending node
@@ -547,6 +549,28 @@ static int ameva_mmq_find(enum ggml_type type) {
     return -1;
 }
 
+// ameva_mmvq variant idx (weight type, weight rows per lane group)
+static AcKernel* ameva_mmvq_kernel(int idx) {
+    static char names[AMEVA_MMVQ_VARIANT_COUNT][40];
+    std::lock_guard<std::mutex> lock(s_mutex);
+    if (!s_mmvq[idx] && s_ctx) {
+        const AmevaMmvqVariant& v = kAmevaMmvqVariants[idx];
+        snprintf(names[idx], sizeof(names[idx]), "ameva_mmvq_%s_r%u", v.type_name, v.rows);
+        s_mmvq[idx] = ameva_make_kernel(names[idx], v.spirv, v.spirv_bytes, v.spirv_sha256, AMEVA_MMVQ_BINDINGS,
+                                        AMEVA_MMVQ_PUSH_CONSTANT_BYTES, AMEVA_MMVQ_LOCAL_SIZE_X);
+    }
+    return s_mmvq[idx];
+}
+
+static int ameva_mmvq_find(enum ggml_type type, uint32_t rows) {
+    const char* tn = ggml_type_name(type);
+    if (!tn) return -1;
+    for (int i = 0; i < AMEVA_MMVQ_VARIANT_COUNT; ++i) {
+        if (kAmevaMmvqVariants[i].rows == rows && strcmp(kAmevaMmvqVariants[i].type_name, tn) == 0) return i;
+    }
+    return -1;
+}
+
 static AcKernel* ameva_fa_kernel(int idx) {
     static char names[AMEVA_FA_VARIANT_COUNT][40];
     std::lock_guard<std::mutex> lock(s_mutex);
@@ -675,6 +699,13 @@ void ggml_backend_ameva_teardown(void) {
         }
     }
     for (AcKernel*& k : s_mmq) {
+        if (k) {
+            ac_runtime_kernel_destroy(k);
+            k = nullptr;
+            ameva_increment_kernel_destroy_count();
+        }
+    }
+    for (AcKernel*& k : s_mmvq) {
         if (k) {
             ac_runtime_kernel_destroy(k);
             k = nullptr;
@@ -1113,7 +1144,13 @@ struct AmevaRecorder {
     int64_t mul_mat_nodes = 0;    // counted once the graph completed
     int64_t qmv_nodes = 0;
     int64_t mmq_nodes = 0;
+    int64_t mmvq_nodes = 0;
     int64_t fused_pairs = 0;      // node pairs computed by one dispatch sequence (ameva_find_fusion)
+    // The activation row whose int8 form (ameva_quant_a8) is in the scratch buffer, for the ameva_mmvq products that
+    // follow with the same src1 (Q, K, V share theirs, gate and up too). Cleared by a write to the scratch buffer or
+    // to the row itself (ameva_record).
+    const struct ggml_tensor* a8_src = nullptr;
+    AmevaRange a8_range = { nullptr, 0, 0 };
     bool profile_kinds = false;   // AMEVA_PROFILE=2: remember the op kind of every dispatch
     uint16_t kind = 0;
     std::vector<uint16_t> kinds;
@@ -1154,6 +1191,12 @@ static const char* ameva_record(AmevaRecorder& rec, AcKernel* kernel, const Amev
     }
     for (int i = 0; i < nreads; ++i) rec.read.push_back({reads[i].key, reads[i].lo, reads[i].hi});
     for (int i = 0; i < nwrites; ++i) rec.written.push_back({writes[i].key, writes[i].lo, writes[i].hi});
+    for (int i = 0; i < nwrites && rec.a8_src; ++i) {
+        if (writes[i].key == s_scratch ||
+            (writes[i].key == rec.a8_range.buf && writes[i].lo < rec.a8_range.hi && rec.a8_range.lo < writes[i].hi)) {
+            rec.a8_src = nullptr;
+        }
+    }
     rec.dispatches++;
     if (rec.profile_kinds) rec.kinds.push_back(rec.kind);
     rec.mac_since_flush += mac;
@@ -1356,22 +1399,181 @@ static const char* enc_mul_mat_mmq(AmevaRecorder& rec, const struct ggml_tensor*
     return nullptr;
 }
 
+// MMVQ (shaders/ameva_mmvq.comp): token-generation MUL_MAT on a repacked weight with int8 activations and packed
+// integer dot products, as ameva_mmq does for prompt-sized products. It is one more family of token-generation GEMV
+// layouts (weight rows per lane group x lanes per weight row), measured with the ameva_qmv and mali_qmv layouts per
+// device and weight shape (layout selection below). Its results are not those of the f32 layouts bit for bit: the
+// activations are rounded to int8 per 32 elements (|error| <= d_a / 2 per element; the CPU backend rounds them to
+// q8_0 / q8_K as well).
+//   AMEVA_MMVQ unset or "auto"  measured where the device offers VK_KHR_shader_integer_dot_product; a layout of this
+//                 family is chosen for a shape when it is more than kMmvqTuneMargin faster than the best f32 layout
+//   AMEVA_MMVQ=0  never
+//   AMEVA_MMVQ=1  every one-row MUL_MAT on a repacked weight, nothing measured: AMEVA_MMVQ_ROWS=4|2|1 (default 4) x
+//                 AMEVA_MMVQ_TPR=1|2|4|8|16|32|64 (default 32); abort when the device lacks the extension
+// Token generation, 64 tokens, t/s (2026-10-04; three alternating rounds, five on the Galaxy S21): the build before
+// (13 f32 layouts) -> 22 f32 layouts (lanes per row 4, 2, 1 added) -> with the ameva_mmvq layouts:
+//   Mali-G68 r38p1 (Galaxy A35)          Qwen2.5-0.5B 12.3-12.7 -> 14.5-14.6 -> 19.0, Llama-3.2-1B 6.9-7.4 -> 7.1-7.5 -> 11.9
+//   Adreno 650, Turnip (Galaxy S20)      Qwen 25.7-26.0 -> 27.0-27.1 -> 32.6-32.9, Llama 13.5 -> 13.5 -> 18.8 (587 MHz)
+//   Adreno 830 (Galaxy S25, 525 MHz)     Llama 30.9 -> 30.8-31.1 -> 34.3-35.0
+//   Mali-G68 r32p1 (Galaxy A53), Mali-G78 r38p0 (Galaxy S21): no VK_KHR_shader_integer_dot_product; the added f32
+//   layouts gave 13.7 -> 14.4 and 6.3 -> 7.0 on the A53 and no difference on the S21 (22.1-22.8, 12.0-13.2).
+// On the A35 the fastest ameva_mmvq layout was 1 row x 4 lanes for most shapes and took 0.43 to 0.77 of the fastest
+// f32 layout's GPU time (q4_K 896x4864: 244 against 562 us); on the S25 it was chosen for 4 of 14 shapes.
+// CPU-relative accuracy with these layouts (tests/ameva_llm_parity.cpp, mean KL divergence, gate 0.01): Galaxy S25
+// 2.56e-3 / 2.71e-3 / 6.06e-3, Galaxy S20 3.12e-3 / 2.86e-3 / 6.36e-3 (Qwen2.5-0.5B / Llama-3.2-1B / Gemma-2-2B).
+enum { AMEVA_MMVQ_OFF = 0, AMEVA_MMVQ_FORCED = 1, AMEVA_MMVQ_AUTO = 2 };
+struct AmevaMmvqPolicy {
+    int mode;
+    uint32_t rows, tpr; // AMEVA_MMVQ_FORCED: the layout
+};
+
+static const AmevaMmvqPolicy& ameva_mmvq_policy(void) {
+    static const AmevaMmvqPolicy policy = [] {
+        AmevaMmvqPolicy p = { AMEVA_MMVQ_AUTO, 4, 32 };
+        const char* e = getenv("AMEVA_MMVQ");
+        if (e && *e && strcmp(e, "auto") != 0) {
+            if (!strcmp(e, "0")) p.mode = AMEVA_MMVQ_OFF;
+            else if (!strcmp(e, "1")) p.mode = AMEVA_MMVQ_FORCED;
+            else GGML_ABORT("ggml-ameva: AMEVA_MMVQ must be auto, 0 or 1 (got \"%s\")", e);
+        }
+        const char* r = getenv("AMEVA_MMVQ_ROWS");
+        const char* l = getenv("AMEVA_MMVQ_TPR");
+        if (r && !*r) r = nullptr;
+        if (l && !*l) l = nullptr;
+        if ((r || l) && p.mode != AMEVA_MMVQ_FORCED) {
+            GGML_ABORT("ggml-ameva: AMEVA_MMVQ_ROWS and AMEVA_MMVQ_TPR set the layout of AMEVA_MMVQ=1");
+        }
+        if (r) {
+            const long v = strtol(r, nullptr, 10);
+            if (v != 1 && v != 2 && v != 4) GGML_ABORT("ggml-ameva: AMEVA_MMVQ_ROWS must be 1, 2 or 4 (got \"%s\")", r);
+            p.rows = (uint32_t)v;
+        }
+        if (l) {
+            const long v = strtol(l, nullptr, 10);
+            if (v != 1 && v != 2 && v != 4 && v != 8 && v != 16 && v != 32 && v != 64) {
+                GGML_ABORT("ggml-ameva: AMEVA_MMVQ_TPR must be 1, 2, 4, 8, 16, 32 or 64 (got \"%s\")", l);
+            }
+            p.tpr = (uint32_t)v;
+        }
+        const bool supported = s_limits.integer_dot_product != 0;
+        if (p.mode == AMEVA_MMVQ_FORCED) {
+            if (!supported) {
+                GGML_ABORT("ggml-ameva: AMEVA_MMVQ=1 but the device does not offer VK_KHR_shader_integer_dot_product");
+            }
+            fprintf(stderr, "ggml-ameva: MMVQ on for every token-generation MUL_MAT (AMEVA_MMVQ=1): int8 activations, "
+                            "rows=%u tpr=%u, 4x8 packed accelerated: %s\n", p.rows, p.tpr,
+                    s_limits.integer_dot_product_accelerated ? "yes" : "no");
+        } else if (p.mode == AMEVA_MMVQ_AUTO && !supported) {
+            p.mode = AMEVA_MMVQ_OFF;
+            fprintf(stderr, "ggml-ameva: MMVQ layouts unavailable (no VK_KHR_shader_integer_dot_product): token "
+                            "generation runs the f32 GEMV layouts\n");
+        }
+        return p;
+    }();
+    return policy;
+}
+
+// One-row MUL_MAT with ameva_mmvq in the layout rows x tpr: ameva_quant_a8 writes the activation row to the scratch
+// buffer (int8 values at 0, scales and half sums after them) unless the row quantized last is this one, then
+// ameva_mmvq runs over the weight slices. `ep`: the fused consumer (as for ameva_qmv).
+static const char* enc_mul_mat_mmvq(AmevaRecorder& rec, const struct ggml_tensor* node, const AmevaEpilogue* ep,
+                                    uint32_t rows, uint32_t tpr) {
+    const struct ggml_tensor* src0 = node->src[0];
+    const struct ggml_tensor* src1 = node->src[1];
+    const struct ggml_tensor* base = ameva_repacked_base(src0);
+    const uint32_t K = (uint32_t)src0->ne[0], N = (uint32_t)src0->ne[1];
+    const uint32_t U = K / 32;
+    const int vi = ameva_mmvq_find(src0->type, rows);
+    AcKernel* kernel = vi >= 0 ? ameva_mmvq_kernel(vi) : nullptr;
+    AcKernel* quant = ameva_op_kernel(AMEVA_K_QUANT_A8);
+    if (!kernel || !quant) return "no ameva_mmvq / ameva_quant_a8 kernel";
+    AmevaRepackLayout L = {};
+    AmevaRepackRegions R = {};
+    if (!ameva_repack_layout(base->type, &L) || !ameva_repack_regions(base->type, base->ne[0], ggml_nrows(base), &R))
+        return "repacked weight without a layout";
+    const size_t row_bytes = ggml_row_size(src0->type, K);
+    const uint64_t first_row = (uint64_t)((const char*)src0->data - (const char*)base->data) / row_bytes;
+    if (!s_scratch || (uint64_t)U * kMmqUnitBytes > s_scratch_bytes) return "MMVQ scratch not reserved";
+    AmevaBind be = {}, beo = {};
+    if (ep) {
+        const char* ee = ameva_bind(ep->e, 4, &be);
+        if (!ee) ee = ameva_bind(ep->out, 4, &beo);
+        if (ee) return ee;
+    }
+    const uint64_t aq_bytes = (uint64_t)U * 32;
+    AmevaBind bs = {};
+    bs.b.buffer = s_scratch;
+    bs.b.offset = 0;
+    bs.b.range = std::min<uint64_t>(s_scratch_bytes, s_limits.max_storage_buffer_range) & ~3ull;
+    bs.key = s_scratch;
+    bs.lo = 0;
+    bs.hi = (uint64_t)U * kMmqUnitBytes;
+    const char* e = nullptr;
+    if (rec.a8_src != src1) {
+        AmevaBind b1;
+        e = ameva_bind_span(src1, 0, (uint64_t)K * 4, 4, &b1);
+        if (e) return e;
+        if (b1.elem % 4 != 0) return "activation offset not a multiple of 16 bytes";
+        const uint32_t pcq[6] = { 1u, K, b1.elem, K, 0u, (uint32_t)(aq_bytes / 8) };
+        const AcBufferBinding bindq[3] = { b1.b, bs.b, bs.b };
+        e = ameva_record(rec, quant, &b1, 1, &bs, 1, bindq, 3, pcq, sizeof(pcq), ameva_grid_1d(U, 64), (double)K);
+        if (e) return e;
+        rec.a8_src = src1; // after ameva_record: the write to the scratch buffer cleared the previous row
+        rec.a8_range = { b1.key, b1.lo, b1.hi };
+    }
+    const uint32_t rows_per_wg = (64u / tpr) * rows;
+    const uint64_t span = ameva_max_binding_span();
+    const uint32_t rows_per_slice = (uint32_t)std::max<uint64_t>(
+        1, std::min<uint64_t>({ (uint64_t)N, span / R.q_row, 65535ull * rows_per_wg }));
+    for (uint32_t n0 = 0; n0 < N; n0 += rows_per_slice) {
+        const uint32_t nc = std::min(rows_per_slice, N - n0);
+        const uint64_t row = first_row + n0;
+        AmevaBind w[3];
+        e = ameva_bind_span(base, R.q + row * R.q_row, (uint64_t)nc * R.q_row, L.qb == 8 ? 8 : 16, &w[0]);
+        if (!e) e = ameva_bind_span(base, R.s + row * R.s_row, (uint64_t)nc * R.s_row, 2, &w[2]);
+        if (!e) {
+            if (R.h_row) e = ameva_bind_span(base, R.h + row * R.h_row, (uint64_t)nc * R.h_row, L.hb == 8 ? 8 : 4, &w[1]);
+            else w[1] = w[2]; // no high bits: binding 1 is not read
+        }
+        AmevaBind bd;
+        if (!e) e = ameva_bind_span(node, (uint64_t)n0 * 4, (uint64_t)nc * 4, 4, &bd);
+        if (e) return e;
+        const uint32_t pc[12] = { K, nc, w[0].elem, R.h_row ? w[1].elem : 0u, w[2].elem * 2, 0u,
+                                  (uint32_t)(aq_bytes / 8), bd.elem, tpr, ep ? ep->mode : 0u,
+                                  ep ? be.elem + n0 : 0u, ep ? beo.elem + n0 : 0u };
+        const AcBufferBinding bind[8] = { w[0].b, w[1].b, w[2].b, bs.b, bs.b, bd.b, ep ? be.b : bd.b,
+                                          ep ? beo.b : bd.b };
+        const AmevaBind reads[5] = { w[0], w[1], w[2], bs, be };
+        const AmevaBind writes[2] = { bd, beo };
+        e = ameva_record(rec, kernel, reads, ep ? 5 : 4, writes, ep ? 2 : 1, bind, 8, pc, sizeof(pc),
+                         { (nc + rows_per_wg - 1) / rows_per_wg, 1, 1 }, (double)nc * K);
+        if (e) return e;
+    }
+    rec.mul_mat_nodes++;
+    rec.qmv_nodes++;
+    rec.mmq_nodes++; // int8 activations: ameva_qmm_check compares with the int8-rounded reference
+    rec.mmvq_nodes++;
+    return nullptr;
+}
+
 // Lanes per weight row of ameva_qmv: 16 for every row length. Measured with Qwen2.5-0.5B Q4_K_M token generation
 // (2026-10-03): Adreno 650 per-kernel times with 8 / 16 / 64 lanes: q4_K 896x4864 336 / 356 / 611 us, q8_0
 // 151936x896 7.3 / 8.2 / 11.4 ms; Mali-G68 decode 14.0 / 14.5 t/s with 8 / 16 lanes, 14.1 with 64 lanes for
 // K = 4864. More lanes per row means fewer rows per workgroup and more activation reads per weight byte.
-// AMEVA_QMV_TPR=4|8|16|32|64 fixes it (kernel tuning). This is the prompt variant (8 activation rows per workgroup);
+// AMEVA_QMV_TPR=1|2|4|8|16|32|64 fixes it (kernel tuning). This is the prompt variant (8 activation rows per workgroup);
 // the one-row variant's layout is chosen per shape (token-generation GEMV selection below).
 static uint32_t ameva_env_qmv_tpr(void) {
     static const uint32_t forced = [] {
         const char* e = getenv("AMEVA_QMV_TPR");
         if (!e || !*e) return 0u;
+        if (!strcmp(e, "1")) return 1u;
+        if (!strcmp(e, "2")) return 2u;
         if (!strcmp(e, "4")) return 4u;
         if (!strcmp(e, "8")) return 8u;
         if (!strcmp(e, "16")) return 16u;
         if (!strcmp(e, "32")) return 32u;
         if (!strcmp(e, "64")) return 64u;
-        GGML_ABORT("ggml-ameva: AMEVA_QMV_TPR must be 4, 8, 16, 32 or 64 (got \"%s\")", e);
+        GGML_ABORT("ggml-ameva: AMEVA_QMV_TPR must be 1, 2, 4, 8, 16, 32 or 64 (got \"%s\")", e);
     }();
     return forced;
 }
@@ -1386,9 +1588,13 @@ static uint32_t ameva_qmv_tpr(uint32_t units) {
 // Token-generation GEMV: layout selection
 // =============================================================================
 // MUL_MAT of one activation row with a repacked weight runs one of these layouts:
-//   ameva_qmv  64 invocations per workgroup; `tpr` lanes per weight row (push constant) and `rows` weight rows per
-//              lane group (one module per value: 4, 2, 1), so (64 / tpr) * rows weight rows per workgroup
+//   ameva_qmv  64 invocations per workgroup; `tpr` lanes per weight row (push constant: 1 .. 64) and `rows` weight
+//              rows per lane group (one module per value: 4, 2, 1), so (64 / tpr) * rows weight rows per workgroup.
+//              With tpr 1 a lane computes whole rows and nothing is reduced.
 //   mali_qmv   32 lanes per weight row, 4 weight rows per workgroup of 128 invocations
+//   ameva_mmvq the ameva_qmv work split with int8 activations and integer dot products (AMEVA_MMVQ above); measured
+//              where the device offers them, and chosen only when more than kMmvqTuneMargin faster than the best of
+//              the two f32 families, because its results differ from theirs by the rounding of the activations
 // The fastest layout depends on the device, its driver and the shape, and what the driver reports does not decide
 // it: Mali-G68 (r32p1, r38p1) and Mali-G78 (r38p0) report the same subgroup size (16, fixed) and the same limits, yet
 // with Qwen2.5-0.5B Q4_K_M (2026-10-04) the fastest layout differed by device and shape. Large shapes: 4 rows x 8
@@ -1406,27 +1612,33 @@ static uint32_t ameva_qmv_tpr(uint32_t units) {
 // a low clock more often with the ameva_qmv layouts (22.4-22.7 t/s per GHz of mean clock, median 11.6-14.7 t/s) than
 // with mali_qmv (20.3 t/s per GHz, median 15.8 t/s): scripts/termux/lab/gpu_clock_ab.sh.
 //   AMEVA_QMV_KERNEL=auto|qmv|mali   auto (default): measured; qmv or mali: that family, nothing measured
-//   AMEVA_QMV_ROWS=1|2|4, AMEVA_QMV_TPR=4|8|16|32|64   fix the ameva_qmv layout (nothing measured; AMEVA_QMV_TPR
-//                                    also sets the prompt variant's lanes per row)
+//   AMEVA_QMV_ROWS=1|2|4, AMEVA_QMV_TPR=1|2|4|8|16|32|64   fix the ameva_qmv layout (nothing measured;
+//                                    AMEVA_QMV_TPR also sets the prompt variant's lanes per row)
 //   AMEVA_MALI_QMV=1|on|0|off        earlier name of AMEVA_QMV_KERNEL=mali|qmv
 //   AMEVA_QMV_TUNE=0                 nothing measured: the default layout (ameva_qmv, 4 rows, 16 lanes)
 //   AMEVA_QMV_TUNE_FILE=<path>|0     where measurements are kept (default $HOME/.cache/ameva/ggml-ameva-qmv-tune.txt);
 //                                    0: measured in every process and not kept
 struct AmevaQmvConfig {
-    uint8_t mali; // 1: mali_qmv; 0: ameva_qmv with rows and tpr
-    uint8_t rows; // ameva_qmv: weight rows per lane group (1, 2, 4)
-    uint8_t tpr;  // ameva_qmv: lanes per weight row (4 .. 64)
+    uint8_t mali; // 1: mali_qmv; 0: ameva_qmv or ameva_mmvq with rows and tpr
+    uint8_t rows; // weight rows per lane group (1, 2, 4)
+    uint8_t tpr;  // lanes per weight row (1 .. 64)
+    uint8_t i8;   // 1: ameva_mmvq (int8 activations, integer dot products)
 };
-static const AmevaQmvConfig kQmvDefault = { 0, 4, 16 };
-static const AmevaQmvConfig kQmvMali = { 1, 4, 32 };
+static const AmevaQmvConfig kQmvDefault = { 0, 4, 16, 0 };
+static const AmevaQmvConfig kQmvMali = { 1, 4, 32, 0 };
 static const double kQmvTuneMargin = 0.05;  // another layout replaces the default only when more than 5 % faster
+// an ameva_mmvq layout replaces the f32 layout chosen for a shape only when more than 10 % faster
+static const double kMmvqTuneMargin = 0.10;
+// Sanity bound of the measurement for an ameva_mmvq layout: |y - y_default| <= this * max|y_default| (the rounding
+// of a uniform activation row to int8 gives about 0.005). The exact bound per case is checked by ameva_qmm_check.
+static const double kMmvqTuneTolerance = 0.05;
 static const uint32_t kQmvTuneRows = 8192;  // weight rows timed (a larger weight: its first rows)
 static const uint32_t kQmvTuneRounds = 5;   // timed rounds after one warm-up round; the median of each layout counts
 // a layout's output may differ from the default's by summation order only: |y - y_default| <= this * max|y_default|
 static const double kQmvTuneTolerance = 1e-4;
 
 static bool qmv_config_eq(const AmevaQmvConfig& a, const AmevaQmvConfig& b) {
-    return a.mali == b.mali && (a.mali || (a.rows == b.rows && a.tpr == b.tpr));
+    return a.mali == b.mali && a.i8 == b.i8 && (a.mali || (a.rows == b.rows && a.tpr == b.tpr));
 }
 
 static uint32_t qmv_rows_per_wg(const AmevaQmvConfig& c) {
@@ -1435,7 +1647,7 @@ static uint32_t qmv_rows_per_wg(const AmevaQmvConfig& c) {
 
 static const char* qmv_config_str(const AmevaQmvConfig& c, char* buf, size_t n) {
     if (c.mali) snprintf(buf, n, "mali_qmv");
-    else snprintf(buf, n, "ameva_qmv rows=%u tpr=%u", (unsigned)c.rows, (unsigned)c.tpr);
+    else snprintf(buf, n, "%s rows=%u tpr=%u", c.i8 ? "ameva_mmvq" : "ameva_qmv", (unsigned)c.rows, (unsigned)c.tpr);
     return buf;
 }
 
@@ -1485,7 +1697,7 @@ static const AmevaQmvPolicy& ameva_qmv_policy(void) {
                        "AMEVA_QMV_KERNEL / AMEVA_MALI_QMV / AMEVA_QMV_ROWS / AMEVA_QMV_TPR fix");
         }
         if (is_mali) p.config = kQmvMali;
-        else if (p.forced) p.config = { 0, (uint8_t)(nrows ? nrows : 4u), (uint8_t)(tpr ? tpr : 16u) };
+        else if (p.forced) p.config = { 0, (uint8_t)(nrows ? nrows : 4u), (uint8_t)(tpr ? tpr : 16u), 0 };
         p.tune = !p.forced && !(tune && !strcmp(tune, "0"));
         char c[48];
         if (p.forced) {
@@ -1501,12 +1713,16 @@ static const AmevaQmvPolicy& ameva_qmv_policy(void) {
 }
 
 // one measured weight shape
+enum { AMEVA_I8_UNMEASURED = 0, AMEVA_I8_MEASURED = 1, AMEVA_I8_CHOSEN = 2 };
 struct AmevaQmvShape {
     int type;
     uint32_t K, N;
-    AmevaQmvConfig config;
-    double us, default_us; // median GPU time per dispatch of the chosen and of the default layout
+    AmevaQmvConfig config; // the f32 layout chosen (ameva_qmv or mali_qmv)
+    double us, default_us; // median GPU time per dispatch of `config` and of the default layout
     bool from_file;
+    uint8_t i8_state;      // AMEVA_I8_*: whether the ameva_mmvq layouts were measured, and whether `i8` replaces `config`
+    AmevaQmvConfig i8;     // the fastest ameva_mmvq layout (i8_state != AMEVA_I8_UNMEASURED)
+    double i8_us;          // its median GPU time per dispatch, the quantization of the activation row included
 };
 static std::mutex s_tune_mutex; // the measured shapes and the tune file
 static std::vector<AmevaQmvShape> s_qmv_shapes;
@@ -1514,11 +1730,16 @@ static bool s_tune_file_read = false;
 static std::string s_tune_path;
 
 // caller holds s_tune_mutex
-static const AmevaQmvShape* ameva_qmv_shape_find(int type, uint32_t K, uint32_t N) {
-    for (const AmevaQmvShape& s : s_qmv_shapes) {
+static AmevaQmvShape* ameva_qmv_shape_find(int type, uint32_t K, uint32_t N) {
+    for (AmevaQmvShape& s : s_qmv_shapes) {
         if (s.type == type && s.K == K && s.N == N) return &s;
     }
     return nullptr;
+}
+
+// Whether the ameva_mmvq layouts take part in the measurements of this process
+static bool ameva_mmvq_measured(void) {
+    return ameva_mmvq_policy().mode == AMEVA_MMVQ_AUTO && ameva_qmv_policy().tune;
 }
 
 // Is `node` a MUL_MAT that enc_mul_mat runs with the one-row GEMV on a repacked weight?
@@ -1532,6 +1753,11 @@ static bool ameva_qmv_one_row(const struct ggml_tensor* node) {
 
 // Layout of a one-row MUL_MAT; false when the shape should have been measured (ameva_qmv_tune_graph) and was not
 static bool ameva_qmv_choice(const struct ggml_tensor* node, AmevaQmvConfig* out) {
+    const AmevaMmvqPolicy& mp = ameva_mmvq_policy();
+    if (mp.mode == AMEVA_MMVQ_FORCED) {
+        *out = { 0, (uint8_t)mp.rows, (uint8_t)mp.tpr, 1 };
+        return true;
+    }
     const AmevaQmvPolicy& p = ameva_qmv_policy();
     if (!p.tune) {
         *out = p.config;
@@ -1541,18 +1767,30 @@ static bool ameva_qmv_choice(const struct ggml_tensor* node, AmevaQmvConfig* out
     std::lock_guard<std::mutex> lock(s_tune_mutex);
     const AmevaQmvShape* s = ameva_qmv_shape_find((int)src0->type, (uint32_t)src0->ne[0], (uint32_t)src0->ne[1]);
     if (!s) return false;
-    *out = s->config;
+    const bool with_i8 = mp.mode == AMEVA_MMVQ_AUTO;
+    if (with_i8 && s->i8_state == AMEVA_I8_UNMEASURED) return false;
+    *out = with_i8 && s->i8_state == AMEVA_I8_CHOSEN ? s->i8 : s->config;
     return true;
 }
 
+// Scratch bytes of one-row MUL_MAT `node` when it runs ameva_mmvq (its quantized activation row), otherwise 0
+static uint64_t ameva_mmvq_scratch_bytes(const struct ggml_tensor* node) {
+    AmevaQmvConfig c;
+    if (!ameva_qmv_one_row(node) || !ameva_qmv_choice(node, &c) || !c.i8) return 0;
+    return (uint64_t)(node->src[0]->ne[0] / 32) * kMmqUnitBytes;
+}
+
 // Kernel build of a weight type: SPIR-V SHA-256 prefixes of its three one-row ameva_qmv modules (rows 4, 2, 1; 7 hex
-// digits each) and of its mali_qmv module (16 hex digits); "-" where there is no kernel
-static void ameva_qmv_kernel_ids(int type, char qmv[24], char mali[24]) {
+// digits each), of its mali_qmv module (16 hex digits) and of its three ameva_mmvq modules (7 hex digits each); "-"
+// where there is no kernel
+static void ameva_qmv_kernel_ids(int type, char qmv[24], char mali[24], char mmvq[24]) {
     static const uint32_t kRows[3] = { 4, 2, 1 };
-    int n = 0;
+    int n = 0, m = 0;
     for (uint32_t r : kRows) {
         const int vi = ameva_qmv_find((enum ggml_type)type, 1, r);
         n += snprintf(qmv + n, 24 - (size_t)n, "%.7s", vi >= 0 ? kAmevaQmvVariants[vi].spirv_sha256 : "-");
+        const int qi = ameva_mmvq_find((enum ggml_type)type, r);
+        m += snprintf(mmvq + m, 24 - (size_t)m, "%.7s", qi >= 0 ? kAmevaMmvqVariants[qi].spirv_sha256 : "-");
     }
     const int mvi = ameva_mali_qmv_find((enum ggml_type)type);
     snprintf(mali, 24, "%.16s", mvi >= 0 ? kAmevaMaliQmvVariants[mvi].spirv_sha256 : "-");
@@ -1578,8 +1816,9 @@ static std::string ameva_qmv_tune_path(void) {
     return std::string(home) + "/.cache/ameva/ggml-ameva-qmv-tune.txt";
 }
 
-// Tune file: line 1 "ggml-ameva-qmv-tune 1", line 2 "device <s_device_key> <device name>", then one line per shape:
-// <type> <K> <N> <ameva_qmv SPIR-V id> <mali_qmv SPIR-V id> <mali> <rows> <tpr> <us> <default us>.
+// Tune file: line 1 "ggml-ameva-qmv-tune 2", line 2 "device <s_device_key> <device name>", then one line per shape:
+// <type> <K> <N> <ameva_qmv SPIR-V id> <mali_qmv SPIR-V id> <ameva_mmvq SPIR-V id> <mali> <rows> <tpr> <us>
+// <default us> <i8 state> <i8 rows> <i8 tpr> <i8 us>  (i8 state: AMEVA_I8_*).
 // Read once (caller holds s_tune_mutex). A file of another device, driver or format, or one that does not parse, is
 // not used (said once; rewritten after the next measurement); lines of other kernel builds are skipped.
 static void ameva_qmv_tune_file_read(void) {
@@ -1602,7 +1841,7 @@ static void ameva_qmv_tune_file_read(void) {
     while (!bad && fgets(line, sizeof(line), f)) {
         ++ln;
         if (ln == 1) {
-            if (strcmp(line, "ggml-ameva-qmv-tune 1\n") != 0) bad = "unknown format";
+            if (strcmp(line, "ggml-ameva-qmv-tune 2\n") != 0) bad = "another format";
             continue;
         }
         if (ln == 2) {
@@ -1611,27 +1850,30 @@ static void ameva_qmv_tune_file_read(void) {
             else if (s_device_key != key) bad = "another device or driver";
             continue;
         }
-        char tn[24], qs[24], ms[24];
-        unsigned K = 0, N = 0, mali = 0, rows = 0, tpr = 0;
-        double us = 0, dus = 0;
-        if (sscanf(line, "%23s %u %u %23s %23s %u %u %u %lf %lf", tn, &K, &N, qs, ms, &mali, &rows, &tpr, &us, &dus) != 10) {
+        char tn[24], qs[24], ms[24], vs[24];
+        unsigned K = 0, N = 0, mali = 0, rows = 0, tpr = 0, i8s = 0, i8r = 0, i8t = 0;
+        double us = 0, dus = 0, i8us = 0;
+        if (sscanf(line, "%23s %u %u %23s %23s %23s %u %u %u %lf %lf %u %u %u %lf", tn, &K, &N, qs, ms, vs, &mali, &rows,
+                   &tpr, &us, &dus, &i8s, &i8r, &i8t, &i8us) != 15) {
             bad = "malformed line";
             break;
         }
         const int type = ameva_type_from_name(tn);
-        const bool rows_ok = rows == 1 || rows == 2 || rows == 4;
-        const bool tpr_ok = tpr == 4 || tpr == 8 || tpr == 16 || tpr == 32 || tpr == 64;
-        if (type < 0 || K == 0 || N == 0 || K % 32 != 0 || mali > 1 || (!mali && (!rows_ok || !tpr_ok))) {
+        const auto rows_ok = [](unsigned r) { return r == 1 || r == 2 || r == 4; };
+        const auto tpr_ok = [](unsigned l) { return l == 1 || l == 2 || l == 4 || l == 8 || l == 16 || l == 32 || l == 64; };
+        if (type < 0 || K == 0 || N == 0 || K % 32 != 0 || mali > 1 || (!mali && (!rows_ok(rows) || !tpr_ok(tpr))) ||
+            i8s > AMEVA_I8_CHOSEN || (i8s != AMEVA_I8_UNMEASURED && (!rows_ok(i8r) || !tpr_ok(i8t)))) {
             bad = "invalid entry";
             break;
         }
-        char cq[24], cm[24];
-        ameva_qmv_kernel_ids(type, cq, cm);
-        if (strcmp(cq, qs) != 0 || strcmp(cm, ms) != 0) {
+        char cq[24], cm[24], cv[24];
+        ameva_qmv_kernel_ids(type, cq, cm, cv);
+        if (strcmp(cq, qs) != 0 || strcmp(cm, ms) != 0 || strcmp(cv, vs) != 0) {
             ++stale; // measured with other kernels
             continue;
         }
-        AmevaQmvShape s = { type, K, N, mali ? kQmvMali : AmevaQmvConfig{ 0, (uint8_t)rows, (uint8_t)tpr }, us, dus, true };
+        AmevaQmvShape s = { type, K, N, mali ? kQmvMali : AmevaQmvConfig{ 0, (uint8_t)rows, (uint8_t)tpr, 0 }, us, dus,
+                            true, (uint8_t)i8s, AmevaQmvConfig{ 0, (uint8_t)i8r, (uint8_t)i8t, 1 }, i8us };
         got.push_back(s);
     }
     const bool read_error = ferror(f) != 0;
@@ -1650,14 +1892,15 @@ static void ameva_qmv_tune_file_read(void) {
 // caller holds s_tune_mutex
 static void ameva_qmv_tune_file_write(void) {
     if (s_tune_path.empty()) return;
-    std::string out = "ggml-ameva-qmv-tune 1\ndevice " + s_device_key + " " + s_device_name + "\n";
-    char line[256];
+    std::string out = "ggml-ameva-qmv-tune 2\ndevice " + s_device_key + " " + s_device_name + "\n";
+    char line[320];
     for (const AmevaQmvShape& s : s_qmv_shapes) {
-        char qs[24], ms[24];
-        ameva_qmv_kernel_ids(s.type, qs, ms);
-        snprintf(line, sizeof(line), "%s %u %u %s %s %u %u %u %.3f %.3f\n", ggml_type_name((enum ggml_type)s.type),
-                 s.K, s.N, qs, ms, (unsigned)s.config.mali, (unsigned)s.config.rows, (unsigned)s.config.tpr, s.us,
-                 s.default_us);
+        char qs[24], ms[24], vs[24];
+        ameva_qmv_kernel_ids(s.type, qs, ms, vs);
+        snprintf(line, sizeof(line), "%s %u %u %s %s %s %u %u %u %.3f %.3f %u %u %u %.3f\n",
+                 ggml_type_name((enum ggml_type)s.type), s.K, s.N, qs, ms, vs, (unsigned)s.config.mali,
+                 (unsigned)s.config.rows, (unsigned)s.config.tpr, s.us, s.default_us, (unsigned)s.i8_state,
+                 (unsigned)s.i8.rows, (unsigned)s.i8.tpr, s.i8_us);
         out += line;
     }
     if (!ameva_write_file(s_tune_path, out.data(), out.size())) {
@@ -1689,9 +1932,21 @@ static const char* ameva_qmv_tune_shape(const struct ggml_tensor* node, AmevaQmv
     };
     std::vector<Cand> cands;
     char cs[48];
+    // ameva_mmvq layouts and, before them in every round, the quantization of the activation row
+    const bool with_i8 = ameva_mmvq_measured();
+    AcKernel* quant = with_i8 ? ameva_op_kernel(AMEVA_K_QUANT_A8) : nullptr;
+    if (with_i8 && !quant) return "no ameva_quant_a8 kernel for the ameva_mmvq layouts";
     auto add = [&](const AmevaQmvConfig& c) {
-        const int vi = c.mali ? -1 : ameva_qmv_find(src0->type, 1, c.rows);
-        AcKernel* k = c.mali ? ameva_mali_qmv_kernel(mvi) : vi >= 0 ? ameva_qmv_kernel(vi) : nullptr;
+        AcKernel* k = nullptr;
+        if (c.mali) {
+            k = ameva_mali_qmv_kernel(mvi);
+        } else if (c.i8) {
+            const int vi = ameva_mmvq_find(src0->type, c.rows);
+            k = vi >= 0 ? ameva_mmvq_kernel(vi) : nullptr;
+        } else {
+            const int vi = ameva_qmv_find(src0->type, 1, c.rows);
+            k = vi >= 0 ? ameva_qmv_kernel(vi) : nullptr;
+        }
         if (k) cands.push_back({ c, k, 0.0, true });
         else if (!cands.empty())
             fprintf(stderr, "ggml-ameva: WARNING: GEMV layout %s left out: kernel creation failed\n",
@@ -1700,14 +1955,19 @@ static const char* ameva_qmv_tune_shape(const struct ggml_tensor* node, AmevaQmv
     };
     if (!add(kQmvDefault)) return "default ameva_qmv kernel unavailable";
     static const uint8_t kRows[3] = { 4, 2, 1 };
-    static const uint8_t kTpr[4] = { 16, 8, 32, 64 };
+    static const uint8_t kTpr[7] = { 16, 8, 32, 64, 4, 2, 1 };
     for (uint8_t r : kRows) {
         for (uint8_t t : kTpr) {
-            const AmevaQmvConfig c = { 0, r, t };
+            const AmevaQmvConfig c = { 0, r, t, 0 };
             if (!qmv_config_eq(c, kQmvDefault)) add(c);
         }
     }
     if (mvi >= 0) add(kQmvMali);
+    if (with_i8) {
+        for (uint8_t r : kRows) {
+            for (uint8_t t : kTpr) add({ 0, r, t, 1 });
+        }
+    }
     const uint32_t nc = (uint32_t)cands.size();
 
     // the first rows of the weight, within one binding per region and 65535 workgroups of one row
@@ -1724,7 +1984,8 @@ static const char* ameva_qmv_tune_shape(const struct ggml_tensor* node, AmevaQmv
     }
     if (e) return e;
 
-    // one host-mapped buffer: the activation row, then one output range per layout (aligned binding offsets)
+    // one host-mapped buffer: the activation row, its int8 form (ameva_mmvq layouts), then one output range per
+    // layout (aligned binding offsets)
     struct Owned {
         AcBuffer* buf = nullptr;
         ~Owned() {
@@ -1737,7 +1998,10 @@ static const char* ameva_qmv_tune_shape(const struct ggml_tensor* node, AmevaQmv
     const uint64_t align = s_limits.min_storage_buffer_offset_alignment;
     const uint64_t a_bytes = ((uint64_t)K * 4 + align - 1) & ~(align - 1);
     const uint64_t d_bytes = ((uint64_t)nt * 4 + align - 1) & ~(align - 1);
-    const uint64_t size = a_bytes + d_bytes * nc;
+    const uint32_t U = K / 32;
+    const uint64_t q_bytes = with_i8 ? (((uint64_t)U * kMmqUnitBytes + align - 1) & ~(align - 1)) : 0;
+    const uint64_t o_base = a_bytes + q_bytes;
+    const uint64_t size = o_base + d_bytes * nc;
     const AcBufferDesc bdesc = { AC_ABI_VERSION, sizeof(AcBufferDesc), (size_t)size, AC_BUFFER_USAGE_STORAGE, 0 };
     if (ac_runtime_buffer_create(s_ctx, &bdesc, &owned.buf) != AC_SUCCESS) {
         owned.buf = nullptr;
@@ -1756,7 +2020,7 @@ static const char* ameva_qmv_tune_shape(const struct ggml_tensor* node, AmevaQmv
     }
     // outputs start as NaN: a layout that leaves rows unwritten fails the comparison
     for (uint32_t c = 0; c < nc; ++c) {
-        float* d = (float*)((char*)map + a_bytes + c * d_bytes);
+        float* d = (float*)((char*)map + o_base + c * d_bytes);
         for (uint32_t i = 0; i < nt; ++i) d[i] = NAN;
     }
     if (ac_runtime_buffer_flush(owned.buf, 0, size) != AC_SUCCESS) return "GEMV measurement buffer flush failed";
@@ -1764,8 +2028,10 @@ static const char* ameva_qmv_tune_shape(const struct ggml_tensor* node, AmevaQmv
     // Rounds of every layout in turn (a warm-up round first), one submission per round (bounded GPU time per
     // submission) and one barrier between dispatches so that each runs alone. A dispatch's time runs from the end of
     // the dispatch before it, so the first dispatch of a submission also counts the gap since the previous submission:
-    // each round therefore starts with an extra dispatch of the default layout whose time is not used.
-    const uint32_t per_round = nc + 1, nd = per_round * (1 + kQmvTuneRounds);
+    // each round therefore starts with an extra dispatch of the default layout whose time is not used. With ameva_mmvq
+    // layouts the second dispatch of a round quantizes the activation row; its time is added to theirs.
+    const uint32_t lead = with_i8 ? 2u : 1u;
+    const uint32_t per_round = nc + lead, nd = per_round * (1 + kQmvTuneRounds);
     const AcBatchDesc batch_desc = { AC_ABI_VERSION, sizeof(AcBatchDesc), nd,
                                      AC_BATCH_FLAG_EXPLICIT_BARRIERS | AC_BATCH_FLAG_DISPATCH_TIMESTAMPS };
     AcCommandBatch* batch = nullptr;
@@ -1777,15 +2043,30 @@ static const char* ameva_qmv_tune_shape(const struct ggml_tensor* node, AmevaQmv
     if (r != AC_SUCCESS) return "batch for the GEMV measurement could not be begun";
     for (uint32_t round = 0; round <= kQmvTuneRounds && r == AC_SUCCESS; ++round) {
         for (uint32_t j = 0; j < per_round && r == AC_SUCCESS; ++j) {
-            const uint32_t c = j == 0 ? 0 : j - 1; // j == 0: the lead dispatch of the round
+            const uint32_t c = j < lead ? 0 : j - lead; // j == 0: the lead dispatch of the round
             if (round || j) r = ac_runtime_batch_barrier(batch);
             if (r != AC_SUCCESS) break;
+            const AcBufferBinding ba = { owned.buf, 0, a_bytes }, bq = { owned.buf, a_bytes, q_bytes };
+            if (with_i8 && j == 1) {
+                const uint32_t pcq[6] = { 1u, K, 0u, K, 0u, U * 4u };
+                const AcBufferBinding bindq[3] = { ba, bq, bq };
+                r = ac_runtime_batch_dispatch_bindings(batch, quant, bindq, 3, pcq, sizeof(pcq), ameva_grid_1d(U, 64));
+                continue;
+            }
             const AmevaQmvConfig& cfg = cands[c].c;
-            const AcBufferBinding ba = { owned.buf, 0, a_bytes }, bd = { owned.buf, a_bytes + c * d_bytes, d_bytes };
+            const AcBufferBinding bd = { owned.buf, o_base + c * d_bytes, d_bytes };
+            const uint32_t rpw = qmv_rows_per_wg(cfg);
+            if (cfg.i8) {
+                const AcBufferBinding bind[8] = { w[0].b, w[1].b, w[2].b, bq, bq, bd, bd, bd };
+                const uint32_t pc[12] = { K, nt, w[0].elem, R.h_row ? w[1].elem : 0u, w[2].elem * 2, 0u, U * 4u, 0u,
+                                          (uint32_t)cfg.tpr, 0u, 0u, 0u };
+                r = ac_runtime_batch_dispatch_bindings(batch, cands[c].k, bind, 8, pc, sizeof(pc),
+                                                       { (nt + rpw - 1) / rpw, 1, 1 });
+                continue;
+            }
             const AcBufferBinding bind[7] = { w[0].b, w[1].b, w[2].b, ba, bd, ba, bd };
             const uint32_t pc[14] = { 1u, K, nt, w[0].elem, R.h_row ? w[1].elem : 0u, w[2].elem * 2, 0u, 0u, K, nt,
                                       cfg.mali ? 32u : (uint32_t)cfg.tpr, 0u, 0u, 0u };
-            const uint32_t rpw = qmv_rows_per_wg(cfg);
             r = ac_runtime_batch_dispatch_bindings(batch, cands[c].k, bind, 7, pc, sizeof(pc), { (nt + rpw - 1) / rpw, 1, 1 });
         }
         if (r == AC_SUCCESS) r = ac_runtime_batch_flush(batch); // bounded submissions
@@ -1812,47 +2093,68 @@ static const char* ameva_qmv_tune_shape(const struct ggml_tensor* node, AmevaQmv
     if (tr != AC_SUCCESS || got != nd) return "per-dispatch GPU times of the GEMV measurement unavailable";
     if (ac_runtime_buffer_invalidate(owned.buf, 0, size) != AC_SUCCESS) return "GEMV measurement buffer invalidate failed";
 
-    const float* ref = (const float*)((const char*)map + a_bytes);
+    const float* ref = (const float*)((const char*)map + o_base);
     double ref_max = 0.0;
     for (uint32_t i = 0; i < nt; ++i) {
         if (!std::isfinite(ref[i])) return "the default GEMV layout produced a non-finite value";
         ref_max = std::max(ref_max, (double)std::fabs(ref[i]));
     }
-    for (uint32_t c = 0; c < nc; ++c) {
-        std::vector<double> us(kQmvTuneRounds);
-        for (uint32_t round = 1; round <= kQmvTuneRounds; ++round) us[round - 1] = times[round * per_round + 1 + c] / 1e3;
+    std::vector<double> us(kQmvTuneRounds);
+    double quant_us = 0.0;
+    if (with_i8) {
+        for (uint32_t round = 1; round <= kQmvTuneRounds; ++round) us[round - 1] = times[round * per_round + 1] / 1e3;
         std::sort(us.begin(), us.end());
-        cands[c].median_us = us[kQmvTuneRounds / 2];
+        quant_us = us[kQmvTuneRounds / 2];
+    }
+    for (uint32_t c = 0; c < nc; ++c) {
+        for (uint32_t round = 1; round <= kQmvTuneRounds; ++round) us[round - 1] = times[round * per_round + lead + c] / 1e3;
+        std::sort(us.begin(), us.end());
+        cands[c].median_us = us[kQmvTuneRounds / 2] + (cands[c].c.i8 ? quant_us : 0.0);
         if (c == 0) continue;
-        const float* y = (const float*)((const char*)map + a_bytes + c * d_bytes);
+        const float* y = (const float*)((const char*)map + o_base + c * d_bytes);
         double diff = 0.0;
         bool finite = true;
         for (uint32_t i = 0; i < nt && finite; ++i) {
             finite = std::isfinite(y[i]);
             diff = std::max(diff, (double)std::fabs(y[i] - ref[i]));
         }
-        if (!finite || diff > kQmvTuneTolerance * ref_max + 1e-6) {
+        const double tol = cands[c].c.i8 ? kMmvqTuneTolerance : kQmvTuneTolerance;
+        if (!finite || diff > tol * ref_max + 1e-6) {
             cands[c].ok = false;
             fprintf(stderr, "ggml-ameva: WARNING: GEMV layout %s left out for %s %ux%u: its result differs from the "
-                            "default layout's (%s, max difference %.3g, max |y| %.3g)\n",
+                            "default layout's (%s, max difference %.3g, max |y| %.3g, allowed %.3g)\n",
                     qmv_config_str(cands[c].c, cs, sizeof(cs)), ggml_type_name(src0->type), N, K,
-                    finite ? "finite" : "non-finite values", diff, ref_max);
+                    finite ? "finite" : "non-finite values", diff, ref_max, tol * ref_max);
         }
     }
-    uint32_t best = 0;
+    uint32_t best = 0;      // fastest f32 layout
+    int best8 = -1;         // fastest ameva_mmvq layout
     for (uint32_t c = 1; c < nc; ++c) {
-        if (cands[c].ok && cands[c].median_us < cands[best].median_us) best = c;
+        if (!cands[c].ok) continue;
+        if (cands[c].c.i8) {
+            if (best8 < 0 || cands[c].median_us < cands[best8].median_us) best8 = (int)c;
+        } else if (cands[c].median_us < cands[best].median_us) {
+            best = c;
+        }
     }
     const uint32_t chosen = best != 0 && cands[best].median_us < (1.0 - kQmvTuneMargin) * cands[0].median_us ? best : 0;
-    *out = { (int)src0->type, K, N, cands[chosen].c, cands[chosen].median_us, cands[0].median_us, false };
+    const bool take8 = best8 >= 0 && cands[best8].median_us < (1.0 - kMmvqTuneMargin) * cands[chosen].median_us;
+    *out = { (int)src0->type, K, N, cands[chosen].c, cands[chosen].median_us, cands[0].median_us, false,
+             (uint8_t)(!with_i8 ? AMEVA_I8_UNMEASURED : take8 ? AMEVA_I8_CHOSEN : AMEVA_I8_MEASURED),
+             best8 >= 0 ? cands[best8].c : AmevaQmvConfig{ 0, 4, 32, 1 }, best8 >= 0 ? cands[best8].median_us : 0.0 };
     double mali_us = 0.0;
     for (const Cand& c : cands) {
         if (c.c.mali) mali_us = c.median_us;
     }
-    fprintf(stderr, "ggml-ameva: GEMV layout for %s %ux%u: %s, %.1f us (default %.1f us, mali_qmv %.1f us; %u layouts, "
-                    "%u of %u rows timed)\n",
-            ggml_type_name(src0->type), N, K, qmv_config_str(cands[chosen].c, cs, sizeof(cs)), cands[chosen].median_us,
-            cands[0].median_us, mali_us, nc, nt, N);
+    char c8[48] = "", i8note[96] = "";
+    if (with_i8 && best8 >= 0) {
+        snprintf(i8note, sizeof(i8note), ", %s %.1f us with %.1f us of quantization",
+                 qmv_config_str(cands[best8].c, c8, sizeof(c8)), cands[best8].median_us, quant_us);
+    }
+    fprintf(stderr, "ggml-ameva: GEMV layout for %s %ux%u: %s (f32 %s %.1f us, default %.1f us, mali_qmv %.1f us%s; "
+                    "%u layouts, %u of %u rows timed)\n",
+            ggml_type_name(src0->type), N, K, take8 ? "ameva_mmvq" : "f32", qmv_config_str(cands[chosen].c, cs, sizeof(cs)),
+            cands[chosen].median_us, cands[0].median_us, mali_us, i8note, nc, nt, N);
     if (ameva_profile_level() >= 1) {
         for (const Cand& c : cands) {
             fprintf(stderr, "AMEVA_PROFILE qmv_tune type=%s N=%u K=%u layout=\"%s\" median_us=%.2f%s\n",
@@ -1866,7 +2168,8 @@ static const char* ameva_qmv_tune_shape(const struct ggml_tensor* node, AmevaQmv
 // Before a graph is recorded: measures the layout of every one-row MUL_MAT weight shape not measured yet (once per
 // shape on a device; see above). Caller holds s_compute_mutex.
 static const char* ameva_qmv_tune_graph(struct ggml_cgraph* cgraph, int n_nodes) {
-    if (!ameva_qmv_policy().tune) return nullptr;
+    if (!ameva_qmv_policy().tune || ameva_mmvq_policy().mode == AMEVA_MMVQ_FORCED) return nullptr;
+    const bool with_i8 = ameva_mmvq_measured();
     std::lock_guard<std::mutex> lock(s_tune_mutex);
     ameva_qmv_tune_file_read();
     int measured = 0;
@@ -1874,10 +2177,13 @@ static const char* ameva_qmv_tune_graph(struct ggml_cgraph* cgraph, int n_nodes)
         const struct ggml_tensor* node = ggml_graph_node(cgraph, i);
         if (!ameva_qmv_one_row(node)) continue;
         const struct ggml_tensor* src0 = node->src[0];
-        if (ameva_qmv_shape_find((int)src0->type, (uint32_t)src0->ne[0], (uint32_t)src0->ne[1])) continue;
+        // a shape measured without the ameva_mmvq layouts (AMEVA_MMVQ=0 at the time) is measured again with them
+        AmevaQmvShape* have = ameva_qmv_shape_find((int)src0->type, (uint32_t)src0->ne[0], (uint32_t)src0->ne[1]);
+        if (have && !(with_i8 && have->i8_state == AMEVA_I8_UNMEASURED)) continue;
         AmevaQmvShape s = {};
         if (const char* e = ameva_qmv_tune_shape(node, &s)) return e;
-        s_qmv_shapes.push_back(s);
+        if (have) *have = s;
+        else s_qmv_shapes.push_back(s);
         ++measured;
     }
     if (measured) ameva_qmv_tune_file_write();
@@ -1888,10 +2194,16 @@ static const char* ameva_qmv_tune_graph(struct ggml_cgraph* cgraph, int n_nodes)
 static void ameva_qmv_layout_report(void) {
     std::lock_guard<std::mutex> lock(s_tune_mutex);
     char cs[48];
+    const bool with_i8 = ameva_mmvq_policy().mode == AMEVA_MMVQ_AUTO;
     for (const AmevaQmvShape& s : s_qmv_shapes) {
-        fprintf(stderr, "AMEVA_PROFILE qmv_layout type=%s N=%u K=%u layout=\"%s\" us=%.1f default_us=%.1f source=%s\n",
-                ggml_type_name((enum ggml_type)s.type), s.N, s.K, qmv_config_str(s.config, cs, sizeof(cs)), s.us,
-                s.default_us, s.from_file ? "tune_file" : "measured");
+        const bool take8 = with_i8 && s.i8_state == AMEVA_I8_CHOSEN;
+        char c8[48] = "-";
+        if (s.i8_state != AMEVA_I8_UNMEASURED) qmv_config_str(s.i8, c8, sizeof(c8));
+        fprintf(stderr, "AMEVA_PROFILE qmv_layout type=%s N=%u K=%u layout=\"%s\" us=%.1f default_us=%.1f f32=\"%s\" "
+                        "f32_us=%.1f i8=\"%s\" i8_us=%.1f source=%s\n",
+                ggml_type_name((enum ggml_type)s.type), s.N, s.K, take8 ? c8 : qmv_config_str(s.config, cs, sizeof(cs)),
+                take8 ? s.i8_us : s.us, s.default_us, qmv_config_str(s.config, cs, sizeof(cs)), s.us, c8, s.i8_us,
+                s.from_file ? "tune_file" : "measured");
     }
 }
 
@@ -1940,6 +2252,7 @@ static const char* enc_mul_mat(AmevaRecorder& rec, const struct ggml_tensor* nod
             // token generation: the layout chosen for this shape (measured, or fixed by the environment)
             AmevaQmvConfig cfg;
             if (!ameva_qmv_choice(node, &cfg)) return "token-generation GEMV layout of this weight shape not measured";
+            if (cfg.i8) return enc_mul_mat_mmvq(rec, node, ep, cfg.rows, cfg.tpr);
             if (cfg.mali) {
                 const int mvi = ameva_mali_qmv_find(src0->type);
                 kernel = mvi >= 0 ? ameva_mali_qmv_kernel(mvi) : nullptr;
@@ -2597,6 +2910,7 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
             uint32_t rows = 0;
             uint64_t bytes = 0;
             if (ameva_mmq_plan(node, &rows, &bytes)) scratch_need = std::max<uint64_t>(scratch_need, bytes);
+            else scratch_need = std::max<uint64_t>(scratch_need, ameva_mmvq_scratch_bytes(node));
         }
     }
     if (scratch_need && !ameva_scratch_reserve(scratch_need)) {
@@ -2653,7 +2967,7 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
                 AmevaQmvConfig qc;
                 if (ameva_qmv_one_row(node) && ameva_qmv_choice(node, &qc)) {
                     if (qc.mali) snprintf(layout, sizeof(layout), " mali");
-                    else snprintf(layout, sizeof(layout), " r%ut%u", (unsigned)qc.rows, (unsigned)qc.tpr);
+                    else snprintf(layout, sizeof(layout), " %sr%ut%u", qc.i8 ? "i8" : "", (unsigned)qc.rows, (unsigned)qc.tpr);
                 }
                 snprintf(kind, sizeof(kind), "MUL_MAT %s %s %s %lldx%lld%s", ggml_type_name(node->src[0]->type),
                          node->src[1]->ne[1] == 1 ? "M=1" : "M>1", path, (long long)node->src[0]->ne[1],
@@ -2791,6 +3105,7 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
     ameva_count_qmv_mul_mat(rec.qmv_nodes);
     ameva_count_mmq_mul_mat(rec.mmq_nodes);
     g_prof_fused.fetch_add((uint64_t)rec.fused_pairs);
+    g_prof_mmvq.fetch_add((uint64_t)rec.mmvq_nodes);
     ameva_pipeline_cache_checkpoint();
     return GGML_STATUS_SUCCESS;
 }
