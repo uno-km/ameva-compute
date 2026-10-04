@@ -62,20 +62,24 @@ evidence/poc_cuda_like/<timestamp>/
 
 ## 4. 현재 진행 중인 최우선 과제
 
-- **[최우선] ggml-ameva를 ameva-runtime llama 번들의 네이티브 GPU 경로로 내장** (사용자 결정 2026-10-04):
-  업스트림 llama.cpp Vulkan 백엔드에 의존하지 않는다. 구현과 실기기 검증을 마쳤고 게시하지 않았다
-  (ameva-runtime 브랜치 `feat/ggml-ameva-bundle`, 2.8.0 후보, 번들 핀 `d459daa9c55c...`, 백엔드 `c8aa8fd`).
-  판정 기준은 CPU 대비 KLD 평균 ≤ 0.01과 그리디 텍스트이며, 수치는 프롬프트 처리와 토큰 생성을 따로 기록한다.
-  남은 것: S20·S21의 스크래치 `-b vulkan` 재시험(측정 중 기기 세션 종료, 원인 미확인), A35 재시험,
-  `c8aa8fd`의 `test-backend-ops` 전체, 사용자의 게시 승인. 상태는 ameva-runtime `docs/handover/LATEST.md`.
-- **[다음] Mali 토큰 생성 속도**: 확장(`VK_KHR_shader_integer_dot_product`)이 없는 S21·A53에서 정수 내적을
-  32비트 정수 곱으로 구현한다(`ameva_mmq`·`ameva_mmvq` 대응). 수용 기준은 KLD 평균 ≤ 0.01.
-  근거와 나머지 과제(출력 투영, CPU 기록 시간, Mali의 1B 프롬프트)는 `docs/handover/LATEST.md` 4장.
-- 현재 기준선(2026-10-04, Qwen2.5-0.5B Q4_K_M, `-c 2048 -t 4`, CPU / GPU t/s):
-  프롬프트 약 370토큰 — S25 49 / 1066, S20 83 / 238, A35 109 / 190, A53 55 / 67, S21 119 / 225.
-  토큰 생성 64토큰 — S25 33~49 / 72~75, S20 28~31 / 32.7, A35 36.6 / 19.0, A53 22.6 / 14.4, S21 46.2 / 22.5.
+- **[최우선] 정수 내적 확장이 없는 Mali(S21·A53)용 정수 곱 에뮬레이션 커널** (사용자 결정 2026-10-04):
+  두 기기의 Vulkan 드라이버에는 `VK_KHR_shader_integer_dot_product`가 없어 `ameva_mmq`(프롬프트)와 `ameva_mmvq`(토큰 생성)가
+  동작하지 않는다. 32비트 정수 곱으로 같은 합을 구하는 커널을 추가해 Mali에서 GPU가 CPU를 넘는 것이 목표다.
+  수용 기준은 CPU 대비 KLD 평균 ≤ 0.01. 작업 브랜치 `perf/int-dot-emulation`, 설계와 진행은 `docs/handover/LATEST.md`.
+- **[다음]** 출력 투영(토큰 시간의 20~30 %), CPU 기록 시간(토큰당 2~9 ms), Mali의 1B 프롬프트(CPU의 0.6~0.8배).
+- 현재 기준선(2026-10-04, 백엔드 `c8aa8fd`, Qwen2.5-0.5B Q4_K_M, `-c 2048 -t 4`, CPU / GPU t/s):
+  프롬프트 약 370토큰 — S25 30~58 / 1010~1081, S20 60 / 181~197, A35 109~110 / 190, A53 55 / 67, S21 115~119 / 227.
+  토큰 생성 64토큰 — S25 16~49 / 36~77(부하 없을 때 33~49 / 72~75), S20 25~27 / 23.6~24.4(441 MHz; 587 MHz에서 28~31 / 32.6~32.9),
+  A35 35~37 / 21.5, A53 22~24 / 14.5, S21 46~47 / 23.0.
   측정 시 `Cpus_allowed_list`와 GPU 클럭(Adreno `max_gpuclk`)을 함께 기록하고, 한 세션에서 번갈아 측정한다
-  (조건에 따라 2~3배 차이). 도구는 ameva-runtime `tools/fleet/lab/perf_matrix.sh`.
+  (조건에 따라 2~3배 차이). 프롬프트 처리와 토큰 생성을 따로 보고한다. 도구는 ameva-runtime `tools/fleet/lab/perf_matrix.sh`.
+- 브랜치: 검증된 상태는 기본 브랜치 `amuda2-phase0-i2s-proof`와 `main`에 있다(2026-10-04, 같은 커밋).
+
+### 종결 기록: ggml-ameva를 ameva-runtime llama 번들의 GPU 경로로 내장 (2026-10-04 종결)
+- ameva-runtime 2.8.0으로 게시(PyPI, npm, GitHub `uno-km/ameva-runtime-releases` v2.8.0, 번들 핀 `d459daa9c55c...`, 백엔드 `c8aa8fd`).
+- 기본 경로: S25·S20·A35는 GPU, S21·A53은 CPU. 빌드는 `scripts/termux/build_runtime_backend.sh`.
+- 검증: 5대에서 텍스트와 KLD(기준 통과), 스크래치 설치·실행, `test-backend-ops` 1949/1949·전체 재배열 1692/1692, 공개 경로 설치(S25·S20·A35).
+- 절차와 상태는 ameva-runtime `docs/RELEASE_AND_MIGRATION.md`, `docs/handover/LATEST.md`.
 
 ### 종결 기록: 2026-10-03 개발분 실기기 검증 (2026-10-04 종결)
 - MMQ(`AMEVA_MMQ`): 확장을 제공하는 S25·S20·A35에서 f32 타일 커널 대비 프롬프트 2.6배·1.8배·2.0배. 지원 시 켜는 기본값 유지.
