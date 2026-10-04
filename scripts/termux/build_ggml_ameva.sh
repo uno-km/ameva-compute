@@ -55,6 +55,26 @@ clang++ -O2 -fPIC -shared -std=c++20 -Wall -Wextra -Wno-unused-parameter -Wno-mi
     -Wl,-soname,libggml-ameva.so -Wl,-rpath,'$ORIGIN' -Wl,--no-undefined -o "$OUT/libggml-ameva.so"
 echo "[build_ggml_ameva] built $OUT/libggml-ameva.so"
 
+# The Termux clang driver puts $PREFIX/lib in front of the -rpath given above. The plugin then looks for
+# libac_runtime.so.2 in $PREFIX/lib before its own directory and binds a copy that an earlier installation left there
+# (Galaxy S25, 2026-10-04: "dlopen failed: cannot locate symbol", AMEVA0 not registered when llama.cpp loaded the
+# plugin without LD_LIBRARY_PATH). $ORIGIN has to come first.
+TERMUX_LIB="${PREFIX:-/data/data/com.termux/files/usr}/lib"
+runpath="$(readelf -d "$OUT/libggml-ameva.so" | sed -n 's/.*(R\(UN\)\{0,1\}PATH).*\[\(.*\)\]/\2/p')"
+case "$runpath" in
+    '$ORIGIN'*) ;;
+    *)
+        if command -v patchelf >/dev/null 2>&1; then
+            patchelf --set-rpath "\$ORIGIN:$TERMUX_LIB" "$OUT/libggml-ameva.so"
+            echo "[build_ggml_ameva] RUNPATH: \$ORIGIN:$TERMUX_LIB (the linker had written: $runpath)"
+        elif [ -e "$TERMUX_LIB/libac_runtime.so.2" ]; then
+            die "RUNPATH is '$runpath' ($TERMUX_LIB before \$ORIGIN), patchelf is not installed, and $TERMUX_LIB/libac_runtime.so.2 exists: the plugin would bind that copy instead of $OUT/libac_runtime.so.2. Install patchelf (pkg install patchelf) or remove the copy."
+        else
+            echo "[build_ggml_ameva] WARNING: RUNPATH is '$runpath' and patchelf is not installed; a libac_runtime.so.2 placed in $TERMUX_LIB later would be bound before the one beside the plugin" >&2
+        fi
+        ;;
+esac
+
 # Load it the way llama.cpp will: the ABI check runs in ggml_backend_init, so a mismatch removes AMEVA0.
 if command -v llama-completion >/dev/null 2>&1; then
     # The check must run against the given ggml, not whichever libggml-base.so.0 is active. Only the ggml
