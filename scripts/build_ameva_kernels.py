@@ -95,7 +95,7 @@ QMV_UPL = os.environ.get("AMEVA_BUILD_QMV_UPL", "")
 OPS = ["binary", "unary", "glu", "rms_norm", "rope", "set_rows", "get_rows", "cpy", "fa_combine", "quant_a8"]
 # op kernels compiled from one source with defines, appended to enum AmevaOpKernelId: (kernel name, source, defines)
 OPS_DEFINED = [("set_rows_q8_0", "set_rows_q", ["QTYPE_Q8_0"]), ("set_rows_q4_0", "set_rows_q", ["QTYPE_Q4_0"]),
-               ("quant_a8u", "quant_a8", ["EMU"])]
+               ("quant_a8u", "quant_a8", ["EMU"]), ("rope_f16", "rope", ["F16"])]
 
 # FLASH_ATTN_EXT tiles: (DMAX, BQ, BK). 128 invocations per workgroup; shared memory per workgroup:
 # 64: 14.5 KiB, 128: 27.4 KiB, 256: 25.7 KiB

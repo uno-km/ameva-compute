@@ -1043,7 +1043,11 @@ const char* ameva_op_unsupported_reason(const struct ggml_tensor* op) {
             const int32_t* p = (const int32_t*)op->op_params;
             const int n_dims = p[1], mode = p[2];
             if (mode != 0 && mode != 2) return "rope mode other than normal/neox";
-            if (!is_f32(a) || !is_f32(op) || !ggml_are_same_shape(a, op)) return "rope on non-f32";
+            // f32, or f16 to f16: the KV-cache shift of llama.cpp rotates the stored keys of the f16 cache in place
+            // (ggml_rope_ext_inplace on a view of cache_k). Declining it does not move the node to the CPU: the
+            // tensor is pre-allocated in this backend's buffer and the scheduler aborts.
+            if (!((is_f32(a) && is_f32(op)) || (is_f16(a) && is_f16(op))) || !ggml_are_same_shape(a, op))
+                return "rope on other than f32 or f16";
             if (!pos || pos->type != GGML_TYPE_I32 || pos->ne[0] != a->ne[2] || !ggml_is_contiguous(pos))
                 return "rope positions not one i32 per row";
             // n_dims == 0 rotates nothing (every pair is copied). llama.cpp asks exactly that when it decides where
@@ -2532,13 +2536,14 @@ static const char* enc_rms_norm(AmevaRecorder& rec, const struct ggml_tensor* no
 
 static const char* enc_rope(AmevaRecorder& rec, const struct ggml_tensor* node) {
     const struct ggml_tensor *a = node->src[0], *pos = node->src[1], *ff = node->src[2];
-    AcKernel* kernel = ameva_op_kernel(AMEVA_K_ROPE);
+    const bool f16 = a->type == GGML_TYPE_F16; // shaders/ameva_rope.comp -DF16: offsets and strides in f16 elements
+    AcKernel* kernel = ameva_op_kernel(f16 ? AMEVA_K_ROPE_F16 : AMEVA_K_ROPE);
     if (!kernel) return "no ameva_rope kernel";
     AmevaBind ba, bp, bf, bd;
-    const char* e = ameva_bind(a, 4, &ba);
+    const char* e = ameva_bind(a, f16 ? 2 : 4, &ba);
     if (!e) e = ameva_bind(pos, 4, &bp);
     if (!e) e = ameva_bind(ff ? ff : pos, 4, &bf); // any valid range when there are no frequency factors
-    if (!e) e = ameva_bind(node, 4, &bd);
+    if (!e) e = ameva_bind(node, f16 ? 2 : 4, &bd);
     if (e) return e;
     const int32_t* p = (const int32_t*)node->op_params;
     const int n_dims = p[1], mode = p[2], n_ctx_orig = p[4];
