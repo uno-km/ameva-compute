@@ -90,6 +90,9 @@ MMVQE_TYPES = [t for t in QMV_TYPES if t[0] not in ("q8_0", "iq4_nl", "iq4_xs")]
 # units per lane and step of the token-generation variant: the shader default unless AMEVA_BUILD_QMV_UPL is set
 # (kernel tuning: builds that differ only in it)
 QMV_UPL = os.environ.get("AMEVA_BUILD_QMV_UPL", "")
+# kernel tuning: the token-generation variant with a part of its work removed (shaders/ameva_qmv.comp, ABLATE); the
+# kernels of such a build give wrong results
+QMV_ABLATE = os.environ.get("AMEVA_BUILD_QMV_ABLATE", "")
 
 # op kernel families, in the order of enum AmevaOpKernelId
 OPS = ["binary", "unary", "glu", "rms_norm", "rope", "set_rows", "get_rows", "cpy", "fa_combine", "quant_a8"]
@@ -229,6 +232,10 @@ def main():
                     if QMV_UPL not in ("1", "2", "4"):
                         fail("AMEVA_BUILD_QMV_UPL must be 1, 2 or 4 (got %r)" % QMV_UPL)
                     defs.append("UPL=%s" % QMV_UPL)
+                if cols == 1 and QMV_ABLATE:
+                    if QMV_ABLATE not in ("1", "2", "3"):
+                        fail("AMEVA_BUILD_QMV_ABLATE must be 1, 2 or 3 (got %r)" % QMV_ABLATE)
+                    defs.append("ABLATE=%s" % QMV_ABLATE)
                 data, rsize = compile_module(args, vsrc, defs, spv)
                 if rsize is not None and rsize != vpush:
                     fail("ameva_qmv %s: reflection says %d push-constant bytes, source %d" % (name, rsize, vpush))

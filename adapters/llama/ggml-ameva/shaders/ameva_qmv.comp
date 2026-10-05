@@ -125,9 +125,21 @@ void main() {
         [[unroll]] for (uint i = 0u; i < 8u; ++i) {
             a[i] = a4[ab + i];
         }
+#ifdef ABLATE
+        // Kernel tuning builds only (AMEVA_BUILD_QMV_ABLATE; the results are wrong by construction): the same loop
+        // with a part of the work removed. 1: the loads of the weights' Q words and of the activations, nothing
+        // decoded or multiplied; 2: the weights decoded and summed, no products; 3: the products with one undecoded
+        // word per unit in place of the 32 weights.
+        vec4 asum4 = a[0];
+        [[unroll]] for (uint i = 1u; i < 8u; ++i) {
+            asum4 += a[i];
+        }
+        const float asum = asum4.x + asum4.y + asum4.z + asum4.w;
+#endif
         [[unroll]] for (uint r = 0u; r < uint(ROWS); ++r) {
             const uint n = row0 + r;
             if (n < pc.N) {
+#if !defined(ABLATE)
                 vec4 w[8];
                 decode(pc.q_off + (n * U + u) * QPER, pc.h_off + n * U + u, pc.s_off + n * s_row + b * SB,
                        u - b * UPB, w);
@@ -136,6 +148,27 @@ void main() {
                     s += dot(w[i], a[i]);
                 }
                 acc[r] += s;
+#elif ABLATE == 1
+                const QVEC q = qv[pc.q_off + (n * U + u) * QPER];
+                acc[r] += float(q.x & 1u) + asum;
+#elif ABLATE == 2
+                vec4 w[8];
+                decode(pc.q_off + (n * U + u) * QPER, pc.h_off + n * U + u, pc.s_off + n * s_row + b * SB,
+                       u - b * UPB, w);
+                vec4 t = w[0];
+                [[unroll]] for (uint i = 1u; i < 8u; ++i) {
+                    t += w[i];
+                }
+                acc[r] += t.x + t.y + t.z + t.w + asum;
+#else
+                const QVEC q = qv[pc.q_off + (n * U + u) * QPER];
+                const vec4 wc = vec4(float(q.x & 0xFu));
+                float s = 0.0;
+                [[unroll]] for (uint i = 0u; i < 8u; ++i) {
+                    s += dot(wc, a[i]);
+                }
+                acc[r] += s;
+#endif
             }
         }
     }
