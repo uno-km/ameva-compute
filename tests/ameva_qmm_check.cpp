@@ -18,7 +18,8 @@
 // activations the same way (per row and 32 elements: d = amax / 127, q = round(x / d), ties to even); an element whose
 // x / d lies within 1e-4 of a rounding boundary may round either way on the GPU (Vulkan division is not correctly
 // rounded), so its |w| d is added to the allowed error. Weight decoding errors stay orders of magnitude above that.
-// With AMEVA_MMQ=1 every repacked case with at least 8 activation rows must take ameva_mmq.
+// With AMEVA_MMQ=1 every repacked case with at least 8 activation rows must take ameva_mmq, when the process has
+// that kernel for the weight type (ggml_backend_ameva_mmq_has_type: not q8_0 and iq4 with the emulated dot product).
 // Exit 0 only if every case passes and supports_op accepted every case.
 #include "ggml.h"
 #include "ggml-alloc.h"
@@ -150,7 +151,8 @@ static Result run_case(ggml_backend_t be, enum ggml_type type, int M, int N, int
     else if (d_qmv != (expect_repacked ? 1 : 0)) res.why = "qmv MUL_MAT count did not move as expected";
     else if (d_mmq != 0 && d_mmq != 1) res.why = "mmq MUL_MAT count moved by more than one";
     else if (res.mmq && !expect_repacked) res.why = "ameva_mmq ran on weights that are not repacked";
-    else if (mmq_required && expect_repacked && M >= 8 && !res.mmq) res.why = "AMEVA_MMQ=1 but ameva_mmq did not run";
+    else if (mmq_required && expect_repacked && M >= 8 && !res.mmq && ggml_backend_ameva_mmq_has_type(type))
+        res.why = "AMEVA_MMQ=1 but ameva_mmq did not run";
     if (!res.why) {
         // the buffer interface returns the ggml bytes that were uploaded, whatever the stored layout
         std::vector<uint8_t> back(wbytes);

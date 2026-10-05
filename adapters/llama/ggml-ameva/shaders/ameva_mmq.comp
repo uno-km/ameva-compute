@@ -1,7 +1,9 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_control_flow_attributes : require
+#ifndef EMU_DOT
 #extension GL_EXT_integer_dot_product : require
+#endif
 // AMEVA MMQ: ggml MUL_MAT (dst = src0^T x src1) for many activation rows (prompt processing) with integer dot
 // products: src0 stored in the AMEVA repacked layout (ggml-ameva-repack.h), src1 quantized per 32-element unit to
 // int8 by ameva_quant_a8 (d_a, q_a, sums of q_a per 16-element half).
@@ -21,6 +23,14 @@
 //         aq_off (uvec4), ad_off (uvec2), d_off, sd (floats)
 //   grid: (ceil(N / 64), ceil(M / 32))
 //   variants: -DTYPE_<T> (the 12 repacked types)
+//
+// -DEMU_DOT: the same sums without VK_KHR_shader_integer_dot_product, as in ameva_mmvq -DEMU_DOT: weight words are
+// staged as their two masked halves (bytes 0, 2 and bytes 1, 3 in 16-bit fields), the activations come from
+// ameva_quant_a8 -DEMU as unsigned bytes u = q + 128 in the matching two words, and a 4 x 4 block of the tile takes
+// two vector-by-scalar multiplications per activation row and word: (We * Ae_j + Wo * Ao_j) >> 16. The signed sum is
+// sum v q = sum v u - 128 sum v; 128 sum v is staged per weight row and half. For the weight types whose decode_i8
+// values are unsigned and at most 63 (not q8_0, iq4_nl, iq4_xs).
+//   binding 3: AQ as written by ameva_quant_a8 -DEMU (4 uvec4 per unit).
 
 layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
 
@@ -44,10 +54,22 @@ layout(push_constant) uniform PushConstants {
 #define HALF_SCALES // one scale and offset per 16-weight half
 #endif
 
+#if defined(EMU_DOT) && (defined(TYPE_Q8_0) || defined(TYPE_IQ4_NL) || defined(TYPE_IQ4_XS))
+#error "EMU_DOT needs unsigned decode_i8 values of at most 63"
+#endif
+
+#ifdef EMU_DOT
+shared uvec4 s_we[8u * (BN / 4u)];   // [w * 16 + n / 4][n % 4]: bytes 0 and 2 of word w of weight row n (16-bit fields)
+shared uvec4 s_wo[8u * (BN / 4u)];   // bytes 1 and 3
+shared vec4 s_wv[2u * (BN / 4u)];    // [h * 16 + n / 4][n % 4]: 128 * sum of the 16 values of half h of row n
+shared uvec4 s_ae[8u * (BM / 4u)];   // [w * 8 + m / 4][m % 4]: u2 | u0 << 16 of word w of activation row m
+shared uvec4 s_ao[8u * (BM / 4u)];   // u3 | u1 << 16
+#else
 shared uvec4 s_wq[8u * (BN / 4u)];   // [w * 16 + n / 4][n % 4]: word w of weight row n
+shared uvec4 s_aq[8u * (BM / 4u)];   // [w * 8 + m / 4][m % 4]: word w of activation row m
+#endif
 shared vec4 s_wsc[2u * (BN / 4u)];   // [h * 16 + n / 4][n % 4]: scale of half h of row n
 shared vec4 s_wmc[2u * (BN / 4u)];   // offsets
-shared uvec4 s_aq[8u * (BM / 4u)];   // [w * 8 + m / 4][m % 4]: word w of activation row m
 shared vec4 s_ad[BM / 4u];           // d_a of row m
 shared vec4 s_as[2u * (BM / 4u)];    // [h * 8 + m / 4][m % 4]: d_a * sum of q_a over half h
 
@@ -74,19 +96,44 @@ void main() {
             decode_i8(pc.q_off + (drow * U + u) * QPER, pc.h_off + drow * U + u, pc.s_off + drow * s_row + b * SB,
                       u - b * UPB, v, sc, mc);
             const uint c = t >> 2u, comp = t & 3u;
+#ifdef EMU_DOT
+            uint sv0 = 0u, sv1 = 0u;
+            [[unroll]] for (uint w = 0u; w < 4u; ++w) {
+                const uint we = v[w] & 0x00FF00FFu, wo = (v[w] >> 8u) & 0x00FF00FFu;
+                s_we[w * 16u + c][comp] = we;
+                s_wo[w * 16u + c][comp] = wo;
+                sv0 += we + wo;
+                const uint xe = v[w + 4u] & 0x00FF00FFu, xo = (v[w + 4u] >> 8u) & 0x00FF00FFu;
+                s_we[(w + 4u) * 16u + c][comp] = xe;
+                s_wo[(w + 4u) * 16u + c][comp] = xo;
+                sv1 += xe + xo;
+            }
+            s_wv[c][comp] = 128.0 * float((sv0 & 0xFFFFu) + (sv0 >> 16u));
+            s_wv[16u + c][comp] = 128.0 * float((sv1 & 0xFFFFu) + (sv1 >> 16u));
+#else
             [[unroll]] for (uint w = 0u; w < 8u; ++w) {
                 s_wq[w * 16u + c][comp] = v[w];
             }
+#endif
             s_wsc[c][comp] = sc.x;
             s_wsc[16u + c][comp] = sc.y;
             s_wmc[c][comp] = mc.x;
             s_wmc[16u + c][comp] = mc.y;
         } else {
             const uint r = t >> 1u, hh = t & 1u;
+#ifdef EMU_DOT
+            const uvec4 xe = aq[pc.aq_off + (qrow * U + u) * 4u + hh];
+            const uvec4 xo = aq[pc.aq_off + (qrow * U + u) * 4u + 2u + hh];
+            [[unroll]] for (uint c = 0u; c < 4u; ++c) {
+                s_ae[(4u * hh + c) * 8u + (r >> 2u)][r & 3u] = xe[c];
+                s_ao[(4u * hh + c) * 8u + (r >> 2u)][r & 3u] = xo[c];
+            }
+#else
             const uvec4 x = aq[pc.aq_off + (qrow * U + u) * 2u + hh];
             [[unroll]] for (uint c = 0u; c < 4u; ++c) {
                 s_aq[(4u * hh + c) * 8u + (r >> 2u)][r & 3u] = x[c];
             }
+#endif
             if (t < 32u) {
                 const uvec2 e = ad[pc.ad_off + drow_a * U + u];
                 const float da = uintBitsToFloat(e.x);
@@ -97,7 +144,43 @@ void main() {
         }
         barrier();
         const vec4 da = s_ad[tm];
-#if defined(HALF_SCALES)
+#if defined(EMU_DOT) && defined(HALF_SCALES)
+        [[unroll]] for (uint h = 0u; h < 2u; ++h) {
+            uvec4 i0 = uvec4(0u), i1 = uvec4(0u), i2 = uvec4(0u), i3 = uvec4(0u);
+            [[unroll]] for (uint w = 4u * h; w < 4u * h + 4u; ++w) {
+                const uvec4 We = s_we[w * 16u + tn], Wo = s_wo[w * 16u + tn];
+                const uvec4 Ae = s_ae[w * 8u + tm], Ao = s_ao[w * 8u + tm];
+                i0 += (We * Ae.x + Wo * Ao.x) >> 16u;
+                i1 += (We * Ae.y + Wo * Ao.y) >> 16u;
+                i2 += (We * Ae.z + Wo * Ao.z) >> 16u;
+                i3 += (We * Ae.w + Wo * Ao.w) >> 16u;
+            }
+            const vec4 sc = s_wsc[h * 16u + tn], mc = s_wmc[h * 16u + tn], wv = s_wv[h * 16u + tn];
+            const vec4 sa = s_as[h * 8u + tm];
+            acc0 += da.x * (sc * (vec4(i0) - wv)) + mc * sa.x;
+            acc1 += da.y * (sc * (vec4(i1) - wv)) + mc * sa.y;
+            acc2 += da.z * (sc * (vec4(i2) - wv)) + mc * sa.z;
+            acc3 += da.w * (sc * (vec4(i3) - wv)) + mc * sa.w;
+        }
+#elif defined(EMU_DOT)
+        {
+            uvec4 i0 = uvec4(0u), i1 = uvec4(0u), i2 = uvec4(0u), i3 = uvec4(0u);
+            [[unroll]] for (uint w = 0u; w < 8u; ++w) {
+                const uvec4 We = s_we[w * 16u + tn], Wo = s_wo[w * 16u + tn];
+                const uvec4 Ae = s_ae[w * 8u + tm], Ao = s_ao[w * 8u + tm];
+                i0 += (We * Ae.x + Wo * Ao.x) >> 16u;
+                i1 += (We * Ae.y + Wo * Ao.y) >> 16u;
+                i2 += (We * Ae.z + Wo * Ao.z) >> 16u;
+                i3 += (We * Ae.w + Wo * Ao.w) >> 16u;
+            }
+            const vec4 sc = s_wsc[tn], mc = s_wmc[tn], wv = s_wv[tn] + s_wv[16u + tn];
+            const vec4 sa = s_as[tm] + s_as[8u + tm];
+            acc0 += da.x * (sc * (vec4(i0) - wv)) + mc * sa.x;
+            acc1 += da.y * (sc * (vec4(i1) - wv)) + mc * sa.y;
+            acc2 += da.z * (sc * (vec4(i2) - wv)) + mc * sa.z;
+            acc3 += da.w * (sc * (vec4(i3) - wv)) + mc * sa.w;
+        }
+#elif defined(HALF_SCALES)
         [[unroll]] for (uint h = 0u; h < 2u; ++h) {
             ivec4 i0 = ivec4(0), i1 = ivec4(0), i2 = ivec4(0), i3 = ivec4(0);
             [[unroll]] for (uint w = 4u * h; w < 4u * h + 4u; ++w) {

@@ -256,6 +256,7 @@ static char s_device_name[128] = "?";
 static std::string s_device_key;
 static AcKernel* s_qgemm[AMEVA_QGEMM_VARIANT_COUNT] = {};
 static AcKernel* s_mmq[AMEVA_MMQ_VARIANT_COUNT] = {};
+static AcKernel* s_mmqe[AMEVA_MMQE_VARIANT_COUNT] = {};
 static AcKernel* s_mmvq[AMEVA_MMVQ_VARIANT_COUNT] = {};
 static AcKernel* s_mmvqe[AMEVA_MMVQE_VARIANT_COUNT] = {};
 static AcKernel* s_fa[AMEVA_FA_VARIANT_COUNT] = {};
@@ -529,25 +530,51 @@ static AcKernel* ameva_qgemm_kernel(int idx) {
     return s_qgemm[idx];
 }
 
-static AcKernel* ameva_mmq_kernel(int idx) {
-    static char names[AMEVA_MMQ_VARIANT_COUNT][40];
-    std::lock_guard<std::mutex> lock(s_mutex);
-    if (!s_mmq[idx] && s_ctx) {
-        const AmevaMmqVariant& v = kAmevaMmqVariants[idx];
-        snprintf(names[idx], sizeof(names[idx]), "ameva_mmq_%s", v.type_name);
-        s_mmq[idx] = ameva_make_kernel(names[idx], v.spirv, v.spirv_bytes, v.spirv_sha256, AMEVA_MMQ_BINDINGS,
-                                       AMEVA_MMQ_PUSH_CONSTANT_BYTES, AMEVA_MMQ_LOCAL_SIZE_X);
-    }
-    return s_mmq[idx];
+// Whether this process computes integer dot products with the emulation (32-bit multiplications) instead of
+// VK_KHR_shader_integer_dot_product: on a device without the extension, or with AMEVA_INT_DOT_EMU=1 (kernel
+// comparison on a device that has it). The emulated kernels (ameva_mmq / ameva_mmvq -DEMU_DOT) take their activations
+// from ameva_quant_a8 -DEMU and have no variant for q8_0 and the iq4 types.
+static bool ameva_int_dot_emulated(void) {
+    static const bool emulated = [] {
+        const char* e = getenv("AMEVA_INT_DOT_EMU");
+        if (e && *e && strcmp(e, "0") != 0 && strcmp(e, "1") != 0) {
+            GGML_ABORT("ggml-ameva: AMEVA_INT_DOT_EMU must be 0 or 1 (got \"%s\")", e);
+        }
+        return !s_limits.integer_dot_product || (e && strcmp(e, "1") == 0);
+    }();
+    return emulated;
 }
 
+// Variant of the prompt kernel (ameva_mmq) of the process's integer-dot family for a weight type, or -1
 static int ameva_mmq_find(enum ggml_type type) {
+    const bool emu = ameva_int_dot_emulated();
+    const AmevaMmqVariant* variants = emu ? kAmevaMmqeVariants : kAmevaMmqVariants;
+    const int count = emu ? AMEVA_MMQE_VARIANT_COUNT : AMEVA_MMQ_VARIANT_COUNT;
     const char* tn = ggml_type_name(type);
     if (!tn) return -1;
-    for (int i = 0; i < AMEVA_MMQ_VARIANT_COUNT; ++i) {
-        if (strcmp(kAmevaMmqVariants[i].type_name, tn) == 0) return i;
+    for (int i = 0; i < count; ++i) {
+        if (strcmp(variants[i].type_name, tn) == 0) return i;
     }
     return -1;
+}
+
+int ggml_backend_ameva_mmq_has_type(enum ggml_type type) {
+    return ameva_get_ac_context() && ameva_mmq_find(type) >= 0 ? 1 : 0;
+}
+
+static AcKernel* ameva_mmq_kernel(int idx) {
+    static char names[AMEVA_MMQ_VARIANT_COUNT + AMEVA_MMQE_VARIANT_COUNT][40];
+    const bool emu = ameva_int_dot_emulated();
+    AcKernel** slot = emu ? &s_mmqe[idx] : &s_mmq[idx];
+    std::lock_guard<std::mutex> lock(s_mutex);
+    if (!*slot && s_ctx) {
+        const AmevaMmqVariant& v = emu ? kAmevaMmqeVariants[idx] : kAmevaMmqVariants[idx];
+        char* name = names[(emu ? AMEVA_MMQ_VARIANT_COUNT : 0) + idx];
+        snprintf(name, sizeof(names[0]), "ameva_mmq%s_%s", emu ? "e" : "", v.type_name);
+        *slot = ameva_make_kernel(name, v.spirv, v.spirv_bytes, v.spirv_sha256, AMEVA_MMQ_BINDINGS,
+                                  AMEVA_MMQ_PUSH_CONSTANT_BYTES, AMEVA_MMQ_LOCAL_SIZE_X);
+    }
+    return *slot;
 }
 
 // The integer-dot family of token generation in this process: ameva_mmvq with VK_KHR_shader_integer_dot_product
@@ -555,7 +582,7 @@ static int ameva_mmq_find(enum ggml_type type) {
 // (shaders/ameva_mmvq.comp -DEMU_DOT; Mali-G78 r38p0 and Mali-G68 r32p1 have no such extension). The emulation takes
 // its activations from ameva_quant_a8 -DEMU (72 scratch bytes per 32-element unit instead of 40) and has no variant
 // for q8_0 and the iq4 types, whose products stay on the f32 layouts.
-//   AMEVA_MMVQ_EMU=1  the emulation also on a device that has the extension (kernel comparison); 0 or unset: as above
+//   AMEVA_INT_DOT_EMU=1  the emulation also on a device that has the extension (ameva_int_dot_emulated above)
 // Measured 2026-10-04, token generation, f32 layouts only -> with the emulation (t/s, three alternating rounds):
 //   Mali-G68 r32p1 (Galaxy A53)  Qwen2.5-0.5B 14.4 -> 14.6, Llama-3.2-1B 6.9-7.0 -> 7.8
 //   Mali-G78 r38p0 (Galaxy S21)  Qwen 21.8-22.8 -> 22.9-23.1, Llama 8.0-10.2 -> 9.6-11.0
@@ -575,12 +602,7 @@ struct AmevaI8Family {
 
 static const AmevaI8Family& ameva_i8_family(void) {
     static const AmevaI8Family fam = [] {
-        const char* e = getenv("AMEVA_MMVQ_EMU");
-        if (e && *e && strcmp(e, "0") != 0 && strcmp(e, "1") != 0) {
-            GGML_ABORT("ggml-ameva: AMEVA_MMVQ_EMU must be 0 or 1 (got \"%s\")", e);
-        }
-        const bool emulated = !s_limits.integer_dot_product || (e && strcmp(e, "1") == 0);
-        if (emulated) {
+        if (ameva_int_dot_emulated()) {
             return AmevaI8Family{ true, 72u, 8u, AMEVA_K_QUANT_A8U, kAmevaMmvqeVariants, AMEVA_MMVQE_VARIANT_COUNT };
         }
         return AmevaI8Family{ false, 40u, 4u, AMEVA_K_QUANT_A8, kAmevaMmvqVariants, AMEVA_MMVQ_VARIANT_COUNT };
@@ -742,6 +764,13 @@ void ggml_backend_ameva_teardown(void) {
         }
     }
     for (AcKernel*& k : s_mmq) {
+        if (k) {
+            ac_runtime_kernel_destroy(k);
+            k = nullptr;
+            ameva_increment_kernel_destroy_count();
+        }
+    }
+    for (AcKernel*& k : s_mmqe) {
         if (k) {
             ac_runtime_kernel_destroy(k);
             k = nullptr;
@@ -1324,7 +1353,9 @@ struct AmevaEpilogue {
 
 // MMQ (int8 activations x repacked weights with packed integer dot products) for the MUL_MATs that would run
 // ameva_qgemm. AMEVA_MMQ unset: on when the device enabled VK_KHR_shader_integer_dot_product, otherwise off with one
-// line on stderr; AMEVA_MMQ=1: required (abort when the device lacks it); AMEVA_MMQ=0: off (f32 ameva_qgemm).
+// line on stderr; AMEVA_MMQ=1: on, with the emulated integer dot product where the device lacks the extension or
+// AMEVA_INT_DOT_EMU=1 asks for it (ameva_mmq -DEMU_DOT; q8_0 and the iq4 types then stay on ameva_qgemm);
+// AMEVA_MMQ=0: off (f32 ameva_qgemm).
 // Accuracy: the activations are rounded to int8 per 32 elements (the CPU backend rounds them to q8_0 / q8_K as well).
 static bool ameva_mmq_enabled(void) {
     static int mode = -1;
@@ -1334,16 +1365,18 @@ static bool ameva_mmq_enabled(void) {
         if (e && *e && strcmp(e, "0") != 0 && strcmp(e, "1") != 0) {
             GGML_ABORT("ggml-ameva: AMEVA_MMQ must be 0 or 1 (got \"%s\")", e);
         }
-        const bool supported = s_limits.integer_dot_product != 0;
+        const bool emulated = ameva_int_dot_emulated();
         if (e && strcmp(e, "0") == 0) {
             mode = 0;
             fprintf(stderr, "ggml-ameva: MMQ off (AMEVA_MMQ=0): prompt MUL_MAT runs the f32 tiled kernel\n");
-        } else if (supported) {
+        } else if (!emulated) {
             mode = 1;
             fprintf(stderr, "ggml-ameva: MMQ on (VK_KHR_shader_integer_dot_product, 4x8 packed accelerated: %s)\n",
                     s_limits.integer_dot_product_accelerated ? "yes" : "no");
         } else if (e && strcmp(e, "1") == 0) {
-            GGML_ABORT("ggml-ameva: AMEVA_MMQ=1 but the device does not offer VK_KHR_shader_integer_dot_product");
+            mode = 1;
+            fprintf(stderr, "ggml-ameva: MMQ on (AMEVA_MMQ=1) with the integer dot product emulated with 32-bit "
+                            "multiplications\n");
         } else {
             mode = 0;
             fprintf(stderr, "ggml-ameva: MMQ unavailable (no VK_KHR_shader_integer_dot_product): prompt MUL_MAT runs "
@@ -1353,8 +1386,9 @@ static bool ameva_mmq_enabled(void) {
     return mode == 1;
 }
 
-// Scratch bytes per activation unit of 32: 32 int8 + d and two half sums (shaders/ameva_quant_a8.comp)
-static const uint64_t kMmqUnitBytes = 40;
+// Scratch bytes per activation unit of 32 (shaders/ameva_quant_a8.comp): 32 int8 + d and two half sums, or with the
+// emulated integer dot product (-DEMU) 64 bytes of unsigned pairs + d and two half sums
+static uint64_t ameva_mmq_unit_bytes(void) { return ameva_int_dot_emulated() ? 72u : 40u; }
 
 static uint32_t ameva_qgemm_min_rows(void);
 
@@ -1369,9 +1403,9 @@ static bool ameva_mmq_plan(const struct ggml_tensor* node, uint32_t* chunk_rows,
     const uint64_t span = ameva_max_binding_span();
     const uint64_t s1 = st(src1, 1), sd = st(node, 1);
     const uint64_t rows_fit = std::min<uint64_t>(span / (s1 * 4), span / (sd * 4));
-    const uint64_t r = std::max<uint64_t>(1, std::min<uint64_t>({ M, rows_fit, span / (U * kMmqUnitBytes), 65535ull * 32 }));
+    const uint64_t r = std::max<uint64_t>(1, std::min<uint64_t>({ M, rows_fit, span / (U * ameva_mmq_unit_bytes()), 65535ull * 32 }));
     *chunk_rows = (uint32_t)r;
-    *scratch_bytes = r * U * kMmqUnitBytes;
+    *scratch_bytes = r * U * ameva_mmq_unit_bytes();
     return true;
 }
 
@@ -1385,7 +1419,8 @@ static const char* enc_mul_mat_mmq(AmevaRecorder& rec, const struct ggml_tensor*
     const uint32_t U = K / 32;
     const int vi = ameva_mmq_find(src0->type);
     AcKernel* kernel = vi >= 0 ? ameva_mmq_kernel(vi) : nullptr;
-    AcKernel* quant = ameva_op_kernel(AMEVA_K_QUANT_A8);
+    const bool emu = ameva_int_dot_emulated();
+    AcKernel* quant = ameva_op_kernel(emu ? AMEVA_K_QUANT_A8U : AMEVA_K_QUANT_A8);
     if (!kernel || !quant) return "no ameva_mmq / ameva_quant_a8 kernel";
     AmevaRepackLayout L = {};
     AmevaRepackRegions R = {};
@@ -1393,7 +1428,7 @@ static const char* enc_mul_mat_mmq(AmevaRecorder& rec, const struct ggml_tensor*
         return "repacked weight without a layout";
     const size_t row_bytes = ggml_row_size(src0->type, K);
     const uint64_t first_row = (uint64_t)((const char*)src0->data - (const char*)base->data) / row_bytes;
-    if (!s_scratch || (uint64_t)chunk_rows * U * kMmqUnitBytes > s_scratch_bytes) return "MMQ scratch not reserved";
+    if (!s_scratch || (uint64_t)chunk_rows * U * ameva_mmq_unit_bytes() > s_scratch_bytes) return "MMQ scratch not reserved";
     const uint64_t span = ameva_max_binding_span();
     // weight rows per dispatch: one binding per region, 65535 workgroups of 64 rows, kDispatchMac over a chunk
     uint64_t slice_cap = std::min<uint64_t>(span / R.q_row, 65535ull * 64);
@@ -1408,14 +1443,14 @@ static const char* enc_mul_mat_mmq(AmevaRecorder& rec, const struct ggml_tensor*
         e = ameva_bind_span(src1, (uint64_t)m0 * s1 * 4, ((uint64_t)(mc - 1) * s1 + K) * 4, 4, &b1);
         if (e) return e;
         if (b1.elem % 4 != 0) return "activation offset not a multiple of 16 bytes";
-        const uint64_t aq_bytes = (uint64_t)mc * U * 32;
+        const uint64_t aq_bytes = (uint64_t)mc * U * (emu ? 64 : 32);
         AmevaBind bs = {};
         bs.b.buffer = s_scratch;
         bs.b.offset = 0;
         bs.b.range = std::min<uint64_t>(s_scratch_bytes, s_limits.max_storage_buffer_range) & ~3ull;
         bs.key = s_scratch;
         bs.lo = 0;
-        bs.hi = (uint64_t)mc * U * kMmqUnitBytes;
+        bs.hi = (uint64_t)mc * U * ameva_mmq_unit_bytes();
         const uint32_t pcq[6] = { mc, K, b1.elem, s1, 0u, (uint32_t)(aq_bytes / 8) };
         const AcBufferBinding bindq[3] = { b1.b, bs.b, bs.b };
         e = ameva_record(rec, quant, &b1, 1, &bs, 1, bindq, 3, pcq, sizeof(pcq), ameva_grid_1d((uint64_t)mc * U, 64),
@@ -1515,7 +1550,7 @@ static const AmevaMmvqPolicy& ameva_mmvq_policy(void) {
                                                                             : "4x8 packed accelerated: no");
         } else if (p.mode == AMEVA_MMVQ_AUTO && fam.emulated) {
             fprintf(stderr, "ggml-ameva: MMVQ layouts use the integer dot product emulated with 32-bit multiplications "
-                            "(%s)\n", s_limits.integer_dot_product ? "AMEVA_MMVQ_EMU=1"
+                            "(%s)\n", s_limits.integer_dot_product ? "AMEVA_INT_DOT_EMU=1"
                                                                     : "no VK_KHR_shader_integer_dot_product");
         }
         return p;

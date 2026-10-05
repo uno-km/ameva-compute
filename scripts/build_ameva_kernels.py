@@ -22,6 +22,7 @@
   dot product computed with two 32-bit multiplications per four weights; for the weight types whose integer values
   are unsigned and at most 63 (not q8_0, iq4_nl, iq4_xs). Its activations come from the op kernel quant_a8u
   (ameva_quant_a8 -DEMU).
+* MMQE family (shaders/ameva_mmq.comp -DEMU_DOT): the prompt kernel with the same emulation, same types.
 * MMQ family (shaders/ameva_mmq.comp): integer-dot-product MUL_MAT for many activation rows on repacked weights
   and int8 activations (shaders/ameva_quant_a8.comp, an op kernel), one variant per weight type (-DTYPE_<T>).
 * FA family (shaders/ameva_flash_attn.comp): tiled FLASH_ATTN_EXT, one variant per head-size class
@@ -205,7 +206,7 @@ def main():
               "/* compiler: %s, --target-env vulkan1.0, NOT checked by spirv-val (--spirv-val none) */" % version),
              "#ifndef GGML_AMEVA_KERNELS_SPV_H", "#define GGML_AMEVA_KERNELS_SPV_H", "",
              "#include <stddef.h>", "#include <stdint.h>", ""]
-    qmm, qmv, mali_qmv, qgemm, mmq, mmvq, mmvqe, fa, ops = [], [], [], [], [], [], [], [], []
+    qmm, qmv, mali_qmv, qgemm, mmq, mmqe, mmvq, mmvqe, fa, ops = [], [], [], [], [], [], [], [], [], []
     with tempfile.TemporaryDirectory() as tmp:
         qsrc = os.path.join(SHADERS, "ameva_qmm.comp")
         qbind, qpush, qlocal = source_info(qsrc)
@@ -272,6 +273,15 @@ def main():
             emit_array(lines, var, data)
             mmq.append((name, var, len(data), hashlib.sha256(data).hexdigest()))
             print("mmq   %-6s %6d bytes sha256=%s" % (name, len(data), mmq[-1][3]))
+        for name, define in MMVQE_TYPES:
+            spv = os.path.join(tmp, "mmqe_%s.spv" % name)
+            data, rsize = compile_module(args, msrc, [define, "EMU_DOT"], spv)
+            if rsize is not None and rsize != mpush:
+                fail("ameva_mmq (emulated) %s: reflection says %d push-constant bytes, source %d" % (name, rsize, mpush))
+            var = "kAmevaMmqe_%s" % name
+            emit_array(lines, var, data)
+            mmqe.append((name, var, len(data), hashlib.sha256(data).hexdigest()))
+            print("mmqe  %-6s %6d bytes sha256=%s" % (name, len(data), mmqe[-1][3]))
         vqsrc = os.path.join(SHADERS, "ameva_mmvq.comp")
         vqbind, vqpush, vqlocal = source_info(vqsrc)
         for name, define in QMV_TYPES:
@@ -389,6 +399,11 @@ def main():
               "#define AMEVA_MMQ_BINDINGS %d" % mbind,
               "#define AMEVA_MMQ_PUSH_CONSTANT_BYTES %d" % mpush,
               "#define AMEVA_MMQ_LOCAL_SIZE_X %d" % mlocal, "",
+              "/* ameva_mmq with the integer dot product emulated by 32-bit multiplications */",
+              "static const AmevaMmqVariant kAmevaMmqeVariants[] = {"]
+    for name, var, nbytes, sha in mmqe:
+        lines.append('    { "%s", %s, %du, "%s" },' % (name, var, nbytes, sha))
+    lines += ["};", "#define AMEVA_MMQE_VARIANT_COUNT %d" % len(mmqe), "",
               "typedef struct {",
               "    const char* type_name;   /* ggml_type_name() of the weight type (stored repacked) */",
               "    uint32_t rows;           /* weight rows per lane group */",
@@ -433,8 +448,9 @@ def main():
     lines += ["};", "", "#endif /* GGML_AMEVA_KERNELS_SPV_H */", ""]
     with open(args.out, "w", newline="\n") as f:
         f.write("\n".join(lines))
-    print("wrote %s (%d qmm, %d qmv, %d mali_qmv, %d qgemm, %d mmq, %d mmvq, %d mmvqe, %d fa variants, %d op kernels)" %
-          (args.out, len(qmm), len(qmv), len(mali_qmv), len(qgemm), len(mmq), len(mmvq), len(mmvqe), len(fa), len(ops)))
+    print("wrote %s (%d qmm, %d qmv, %d mali_qmv, %d qgemm, %d mmq, %d mmqe, %d mmvq, %d mmvqe, %d fa variants, "
+          "%d op kernels)" % (args.out, len(qmm), len(qmv), len(mali_qmv), len(qgemm), len(mmq), len(mmqe), len(mmvq),
+                              len(mmvqe), len(fa), len(ops)))
 
 
 if __name__ == "__main__":

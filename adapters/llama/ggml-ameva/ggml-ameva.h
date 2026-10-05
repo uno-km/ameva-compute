@@ -54,6 +54,10 @@ GGML_API int64_t ggml_backend_ameva_get_repacked_tensor_count(void);
 GGML_API int64_t ggml_backend_ameva_get_repacked_bytes(void);
 GGML_API int64_t ggml_backend_ameva_get_qmv_mul_mat_count(void);
 GGML_API int64_t ggml_backend_ameva_get_mmq_mul_mat_count(void);
+// 1 when this process has a prompt kernel with integer dot products (ameva_mmq) for the weight type: every repacked
+// type with VK_KHR_shader_integer_dot_product, all but q8_0 and the iq4 types with the emulated dot product. Valid
+// once the backend is initialized.
+GGML_API int ggml_backend_ameva_mmq_has_type(enum ggml_type type);
 // node pairs computed by one fused dispatch sequence (graph-engine fusion, AMEVA_FUSE); counted when recorded
 GGML_API int64_t ggml_backend_ameva_get_fused_pair_count(void);
 GGML_API const char* ggml_backend_ameva_get_build_commit(void);
