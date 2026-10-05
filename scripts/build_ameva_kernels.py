@@ -95,7 +95,8 @@ QMV_UPL = os.environ.get("AMEVA_BUILD_QMV_UPL", "")
 QMV_ABLATE = os.environ.get("AMEVA_BUILD_QMV_ABLATE", "")
 
 # op kernel families, in the order of enum AmevaOpKernelId
-OPS = ["binary", "unary", "glu", "rms_norm", "rope", "set_rows", "get_rows", "cpy", "fa_combine", "quant_a8"]
+OPS = ["binary", "unary", "glu", "rms_norm", "rope", "set_rows", "get_rows", "cpy", "fa_combine", "quant_a8",
+       "fa1_scores", "fa1_part"]
 # op kernels compiled from one source with defines, appended to enum AmevaOpKernelId: (kernel name, source, defines)
 OPS_DEFINED = [("set_rows_q8_0", "set_rows_q", ["QTYPE_Q8_0"]), ("set_rows_q4_0", "set_rows_q", ["QTYPE_Q4_0"]),
                ("quant_a8u", "quant_a8", ["EMU"]), ("rope_f16", "rope", ["F16"])]

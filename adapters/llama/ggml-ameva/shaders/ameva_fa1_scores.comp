@@ -1,0 +1,95 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : require
+// AMEVA FLASH_ATTN_EXT for one query position (token generation), part 1 of 3: the scores
+//   s[h][j] = scale * dot(Q_h, K_{h / G}[j]) [softcap] + slope_h * mask[j]      (head h, key j, G = n_head / n_head_kv)
+// written as f32 to binding 3 at s_off + h * n_kv + j. ameva_fa1_part turns them into partial sums per 64 keys and
+// ameva_fa_combine merges those; together they compute what ameva_flash_attn computes for n_q == 1.
+// Why a path of its own: ameva_flash_attn walks the keys in blocks with five barriers per block, built for many query
+// rows. With one row that structure is nearly all of its time (Mali-G78, Qwen2.5-0.5B, 256 key cells: 159 us per
+// dispatch against 22 us for RMS_NORM, and the same total with the keys split over more workgroups). None of the
+// three parts has a barrier or shared memory.
+//
+// One invocation per key and KV head; the G heads that read the KV head share the load of the key (four heads per
+// pass over K). A key whose mask is -inf for the heads of a pass is not read.
+//   q f32 [D, 1, n_head] bound as vec4 (offset and head stride multiples of 4 floats; the host checks),
+//   k [D, n_kv, n_head_kv] f32 / f16 / q8_0 / q4_0 (ameva_kv_load.glsl), mask f16 [n_kv, >= 1, m_ne2] optional.
+//   grid: (ceil(n_kv / 64), n_head_kv)
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+
+layout(std430, binding = 0) readonly buffer Q { vec4 q4[]; };
+layout(std430, binding = 1) readonly buffer K { uint k[]; };
+layout(std430, binding = 2) readonly buffer M { uint mask[]; };   // bound to any buffer when has_mask == 0
+layout(std430, binding = 3) writeonly buffer S { uint sc[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint D, n_kv, n_head, n_head_kv;
+    uint kv_types, has_mask, q_off, q_s2;   // q_off, q_s2: floats
+    uint k_off, k_s1, k_s2, m_off;          // K offset and strides: elements (f32, f16) or bytes (q8_0, q4_0)
+    uint m_s2, m_ne2, s_off, scale;
+    uint softcap, max_bias, m0, m1;
+    uint n_head_log2;
+} pc;
+
+#define KV_ONLY_K
+#include "ameva_kv_load.glsl"
+
+void main() {
+    const uint j = gl_WorkGroupID.x * 64u + gl_LocalInvocationID.x;
+    if (j >= pc.n_kv) return;
+    const uint hkv = gl_WorkGroupID.y;
+    const uint G = pc.n_head / pc.n_head_kv;
+    const uint D4 = pc.D >> 2u;
+    const uint krow = pc.k_off + hkv * pc.k_s2 + j * pc.k_s1;
+    float scale = uintBitsToFloat(pc.scale);
+    const float softcap = uintBitsToFloat(pc.softcap);
+    if (softcap != 0.0) scale /= softcap;
+    const float max_bias = uintBitsToFloat(pc.max_bias);
+    const float NEG_INF = -1.0 / 0.0;
+
+    for (uint g0 = 0u; g0 < G; g0 += 4u) {
+        // mask (with the ALiBi slope, as in ggml) and Q row of up to four heads; a lane past G repeats the last head
+        // and is not stored
+        vec4 mv = vec4(NEG_INF);
+        uvec4 qb = uvec4(0u);
+        bool any = false;
+        [[unroll]] for (uint c = 0u; c < 4u; ++c) {
+            const uint h = hkv * G + min(g0 + c, G - 1u);
+            qb[c] = (pc.q_off + h * pc.q_s2) >> 2u;
+            if (g0 + c < G) {
+                float m = 0.0;
+                if (pc.has_mask != 0u) {
+                    float slope = 1.0;
+                    if (max_bias > 0.0) {
+                        slope = h < pc.n_head_log2 ? pow(uintBitsToFloat(pc.m0), float(h + 1u))
+                                                   : pow(uintBitsToFloat(pc.m1), float(2u * (h - pc.n_head_log2) + 1u));
+                    }
+                    m = slope * AMEVA_LOAD_F16(mask, pc.m_off + (h % pc.m_ne2) * pc.m_s2 + j);
+                }
+                mv[c] = m;
+                any = any || m != NEG_INF;
+            }
+        }
+        vec4 s = vec4(NEG_INF);
+        if (any) {
+            vec4 acc = vec4(0.0);
+            for (uint d4 = 0u; d4 < D4; ++d4) {
+                const vec4 kd = load4(true, krow, 4u * d4);
+                acc += vec4(dot(q4[qb.x + d4], kd), dot(q4[qb.y + d4], kd), dot(q4[qb.z + d4], kd),
+                            dot(q4[qb.w + d4], kd));
+            }
+            s = acc * scale;
+            if (softcap != 0.0) {
+                s = softcap * vec4(ameva_tanh(s.x), ameva_tanh(s.y), ameva_tanh(s.z), ameva_tanh(s.w));
+            }
+            s += mv; // a masked head of the pass becomes -inf here
+        }
+        [[unroll]] for (uint c = 0u; c < 4u; ++c) {
+            if (g0 + c < G) {
+                sc[pc.s_off + (hkv * G + g0 + c) * pc.n_kv + j] = floatBitsToUint(s[c]);
+            }
+        }
+    }
+}

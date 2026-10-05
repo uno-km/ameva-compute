@@ -1,0 +1,114 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : require
+// AMEVA FLASH_ATTN_EXT for one query position (token generation), part 2 of 3: partial sums per 64 keys.
+// For key chunk z (keys 64 z .. 64 z + 63) and head h, from the scores of ameva_fa1_scores:
+//   m = max_j s[h][j],  l = sum_j exp(s[h][j] - m),  acc[d] = sum_j exp(s[h][j] - m) V_{h / G}[j][d]
+// written to binding 2 at part_off + (z * n_head + h) * (DV + 2) as m, l, acc[0 .. DV - 1]: the layout that
+// ameva_flash_attn writes with key splits, so ameva_fa_combine merges the chunks (a chunk whose keys are all masked
+// has m = -inf and contributes nothing there).
+//
+// A workgroup is one chunk of one KV head, with one barrier:
+//   1. invocation `lane` owns key 64 z + lane: it finds the chunk maximum of every head (64 scores per head; every
+//      lane computes the same value, which costs less than a second barrier) and stores the probability of its key
+//      per head in shared memory;
+//   2. invocation `lane` owns the output columns 4 lane .. 4 lane + 3 and walks the 64 keys once per four heads, so
+//      the G heads that read the KV head share the load of V.
+// An earlier form without shared memory computed the probabilities in every column lane (16 times the exp calls):
+// Mali-G78 ran the three dispatches of the path in 341 us against 159 us for the tiled kernel.
+//   v [DV, n_kv, n_head_kv] f32 / f16 / q8_0 / q4_0 (ameva_kv_load.glsl); DV a multiple of 4 and at most 256;
+//   G = n_head / n_head_kv at most GMAX (the host checks).
+//   grid: (ceil(n_kv / 64), n_head_kv)
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+
+layout(std430, binding = 0) readonly buffer S { uint sc[]; };
+layout(std430, binding = 1) readonly buffer V { uint v[]; };
+layout(std430, binding = 2) writeonly buffer Part { uint part[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint DV, n_kv, n_head, n_head_kv;
+    uint kv_types, v_off, v_s1, v_s2;   // V offset and strides: elements (f32, f16) or bytes (q8_0, q4_0)
+    uint s_off, part_off;
+} pc;
+
+#define KV_ONLY_V
+#include "ameva_kv_load.glsl"
+
+#define CK 64u   // keys per chunk
+#define GMAX 16u // heads per KV head
+
+shared float sP[GMAX * CK]; // [g * CK + key of the chunk]: exp(score - chunk maximum) of head hkv * G + g
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint z = gl_WorkGroupID.x;
+    const uint hkv = gl_WorkGroupID.y;
+    const uint G = pc.n_head / pc.n_head_kv;
+    const uint j0 = z * CK, j1 = min(pc.n_kv, j0 + CK);
+    const uint vbase = pc.v_off + hkv * pc.v_s2;
+    const uint stride = pc.DV + 2u;
+    const float NEG_INF = -1.0 / 0.0;
+
+    // 1. chunk maxima, probability of key j0 + lane. A lane of a pass past G repeats the last head and stores nothing
+    for (uint g0 = 0u; g0 < G; g0 += 4u) {
+        uvec4 sb;
+        [[unroll]] for (uint c = 0u; c < 4u; ++c) {
+            sb[c] = pc.s_off + (hkv * G + min(g0 + c, G - 1u)) * pc.n_kv;
+        }
+        vec4 m = vec4(NEG_INF);
+        for (uint j = j0; j < j1; ++j) {
+            m = max(m, uintBitsToFloat(uvec4(sc[sb.x + j], sc[sb.y + j], sc[sb.z + j], sc[sb.w + j])));
+        }
+        const uint j = j0 + lane;
+        vec4 s = vec4(NEG_INF);
+        if (j < j1) {
+            s = uintBitsToFloat(uvec4(sc[sb.x + j], sc[sb.y + j], sc[sb.z + j], sc[sb.w + j]));
+        }
+        [[unroll]] for (uint c = 0u; c < 4u; ++c) {
+            if (g0 + c < G) {
+                sP[(g0 + c) * CK + lane] = (m[c] == NEG_INF || s[c] == NEG_INF) ? 0.0 : exp(s[c] - m[c]);
+                if (lane == 0u) {
+                    part[pc.part_off + (z * pc.n_head + hkv * G + g0 + c) * stride] = floatBitsToUint(m[c]);
+                }
+            }
+        }
+    }
+    barrier();
+
+    // 2. columns 4 lane .. 4 lane + 3 of the partial sums
+    if (4u * lane >= pc.DV) return;
+    for (uint g0 = 0u; g0 < G; g0 += 4u) {
+        uvec4 pb4;
+        [[unroll]] for (uint c = 0u; c < 4u; ++c) {
+            pb4[c] = min(g0 + c, G - 1u) * CK;
+        }
+        vec4 a0 = vec4(0.0), a1 = vec4(0.0), a2 = vec4(0.0), a3 = vec4(0.0);
+        vec4 l = vec4(0.0);
+        for (uint jl = 0u; jl < CK; ++jl) {
+            const vec4 p = vec4(sP[pb4.x + jl], sP[pb4.y + jl], sP[pb4.z + jl], sP[pb4.w + jl]);
+            if (any(notEqual(p, vec4(0.0)))) {
+                const vec4 vd = load4(false, vbase + (j0 + jl) * pc.v_s1, 4u * lane);
+                a0 += p.x * vd;
+                a1 += p.y * vd;
+                a2 += p.z * vd;
+                a3 += p.w * vd;
+            }
+            l += p;
+        }
+        [[unroll]] for (uint c = 0u; c < 4u; ++c) {
+            if (g0 + c < G) {
+                const uint pb = pc.part_off + (z * pc.n_head + hkv * G + g0 + c) * stride;
+                if (lane == 0u) {
+                    part[pb + 1u] = floatBitsToUint(l[c]);
+                }
+                const vec4 a = c == 0u ? a0 : (c == 1u ? a1 : (c == 2u ? a2 : a3));
+                part[pb + 2u + 4u * lane + 0u] = floatBitsToUint(a.x);
+                part[pb + 2u + 4u * lane + 1u] = floatBitsToUint(a.y);
+                part[pb + 2u + 4u * lane + 2u] = floatBitsToUint(a.z);
+                part[pb + 2u + 4u * lane + 3u] = floatBitsToUint(a.w);
+            }
+        }
+    }
+}

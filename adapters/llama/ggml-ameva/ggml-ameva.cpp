@@ -2707,15 +2707,141 @@ static uint32_t ameva_fa_split_keys(const struct ggml_tensor* node, uint32_t* n_
     return forced;
 }
 
+// FLASH_ATTN_EXT with one query position (token generation) in three dispatches without barriers: the scores of every
+// key (ameva_fa1_scores), partial sums per 64 keys (ameva_fa1_part) and their merge (ameva_fa_combine). The tiled
+// kernel walks the keys in blocks with five barriers per block, built for many query rows; with one row that
+// structure is nearly all of its time. Mali-G78 (Galaxy S21, 2026-10-05), Qwen2.5-0.5B, 256 key cells: 159 us per
+// dispatch against 22 us for RMS_NORM, and the same total with the keys split over more workgroups
+// (AMEVA_FA_SPLIT_KEYS=64: two dispatches of 73-78 us). AMEVA_FA1=0 keeps the tiled kernel (kernel comparison).
+// Scratch: n_head * n_kv scores (f32), then per key chunk and head the partial (m, l, DV accumulators).
+static bool ameva_fa1_enabled(void) {
+    static const bool on = [] {
+        const char* e = getenv("AMEVA_FA1");
+        if (e && *e && strcmp(e, "0") != 0 && strcmp(e, "1") != 0) {
+            GGML_ABORT("ggml-ameva: AMEVA_FA1 must be 0 or 1 (got \"%s\")", e);
+        }
+        return !(e && strcmp(e, "0") == 0);
+    }();
+    return on;
+}
+
+static const uint32_t kFa1ChunkKeys = 64; // shaders/ameva_fa1_part.comp CK
+
+// Whether the node takes the one-row path; its key chunks and scratch bytes. A node that does not (several query
+// rows, Q not addressable as vec4, head sizes beyond the kernel) runs the tiled kernel, which takes every layout.
+static bool ameva_fa1_plan(const struct ggml_tensor* node, uint32_t* chunks, uint64_t* scratch_bytes) {
+    const struct ggml_tensor *q = node->src[0], *k = node->src[1], *v = node->src[2];
+    if (!ameva_fa1_enabled() || q->ne[1] != 1) return false;
+    const uint64_t n_head = (uint64_t)q->ne[2], n_head_kv = (uint64_t)k->ne[2], n_kv = (uint64_t)k->ne[1];
+    const uint64_t DV = (uint64_t)v->ne[0];
+    if (q->ne[0] % 4 || DV % 4 || DV > 256 || n_head_kv == 0 || n_head % n_head_kv || n_head_kv > 65535) return false;
+    if (n_head / n_head_kv > 16) return false; // shaders/ameva_fa1_part.comp GMAX
+    // ameva_fa1_scores reads Q as vec4: offset in the binding and head stride are multiples of 4 floats
+    AmevaBind bq;
+    if (q->nb[0] != sizeof(float) || q->nb[2] % 16 || ameva_bind(q, 16, &bq)) return false;
+    const uint64_t n_chunks = (n_kv + kFa1ChunkKeys - 1) / kFa1ChunkKeys;
+    if (n_chunks == 0 || n_chunks > 65535) return false;
+    const uint64_t bytes = 4 * (n_head * n_kv + n_chunks * n_head * (DV + 2));
+    if (bytes > ameva_max_binding_span()) return false;
+    *chunks = (uint32_t)n_chunks;
+    *scratch_bytes = bytes;
+    return true;
+}
+
 static uint64_t ameva_fa_scratch_bytes(const struct ggml_tensor* node) {
+    {
+        uint32_t chunks = 0;
+        uint64_t bytes = 0;
+        if (ameva_fa1_plan(node, &chunks, &bytes)) return bytes;
+    }
     uint32_t n_split = 1;
     if (!ameva_fa_split_keys(node, &n_split)) return 0;
     return (uint64_t)n_split * (uint64_t)node->src[0]->ne[1] * (uint64_t)node->src[0]->ne[2] *
            ((uint64_t)node->src[2]->ne[0] + 2) * 4;
 }
 
+// bytes [lo, hi) of the scratch buffer (reserved by graph_compute), bound from its start
+static AmevaBind ameva_scratch_bind(uint64_t lo, uint64_t hi) {
+    AmevaBind b = {};
+    b.b.buffer = s_scratch;
+    b.b.offset = 0;
+    b.b.range = std::min<uint64_t>(s_scratch_bytes, s_limits.max_storage_buffer_range) & ~3ull;
+    b.key = s_scratch;
+    b.lo = lo;
+    b.hi = hi;
+    return b;
+}
+
+// One query position (ameva_fa1_plan): scores, partial sums per key chunk, merge
+static const char* enc_flash_attn_one(AmevaRecorder& rec, const struct ggml_tensor* node, uint32_t chunks,
+                                      uint64_t scratch_bytes) {
+    const struct ggml_tensor *q = node->src[0], *k = node->src[1], *v = node->src[2], *m = node->src[3];
+    AcKernel* scores = ameva_op_kernel(AMEVA_K_FA1_SCORES);
+    AcKernel* parts = ameva_op_kernel(AMEVA_K_FA1_PART);
+    AcKernel* comb = ameva_op_kernel(AMEVA_K_FA_COMBINE);
+    if (!scores || !parts || !comb) return "no ameva_fa1 kernel";
+    if (!s_scratch || scratch_bytes > s_scratch_bytes) return "flash-attention scratch not reserved";
+    // K / V: f32 in words, f16 in halves, q8_0 / q4_0 in bytes (bound in halves: elem * 2)
+    const int kt = kv_type_code(k), vt = kv_type_code(v);
+    AmevaBind bq, bk, bv, bm, bo;
+    const char* e = ameva_bind(q, 4, &bq);
+    if (!e) e = ameva_bind(k, kt == 0 ? 4 : 2, &bk);
+    if (!e) e = ameva_bind(v, vt == 0 ? 4 : 2, &bv);
+    if (!e) e = ameva_bind(m ? m : q, m ? 2 : 4, &bm);
+    if (!e) e = ameva_bind(node, 4, &bo);
+    if (e) return e;
+    if (bq.elem % 4) return "flash-attention Q not at a multiple of 4 floats";
+    const float max_bias = op_param_f32(node, 1);
+    const uint32_t D = (uint32_t)q->ne[0], DV = (uint32_t)v->ne[0], n_kv = (uint32_t)k->ne[1];
+    const uint32_t n_head = (uint32_t)q->ne[2], n_head_kv = (uint32_t)k->ne[2];
+    const uint32_t n_head_log2 = 1u << (uint32_t)floor(log2((double)n_head));
+    const float m0 = powf(2.0f, -(max_bias) / n_head_log2);
+    const float m1 = powf(2.0f, -(max_bias / 2.0f) / n_head_log2);
+    const uint32_t kv_types = (uint32_t)kt | ((uint32_t)vt << 4u);
+    const uint64_t score_words = (uint64_t)n_head * n_kv;
+    const AmevaBind bs = ameva_scratch_bind(0, score_words * 4);
+    const AmevaBind bp = ameva_scratch_bind(score_words * 4, scratch_bytes);
+
+    const uint32_t pcs[21] = { D, n_kv, n_head, n_head_kv,
+                               kv_types, m ? 1u : 0u, bq.elem, st(q, 2),
+                               kt >= 2 ? bk.elem * 2u : bk.elem, kt >= 2 ? (uint32_t)k->nb[1] : st(k, 1),
+                               kt >= 2 ? (uint32_t)k->nb[2] : st(k, 2), m ? bm.elem : 0u,
+                               m ? st(m, 2) : 0u, m ? (uint32_t)m->ne[2] : 1u, 0u, fbits(op_param_f32(node, 0)),
+                               fbits(op_param_f32(node, 2)), fbits(max_bias), fbits(m0), fbits(m1),
+                               n_head_log2 };
+    const AcBufferBinding binds[4] = { bq.b, bk.b, bm.b, bs.b };
+    const AmevaBind reads[3] = { bq, bk, bm };
+    if (rec.profile_kinds) rec.kind = ameva_kind_id("FLASH_ATTN_EXT one row: scores");
+    e = ameva_record(rec, scores, reads, 3, &bs, 1, binds, 4, pcs, sizeof(pcs), { chunks, n_head_kv, 1 },
+                     (double)n_head * (double)n_kv * (double)D);
+    if (e) return e;
+
+    const uint32_t pcp[10] = { DV, n_kv, n_head, n_head_kv,
+                               kv_types, vt >= 2 ? bv.elem * 2u : bv.elem,
+                               vt >= 2 ? (uint32_t)v->nb[1] : st(v, 1), vt >= 2 ? (uint32_t)v->nb[2] : st(v, 2),
+                               0u, (uint32_t)score_words };
+    const AcBufferBinding bindp[3] = { bs.b, bv.b, bp.b };
+    const AmevaBind readp[2] = { bs, bv };
+    if (rec.profile_kinds) rec.kind = ameva_kind_id("FLASH_ATTN_EXT one row: partial sums");
+    e = ameva_record(rec, parts, readp, 2, &bp, 1, bindp, 3, pcp, sizeof(pcp), { chunks, n_head_kv, 1 },
+                     (double)n_head * (double)n_kv * (double)DV);
+    if (e) return e;
+
+    // one output row per head; the chunks are the splits of ameva_fa_combine
+    const uint32_t pcc[5] = { DV, n_head, chunks, (uint32_t)score_words, bo.elem };
+    const AcBufferBinding bindc[2] = { bp.b, bo.b };
+    if (rec.profile_kinds) rec.kind = ameva_kind_id("FLASH_ATTN_EXT one row: merge");
+    return ameva_record(rec, comb, &bp, 1, &bo, 1, bindc, 2, pcc, sizeof(pcc), ameva_grid_groups(n_head),
+                        (double)n_head * (double)chunks * (double)DV);
+}
+
 static const char* enc_flash_attn(AmevaRecorder& rec, const struct ggml_tensor* node) {
     const struct ggml_tensor *q = node->src[0], *k = node->src[1], *v = node->src[2], *m = node->src[3];
+    {
+        uint32_t chunks = 0;
+        uint64_t bytes = 0;
+        if (ameva_fa1_plan(node, &chunks, &bytes)) return enc_flash_attn_one(rec, node, chunks, bytes);
+    }
     const int fi = ameva_fa_find((uint32_t)q->ne[0], (uint32_t)v->ne[0]);
     AcKernel* kernel = fi >= 0 ? ameva_fa_kernel(fi) : nullptr;
     if (!kernel) return "no ameva_flash_attn kernel";
