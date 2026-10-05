@@ -69,9 +69,10 @@ evidence/poc_cuda_like/<timestamp>/
   절제 측정(`AMEVA_BUILD_QMV_ABLATE`, S21)에서 GEMV는 로드 약 30 %·디코딩 약 40 %·곱 약 30 %, 출력 투영은 로드 75~90 %였다.
   곱을 싸게 만드는 방법으로는 토큰 생성이 CPU를 넘지 못한다. 다음 방향은 사용자 확인이 필요하다(`docs/handover/LATEST.md` 4.2, 7장).
 - **[검증 부채] 컨텍스트 이동 수정(`f2265d1`, F16 ROPE)**: ameva-runtime 2.8.0의 백엔드(`c8aa8fd`)는 GPU 경로에서 문맥이 이동하면
-  (`--context-shift`) 중단한다. 수정은 S21에서만 검증했다. 나머지 기기에서 ameva-runtime `tools/fleet/lab/verify_kv.sh`로 검증한 뒤
-  2.8.x로 게시한다(게시는 사용자 승인 후).
-- **[다음 후보]** 토큰 생성 전용 FLASH_ATTN_EXT 경로(토큰 시간의 3~8 %), fp16 타일 커널 제품화(S21의 1B 프롬프트), 출력 투영(로드 한계).
+  (`--context-shift`) 중단한다. 수정은 S21(Mali-G78)과 S20(Adreno 650)에서 검증했다. S25·A35·A53에서 ameva-runtime
+  `tools/fleet/lab/verify_kv.sh`로 검증한 뒤 2.8.x로 게시한다(게시는 사용자 승인 후).
+- **[다음 후보]** f16 → f32 변환 비용 절감(어텐션의 K·V 로드), fp16 타일 커널 제품화(S21의 1B 프롬프트), 출력 투영(로드 한계).
+  토큰 생성 전용 어텐션 경로는 시도했고 타일 커널보다 느렸다(`exp/fa-one-row`).
 - **응답 텍스트도 판정 항목이다** (사용자 요청 2026-10-05): 긴 응답의 이질 문자(`text_soak.sh`, `soak_scan.py`), 긴 문맥과 KV 캐시 연산
   (`parity_long.sh`, `ameva_llm_parity --kv-ops`). 평균 KLD와 짧은 생성만으로 통과를 말하지 않는다.
 - 현재 기준선(2026-10-04, 백엔드 `c8aa8fd`, Qwen2.5-0.5B Q4_K_M, `-c 2048 -t 4`, CPU / GPU t/s):
