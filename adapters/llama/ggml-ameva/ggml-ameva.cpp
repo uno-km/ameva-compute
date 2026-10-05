@@ -255,6 +255,7 @@ static char s_device_name[128] = "?";
 // unavailable.
 static std::string s_device_key;
 static AcKernel* s_qgemm[AMEVA_QGEMM_VARIANT_COUNT] = {};
+static AcKernel* s_qgemmh[AMEVA_QGEMMH_VARIANT_COUNT] = {};
 static AcKernel* s_mmq[AMEVA_MMQ_VARIANT_COUNT] = {};
 static AcKernel* s_mmvq[AMEVA_MMVQ_VARIANT_COUNT] = {};
 static AcKernel* s_mmvqe[AMEVA_MMVQE_VARIANT_COUNT] = {};
@@ -517,16 +518,41 @@ static AcKernel* ameva_mali_qmv_kernel(int idx) {
     return s_mali_qmv[idx];
 }
 
+// EXPERIMENT (timing): AMEVA_QGEMM_F16=1 runs the tile kernel with 16-bit float tiles and inner sums
+// (shaders/ameva_qgemm.comp -DF16). It needs shaderFloat16 and aborts without it. Not for real use: activations
+// beyond the 16-bit float range become infinite.
+static bool ameva_qgemm_f16(void) {
+    static const bool on = [] {
+        const char* e = getenv("AMEVA_QGEMM_F16");
+        if (e && *e && strcmp(e, "0") != 0 && strcmp(e, "1") != 0) {
+            GGML_ABORT("ggml-ameva: AMEVA_QGEMM_F16 must be 0 or 1 (got \"%s\")", e);
+        }
+        const bool want = e && strcmp(e, "1") == 0;
+        if (want && !s_limits.shader_float16) {
+            GGML_ABORT("ggml-ameva: AMEVA_QGEMM_F16=1 but the device does not offer shaderFloat16");
+        }
+        if (want) {
+            fprintf(stderr, "ggml-ameva: prompt MUL_MAT runs the 16-bit float tile kernel (AMEVA_QGEMM_F16=1, "
+                            "experiment)\n");
+        }
+        return want;
+    }();
+    return on;
+}
+
 static AcKernel* ameva_qgemm_kernel(int idx) {
-    static char names[AMEVA_QGEMM_VARIANT_COUNT][40];
+    static char names[AMEVA_QGEMM_VARIANT_COUNT + AMEVA_QGEMMH_VARIANT_COUNT][40];
+    const bool h = ameva_qgemm_f16();
+    AcKernel** slot = h ? &s_qgemmh[idx] : &s_qgemm[idx];
     std::lock_guard<std::mutex> lock(s_mutex);
-    if (!s_qgemm[idx] && s_ctx) {
-        const AmevaQgemmVariant& v = kAmevaQgemmVariants[idx];
-        snprintf(names[idx], sizeof(names[idx]), "ameva_qgemm_%s", v.type_name);
-        s_qgemm[idx] = ameva_make_kernel(names[idx], v.spirv, v.spirv_bytes, v.spirv_sha256, AMEVA_QGEMM_BINDINGS,
-                                         AMEVA_QGEMM_PUSH_CONSTANT_BYTES, AMEVA_QGEMM_LOCAL_SIZE_X);
+    if (!*slot && s_ctx) {
+        const AmevaQgemmVariant& v = h ? kAmevaQgemmhVariants[idx] : kAmevaQgemmVariants[idx];
+        char* name = names[(h ? AMEVA_QGEMM_VARIANT_COUNT : 0) + idx];
+        snprintf(name, sizeof(names[0]), "ameva_qgemm%s_%s", h ? "h" : "", v.type_name);
+        *slot = ameva_make_kernel(name, v.spirv, v.spirv_bytes, v.spirv_sha256, AMEVA_QGEMM_BINDINGS,
+                                  AMEVA_QGEMM_PUSH_CONSTANT_BYTES, AMEVA_QGEMM_LOCAL_SIZE_X);
     }
-    return s_qgemm[idx];
+    return *slot;
 }
 
 static AcKernel* ameva_mmq_kernel(int idx) {
@@ -735,6 +761,13 @@ void ggml_backend_ameva_teardown(void) {
         }
     }
     for (AcKernel*& k : s_qgemm) {
+        if (k) {
+            ac_runtime_kernel_destroy(k);
+            k = nullptr;
+            ameva_increment_kernel_destroy_count();
+        }
+    }
+    for (AcKernel*& k : s_qgemmh) {
         if (k) {
             ac_runtime_kernel_destroy(k);
             k = nullptr;
@@ -1043,7 +1076,11 @@ const char* ameva_op_unsupported_reason(const struct ggml_tensor* op) {
             const int32_t* p = (const int32_t*)op->op_params;
             const int n_dims = p[1], mode = p[2];
             if (mode != 0 && mode != 2) return "rope mode other than normal/neox";
-            if (!is_f32(a) || !is_f32(op) || !ggml_are_same_shape(a, op)) return "rope on non-f32";
+            // f32, or f16 to f16: the KV-cache shift of llama.cpp rotates the stored keys of the f16 cache in place
+            // (ggml_rope_ext_inplace on a view of cache_k). Declining it does not move the node to the CPU: the
+            // tensor is pre-allocated in this backend's buffer and the scheduler aborts.
+            if (!((is_f32(a) && is_f32(op)) || (is_f16(a) && is_f16(op))) || !ggml_are_same_shape(a, op))
+                return "rope on other than f32 or f16";
             if (!pos || pos->type != GGML_TYPE_I32 || pos->ne[0] != a->ne[2] || !ggml_is_contiguous(pos))
                 return "rope positions not one i32 per row";
             // n_dims == 0 rotates nothing (every pair is copied). llama.cpp asks exactly that when it decides where
@@ -2532,13 +2569,14 @@ static const char* enc_rms_norm(AmevaRecorder& rec, const struct ggml_tensor* no
 
 static const char* enc_rope(AmevaRecorder& rec, const struct ggml_tensor* node) {
     const struct ggml_tensor *a = node->src[0], *pos = node->src[1], *ff = node->src[2];
-    AcKernel* kernel = ameva_op_kernel(AMEVA_K_ROPE);
+    const bool f16 = a->type == GGML_TYPE_F16; // shaders/ameva_rope.comp -DF16: offsets and strides in f16 elements
+    AcKernel* kernel = ameva_op_kernel(f16 ? AMEVA_K_ROPE_F16 : AMEVA_K_ROPE);
     if (!kernel) return "no ameva_rope kernel";
     AmevaBind ba, bp, bf, bd;
-    const char* e = ameva_bind(a, 4, &ba);
+    const char* e = ameva_bind(a, f16 ? 2 : 4, &ba);
     if (!e) e = ameva_bind(pos, 4, &bp);
     if (!e) e = ameva_bind(ff ? ff : pos, 4, &bf); // any valid range when there are no frequency factors
-    if (!e) e = ameva_bind(node, 4, &bd);
+    if (!e) e = ameva_bind(node, f16 ? 2 : 4, &bd);
     if (e) return e;
     const int32_t* p = (const int32_t*)node->op_params;
     const int n_dims = p[1], mode = p[2], n_ctx_orig = p[4];

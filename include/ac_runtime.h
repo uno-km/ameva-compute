@@ -507,6 +507,8 @@ typedef struct {
     uint32_t integer_dot_product;             /* 1: shaders may use packed int8 dot products
                                                  (VK_KHR_shader_integer_dot_product enabled) */
     uint32_t integer_dot_product_accelerated; /* 1: the driver reports the signed 4x8 packed form as accelerated */
+    uint32_t shader_float16;                  /* 1: shaders may compute with 16-bit floats (shaderFloat16 of
+                                                 VK_KHR_shader_float16_int8 enabled) */
 } AcDeviceLimits;
 
 /**

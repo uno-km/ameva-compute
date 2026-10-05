@@ -1,6 +1,9 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_control_flow_attributes : require
+#ifdef F16
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#endif
 // AMEVA QGEMM: ggml MUL_MAT (dst = src0^T x src1) for many activation rows (prompt processing), src0 stored in the
 // AMEVA repacked layout (ggml-ameva-repack.h).
 //
@@ -21,6 +24,12 @@
 //   push: M, K, N (weight rows of this dispatch), q_off, h_off (Q / H vector elements), s_off (bytes, even), a_off,
 //         d_off, s1, sd (floats; a_off and s1 multiples of 4)
 //   grid: (ceil(N / 64), ceil(M / 32))
+//
+// -DF16 (EXPERIMENT, timing only): the two shared tiles hold 16-bit floats and the 32 products of a unit are summed
+// in 16-bit floats (shaderFloat16), then added to the f32 accumulators. Mali Valhall executes two 16-bit float
+// operations per instruction, so the inner loop should take half the instructions. The activations are converted
+// as they are: a value beyond the 16-bit range (65504) becomes infinite, which a kernel for real use has to exclude
+// (per-unit normalization of the activations).
 
 layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
 
@@ -40,8 +49,15 @@ layout(push_constant) uniform PushConstants {
 #define BM 32u // activation rows per tile
 
 // tile_w[k * 16 + n / 4][n % 4] = W[n0 + n][k0 + k], tile_a[k * 8 + m / 4][m % 4] = A[m0 + m][k0 + k]
-shared vec4 tile_w[32 * (BN / 4u)];
-shared vec4 tile_a[32 * (BM / 4u)];
+#ifdef F16
+#define TVEC f16vec4
+#define TSCALAR(x) float16_t(x)
+#else
+#define TVEC vec4
+#define TSCALAR(x) (x)
+#endif
+shared TVEC tile_w[32 * (BN / 4u)];
+shared TVEC tile_a[32 * (BM / 4u)];
 
 void main() {
     const uint tid = gl_LocalInvocationID.x;
@@ -73,22 +89,37 @@ void main() {
                    u - b * UPB, w);
             [[unroll]] for (uint i = 0u; i < 8u; ++i) {
                 const uint k = 4u * (i & 3u) + 16u * (i >> 2u); // w[i] holds weights k .. k + 3 of the unit
-                tile_w[(k + 0u) * 16u + dcol][dcomp] = w[i].x;
-                tile_w[(k + 1u) * 16u + dcol][dcomp] = w[i].y;
-                tile_w[(k + 2u) * 16u + dcol][dcomp] = w[i].z;
-                tile_w[(k + 3u) * 16u + dcol][dcomp] = w[i].w;
+                tile_w[(k + 0u) * 16u + dcol][dcomp] = TSCALAR(w[i].x);
+                tile_w[(k + 1u) * 16u + dcol][dcomp] = TSCALAR(w[i].y);
+                tile_w[(k + 2u) * 16u + dcol][dcomp] = TSCALAR(w[i].z);
+                tile_w[(k + 3u) * 16u + dcol][dcomp] = TSCALAR(w[i].w);
             }
         }
         [[unroll]] for (uint e = 0u; e < 2u; ++e) {
             const uint v = tid + 128u * e;
             const uint r = v >> 3u, kq = v & 7u;
             const vec4 x = a4[arow[e] + 8u * u];
-            tile_a[(4u * kq + 0u) * 8u + (r >> 2u)][r & 3u] = x.x;
-            tile_a[(4u * kq + 1u) * 8u + (r >> 2u)][r & 3u] = x.y;
-            tile_a[(4u * kq + 2u) * 8u + (r >> 2u)][r & 3u] = x.z;
-            tile_a[(4u * kq + 3u) * 8u + (r >> 2u)][r & 3u] = x.w;
+            tile_a[(4u * kq + 0u) * 8u + (r >> 2u)][r & 3u] = TSCALAR(x.x);
+            tile_a[(4u * kq + 1u) * 8u + (r >> 2u)][r & 3u] = TSCALAR(x.y);
+            tile_a[(4u * kq + 2u) * 8u + (r >> 2u)][r & 3u] = TSCALAR(x.z);
+            tile_a[(4u * kq + 3u) * 8u + (r >> 2u)][r & 3u] = TSCALAR(x.w);
         }
         barrier();
+#ifdef F16
+        f16vec4 h0 = f16vec4(0.0hf), h1 = f16vec4(0.0hf), h2 = f16vec4(0.0hf), h3 = f16vec4(0.0hf);
+        [[unroll]] for (uint k = 0u; k < 32u; ++k) {
+            const f16vec4 wv = tile_w[k * 16u + tn];
+            const f16vec4 av = tile_a[k * 8u + tm];
+            h0 = fma(wv, f16vec4(av.x), h0);
+            h1 = fma(wv, f16vec4(av.y), h1);
+            h2 = fma(wv, f16vec4(av.z), h2);
+            h3 = fma(wv, f16vec4(av.w), h3);
+        }
+        acc0 += vec4(h0);
+        acc1 += vec4(h1);
+        acc2 += vec4(h2);
+        acc3 += vec4(h3);
+#else
         [[unroll]] for (uint k = 0u; k < 32u; ++k) {
             const vec4 wv = tile_w[k * 16u + tn];
             const vec4 av = tile_a[k * 8u + tm];
@@ -97,6 +128,7 @@ void main() {
             acc2 = fma(wv, vec4(av.z), acc2);
             acc3 = fma(wv, vec4(av.w), acc3);
         }
+#endif
         barrier();
     }
 

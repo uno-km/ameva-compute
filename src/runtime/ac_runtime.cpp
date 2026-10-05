@@ -1199,6 +1199,9 @@ AcResult ac_runtime_context_get_limits(const AcContext* ctx, AcDeviceLimits* out
         out_limits->integer_dot_product = vk->integer_dot_product;
         out_limits->integer_dot_product_accelerated = vk->integer_dot_product_accelerated;
     }
+    if (out_limits->struct_size >= offsetof(AcDeviceLimits, shader_float16) + sizeof(uint32_t)) {
+        out_limits->shader_float16 = vk->shader_float16;
+    }
     return AC_SUCCESS;
 }
 

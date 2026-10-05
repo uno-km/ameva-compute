@@ -36,6 +36,8 @@ struct AcVkContext {
        int8 dot products in shaders), and whether the driver reports the signed 4x8 packed form as accelerated */
     uint32_t integer_dot_product;
     uint32_t integer_dot_product_accelerated;
+    /* VK_KHR_shader_float16_int8: 1 when shaderFloat16 is enabled on the device (16-bit float arithmetic in shaders) */
+    uint32_t shader_float16;
     /* Compiled pipelines of this device, used by every kernel creation; filled from saved data with
        ac_vk_pipeline_cache_merge and read back with ac_vk_pipeline_cache_get_data. */
     VkPipelineCache pipeline_cache;

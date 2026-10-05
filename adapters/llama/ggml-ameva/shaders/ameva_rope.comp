@@ -5,6 +5,13 @@
 //   theta_j = p * theta_scale^j, built by the same repeated f32 multiplication as the CPU (bit-identical angle),
 //   divided by freq_factors[j], then YaRN interpolation and magnitude scaling; sin/cos by ameva_sincos.
 // Pairs: NORMAL (2j, 2j+1), NEOX (j, j + n_dims/2); elements past n_dims are copied unchanged.
+//
+// -DF16 (op kernel rope_f16): source and destination are f16 (offsets and strides in f16 elements). llama.cpp shifts
+// its KV cache by rotating the stored keys in place (llama_kv_cache::build_rope_shift, ggml_rope_ext_inplace on a
+// view of the f16 cache), so source and destination may be the same range: an invocation reads its two elements
+// before it writes them and no other invocation touches them. The values are converted as the CPU backend does
+// (exact f16 -> f32, f32 -> f16 to nearest even), and the two halves of a 32-bit word, which NEOX gives to different
+// invocations, are stored with atomics (AMEVA_STORE_F16).
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 #include "ameva_common.glsl"
@@ -12,7 +19,16 @@ layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 layout(std430, binding = 0) readonly buffer A { uint a[]; };
 layout(std430, binding = 1) readonly buffer P { int pos[]; };
 layout(std430, binding = 2) readonly buffer F { uint ff[]; };   // bound to any buffer when has_ff == 0
-layout(std430, binding = 3) writeonly buffer D { uint d[]; };
+#ifdef F16
+#define D_ACCESS // read and written: the f16 stores are atomics on half words
+#define LOAD_ELEM(i) AMEVA_LOAD_F16(a, i)
+#define STORE_ELEM(i, v) AMEVA_STORE_F16(d, i, v)
+#else
+#define D_ACCESS writeonly
+#define LOAD_ELEM(i) uintBitsToFloat(a[i])
+#define STORE_ELEM(i, v) d[i] = floatBitsToUint(v)
+#endif
+layout(std430, binding = 3) D_ACCESS buffer D { uint d[]; };
 
 layout(push_constant) uniform PushConstants {
     uint ne0, ne1, ne2, ne3;
@@ -38,8 +54,10 @@ void main() {
     const uint db = pc.d_off + i1 * pc.d_s1 + i2 * pc.d_s2 + i3 * pc.d_s3;
 
     if (2u * j >= pc.n_dims) {
-        d[db + 2u * j] = a[ab + 2u * j];
-        d[db + 2u * j + 1u] = a[ab + 2u * j + 1u];
+        const float c0 = LOAD_ELEM(ab + 2u * j);
+        const float c1 = LOAD_ELEM(ab + 2u * j + 1u);
+        STORE_ELEM(db + 2u * j, c0);
+        STORE_ELEM(db + 2u * j + 1u, c1);
         return;
     }
 
@@ -68,8 +86,8 @@ void main() {
 
     const uint e0 = pc.mode_neox != 0u ? j : 2u * j;
     const uint e1 = pc.mode_neox != 0u ? j + (pc.n_dims >> 1u) : 2u * j + 1u;
-    const float x0 = uintBitsToFloat(a[ab + e0]);
-    const float x1 = uintBitsToFloat(a[ab + e1]);
-    d[db + e0] = floatBitsToUint(x0 * cos_t - x1 * sin_t);
-    d[db + e1] = floatBitsToUint(x0 * sin_t + x1 * cos_t);
+    const float x0 = LOAD_ELEM(ab + e0);
+    const float x1 = LOAD_ELEM(ab + e1);
+    STORE_ELEM(db + e0, x0 * cos_t - x1 * sin_t);
+    STORE_ELEM(db + e1, x0 * sin_t + x1 * cos_t);
 }

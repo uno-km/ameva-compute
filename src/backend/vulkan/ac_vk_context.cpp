@@ -95,19 +95,27 @@ AcResult ac_vk_context_create(AcVkContext** out_ctx) {
     /* VK_KHR_shader_integer_dot_product (packed int8 dot products, used by integer matrix kernels): enabled when the
        device offers the extension and its feature; reported through AcDeviceLimits, never assumed. */
     uint32_t intDot = 0, intDotAccelerated = 0;
-    const char* deviceExtensions[1];
+    /* VK_KHR_shader_float16_int8, feature shaderFloat16 (16-bit float arithmetic in shaders, used by half-precision
+       matrix kernels): enabled the same way, reported through AcDeviceLimits. shaderInt8 is not requested. */
+    uint32_t shaderFloat16 = 0;
+    const char* deviceExtensions[2];
     uint32_t deviceExtensionCount = 0;
     VkPhysicalDeviceShaderIntegerDotProductFeaturesKHR intDotFeatures = {};
     intDotFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES_KHR;
+    VkPhysicalDeviceShaderFloat16Int8FeaturesKHR f16Features = {};
+    f16Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES_KHR;
     if (selectedProps.apiVersion >= VK_MAKE_VERSION(1, 1, 0)) {
         uint32_t extCount = 0;
-        bool offered = false;
+        bool offered = false, f16Offered = false;
         if (vkEnumerateDeviceExtensionProperties(selectedDevice, NULL, &extCount, NULL) == VK_SUCCESS && extCount > 0) {
             VkExtensionProperties* exts = (VkExtensionProperties*)calloc(extCount, sizeof(VkExtensionProperties));
             if (exts && vkEnumerateDeviceExtensionProperties(selectedDevice, NULL, &extCount, exts) == VK_SUCCESS) {
                 for (uint32_t e = 0; e < extCount; ++e) {
                     if (strcmp(exts[e].extensionName, VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME) == 0) {
                         offered = true;
+                    }
+                    if (strcmp(exts[e].extensionName, VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME) == 0) {
+                        f16Offered = true;
                     }
                 }
             }
@@ -131,6 +139,20 @@ AcResult ac_vk_context_create(AcVkContext** out_ctx) {
                 intDotFeatures.pNext = NULL;
                 intDotFeatures.shaderIntegerDotProduct = VK_TRUE;
                 deviceCreateInfo.pNext = &intDotFeatures;
+            }
+        }
+        if (f16Offered) {
+            VkPhysicalDeviceFeatures2 features2 = {};
+            features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            features2.pNext = &f16Features;
+            vkGetPhysicalDeviceFeatures2(selectedDevice, &features2);
+            if (f16Features.shaderFloat16) {
+                shaderFloat16 = 1;
+                deviceExtensions[deviceExtensionCount++] = VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME;
+                f16Features.shaderFloat16 = VK_TRUE;
+                f16Features.shaderInt8 = VK_FALSE;
+                f16Features.pNext = (void*)deviceCreateInfo.pNext; /* after the integer-dot features, if enabled */
+                deviceCreateInfo.pNext = &f16Features;
             }
         }
     }
@@ -184,6 +206,7 @@ AcResult ac_vk_context_create(AcVkContext** out_ctx) {
     ctx->recording_batches = 0;
     ctx->integer_dot_product = intDot;
     ctx->integer_dot_product_accelerated = intDotAccelerated;
+    ctx->shader_float16 = shaderFloat16;
     ctx->pipeline_cache = VK_NULL_HANDLE;
     {
         VkPipelineCacheCreateInfo pci = {};

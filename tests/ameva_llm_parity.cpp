@@ -26,6 +26,20 @@
 //                  AMEVA on the quantized model must then agree to fp32 accumulation-order noise; a "cpu-model" run
 //                  shows the CPU backend's own distance on the quantized model for comparison. Gate: kld_mean
 //                  <= 1e-4 unless --gate-kld says otherwise.
+// Long chunks: the reference keeps scored x n_vocab log-probabilities and llama keeps the logits of every scored
+// position of a llama_decode, so --ctx 2048 with the defaults needs about 0.6 GB three times over for a vocabulary of
+// 150 000 (Android ended Termux on a 5.4 GB phone). --batch B feeds the batch runs B tokens per llama_decode (the KV
+// cache still grows to n_ctx) and --score-step S scores every S-th position of the second half; --ctx 2048 --batch
+// 256 --score-step 8 holds 128 positions per chunk.
+// KV-cache operations of a chat front end (--kv-ops K, K positions each; off by default):
+//   shift  the context is filled, the older half of its cells is discarded and the rest is moved down
+//          (llama_memory_seq_rm + llama_memory_seq_add, as llama-completion --context-shift does; with RoPE the
+//          backend that owns the cache rotates the stored keys in place), then K further tokens are decoded one by
+//          one. Compared with the same sequence on the CPU; gate as for the other runs.
+//   reuse  after a prefix, K tokens are decoded, removed (seq_rm), replaced by K other tokens, removed again and
+//          decoded once more: the logits of the third pass against the first, on the same backend. The two passes are
+//          the same computation, so a divergence means cells that kept data of the replaced tokens. Gate: kld_max
+//          <= 1e-4 on AMEVA; the CPU's figure is printed for comparison.
 // Top-1 agreement is reported, not gated: on a few hundred positions near-ties make it move by whole percents
 // between two CPU kernel paths of the same backend.
 // Exit status 0 only if both AMEVA runs meet the gate and every AMEVA phase dispatched GPU work.
@@ -52,6 +66,9 @@ struct Options {
     const char* prompt = "The three primary colors are";
     int ctx = 256;
     int chunks = 2;
+    int batch = 0;       // tokens per llama_decode of the batch runs (0: the whole chunk)
+    int score_step = 1;  // every score_step-th position of the second half of a chunk is scored
+    int kv_ops = 0;      // > 0: the shift and reuse runs with this many scored positions each
     int threads = 4;
     int gen = 32;
     bool cpu_decode = true;
@@ -136,6 +153,7 @@ struct Run {
     int64_t evaluated = 0;    // tokens fed to llama_decode
     int64_t gpu_ops = -1;     // AMEVA MUL_MAT nodes completed during the run (-1: CPU run)
     int64_t gpu_nodes = -1;   // AMEVA nodes of any op completed during the run
+    bool chunk_positions = true; // scored positions are those of eval_chunks (kld_max_pos is printed)
 };
 
 struct Reference {
@@ -145,12 +163,19 @@ struct Reference {
     std::vector<float> lp_next;
 };
 
+static bool scored_pos(const Options& o, int j) {
+    const int first = o.ctx / 2;
+    return j >= first && j < o.ctx - 1 && (j - first) % o.score_step == 0;
+}
+
+static int scored_per_chunk(const Options& o) { return (o.ctx - 1 - o.ctx / 2 + o.score_step - 1) / o.score_step; }
+
 // Evaluates every chunk in batch or decode mode; on_pos(scored_index, logits, next_token) per scored position.
 template <class F>
 static bool eval_chunks(llama_context* ctx, const std::vector<llama_token>& toks, const Options& o, bool add_bos,
                         llama_token bos, bool decode_mode, Run& run, F on_pos) {
-    const int n_ctx = o.ctx, first = n_ctx / 2;
-    llama_batch batch = llama_batch_init(n_ctx, 0, 1);
+    const int n_ctx = o.ctx, B = o.batch > 0 ? o.batch : n_ctx;
+    llama_batch batch = llama_batch_init(B, 0, 1);
     int si = 0;
     bool ok = true;
     for (int c = 0; c < o.chunks && ok; ++c) {
@@ -158,31 +183,36 @@ static bool eval_chunks(llama_context* ctx, const std::vector<llama_token>& toks
         std::vector<llama_token> ch(toks.begin() + (size_t)c * n_ctx, toks.begin() + (size_t)(c + 1) * n_ctx);
         if (add_bos) ch[0] = bos;
         if (!decode_mode) {
-            for (int j = 0; j < n_ctx; ++j) {
-                batch.token[j] = ch[j];
-                batch.pos[j] = j;
-                batch.n_seq_id[j] = 1;
-                batch.seq_id[j][0] = 0;
-                batch.logits[j] = (j >= first && j < n_ctx - 1) ? 1 : 0;
-            }
-            batch.n_tokens = n_ctx;
-            const double t0 = now_s();
-            const int rc = llama_decode(ctx, batch);
-            run.decode_s += now_s() - t0;
-            run.evaluated += n_ctx;
-            if (rc != 0) {
-                fprintf(stderr, "%s: llama_decode failed (%d) in chunk %d\n", run.name.c_str(), rc, c);
-                ok = false;
-                break;
-            }
-            for (int j = first; j < n_ctx - 1; ++j) {
-                const float* lg = llama_get_logits_ith(ctx, j);
-                if (!lg) {
-                    fprintf(stderr, "%s: no logits for position %d\n", run.name.c_str(), j);
+            for (int p0 = 0; p0 < n_ctx && ok; p0 += B) {
+                const int n = std::min(B, n_ctx - p0);
+                for (int j = 0; j < n; ++j) {
+                    batch.token[j] = ch[p0 + j];
+                    batch.pos[j] = p0 + j;
+                    batch.n_seq_id[j] = 1;
+                    batch.seq_id[j][0] = 0;
+                    batch.logits[j] = scored_pos(o, p0 + j) ? 1 : 0;
+                }
+                batch.n_tokens = n;
+                const double t0 = now_s();
+                const int rc = llama_decode(ctx, batch);
+                run.decode_s += now_s() - t0;
+                run.evaluated += n;
+                if (rc != 0) {
+                    fprintf(stderr, "%s: llama_decode failed (%d) in chunk %d at position %d\n", run.name.c_str(), rc,
+                            c, p0);
                     ok = false;
                     break;
                 }
-                on_pos(si++, lg, ch[j + 1]);
+                for (int j = 0; j < n; ++j) {
+                    if (!scored_pos(o, p0 + j)) continue;
+                    const float* lg = llama_get_logits_ith(ctx, j);
+                    if (!lg) {
+                        fprintf(stderr, "%s: no logits for position %d\n", run.name.c_str(), p0 + j);
+                        ok = false;
+                        break;
+                    }
+                    on_pos(si++, lg, ch[p0 + j + 1]);
+                }
             }
         } else {
             for (int j = 0; j < n_ctx - 1; ++j) {
@@ -190,7 +220,7 @@ static bool eval_chunks(llama_context* ctx, const std::vector<llama_token>& toks
                 batch.pos[0] = j;
                 batch.n_seq_id[0] = 1;
                 batch.seq_id[0][0] = 0;
-                batch.logits[0] = j >= first ? 1 : 0;
+                batch.logits[0] = scored_pos(o, j) ? 1 : 0;
                 batch.n_tokens = 1;
                 const double t0 = now_s();
                 const int rc = llama_decode(ctx, batch);
@@ -202,7 +232,7 @@ static bool eval_chunks(llama_context* ctx, const std::vector<llama_token>& toks
                     ok = false;
                     break;
                 }
-                if (j >= first) {
+                if (scored_pos(o, j)) {
                     const float* lg = llama_get_logits_ith(ctx, 0);
                     if (!lg) {
                         fprintf(stderr, "%s: no logits for position %d\n", run.name.c_str(), j);
@@ -219,56 +249,178 @@ static bool eval_chunks(llama_context* ctx, const std::vector<llama_token>& toks
     return ok;
 }
 
+// Scored position si of a reference run: its log-probabilities are kept
+static void reference_position(Reference& ref, Run& run, int si, const float* lg, llama_token next) {
+    const int n_vocab = ref.n_vocab;
+    float* lp = &ref.logp[(size_t)si * n_vocab];
+    const int am = log_softmax(lg, n_vocab, lp);
+    if (am < 0) {
+        run.nonfinite++;
+        run.ok = false;
+        ref.top1[si] = -1;
+        ref.lp_next[si] = 0.0f;
+        return;
+    }
+    ref.top1[si] = am;
+    ref.lp_next[si] = lp[next];
+    run.nll -= lp[next];
+    run.scored++;
+}
+
+// Scored position si of a run against the reference (lp: scratch of n_vocab floats)
+static void compare_position(const Reference& ref, Run& run, std::vector<float>& lp, int si, const float* lg,
+                             llama_token next) {
+    const int n_vocab = ref.n_vocab;
+    const int am = log_softmax(lg, n_vocab, lp.data());
+    if (am < 0 || ref.top1[si] < 0) {
+        run.nonfinite++;
+        run.ok = false;
+        return;
+    }
+    const float* rp = &ref.logp[(size_t)si * n_vocab];
+    double kl = 0.0;
+    for (int i = 0; i < n_vocab; ++i) {
+        const double p = std::exp((double)rp[i]);
+        kl += p * ((double)rp[i] - (double)lp[i]);
+    }
+    run.kld.push_back(kl);
+    if (am == ref.top1[si]) run.top1_same++;
+    const double d = (double)lp[next] - (double)ref.lp_next[si];
+    run.dlogp_sq += d * d;
+    run.nll -= lp[next];
+    run.scored++;
+}
+
 static void run_reference(llama_context* ctx, const std::vector<llama_token>& toks, const Options& o, bool add_bos,
                           llama_token bos, Reference& ref, Run& run) {
-    const int n_vocab = ref.n_vocab;
-    eval_chunks(ctx, toks, o, add_bos, bos, false, run, [&](int si, const float* lg, llama_token next) {
-        float* lp = &ref.logp[(size_t)si * n_vocab];
-        const int am = log_softmax(lg, n_vocab, lp);
-        if (am < 0) {
-            run.nonfinite++;
-            run.ok = false;
-            ref.top1[si] = -1;
-            ref.lp_next[si] = 0.0f;
-            return;
-        }
-        ref.top1[si] = am;
-        ref.lp_next[si] = lp[next];
-        run.nll -= lp[next];
-        run.scored++;
-    });
+    eval_chunks(ctx, toks, o, add_bos, bos, false, run,
+                [&](int si, const float* lg, llama_token next) { reference_position(ref, run, si, lg, next); });
 }
 
 static void run_compare(llama_context* ctx, const std::vector<llama_token>& toks, const Options& o, bool add_bos,
                         llama_token bos, bool decode_mode, const Reference& ref, Run& run) {
-    const int n_vocab = ref.n_vocab;
-    std::vector<float> lp(n_vocab);
+    std::vector<float> lp(ref.n_vocab);
     const int64_t ops0 = g_gpu_ops && run.gpu_ops >= 0 ? g_gpu_ops() : 0;
     const int64_t nodes0 = g_gpu_nodes && run.gpu_ops >= 0 ? g_gpu_nodes() : 0;
-    eval_chunks(ctx, toks, o, add_bos, bos, decode_mode, run, [&](int si, const float* lg, llama_token next) {
-        const int am = log_softmax(lg, n_vocab, lp.data());
-        if (am < 0 || ref.top1[si] < 0) {
-            run.nonfinite++;
-            run.ok = false;
-            return;
-        }
-        const float* rp = &ref.logp[(size_t)si * n_vocab];
-        double kl = 0.0;
-        for (int i = 0; i < n_vocab; ++i) {
-            const double p = std::exp((double)rp[i]);
-            kl += p * ((double)rp[i] - (double)lp[i]);
-        }
-        run.kld.push_back(kl);
-        if (am == ref.top1[si]) run.top1_same++;
-        const double d = (double)lp[next] - (double)ref.lp_next[si];
-        run.dlogp_sq += d * d;
-        run.nll -= lp[next];
-        run.scored++;
-    });
+    eval_chunks(ctx, toks, o, add_bos, bos, decode_mode, run,
+                [&](int si, const float* lg, llama_token next) { compare_position(ref, run, lp, si, lg, next); });
     if (g_gpu_ops && run.gpu_ops >= 0) {
         run.gpu_ops = g_gpu_ops() - ops0;
         run.gpu_nodes = g_gpu_nodes() - nodes0;
     }
+}
+
+// n tokens at positions pos0 .., batch_size per llama_decode, no logits
+static bool decode_tokens(llama_context* ctx, const llama_token* t, int n, int pos0, int batch_size, Run& run) {
+    llama_batch batch = llama_batch_init(batch_size, 0, 1);
+    bool ok = true;
+    for (int p = 0; p < n && ok; p += batch_size) {
+        const int m = std::min(batch_size, n - p);
+        for (int j = 0; j < m; ++j) {
+            batch.token[j] = t[p + j];
+            batch.pos[j] = pos0 + p + j;
+            batch.n_seq_id[j] = 1;
+            batch.seq_id[j][0] = 0;
+            batch.logits[j] = 0;
+        }
+        batch.n_tokens = m;
+        const double t0 = now_s();
+        const int rc = llama_decode(ctx, batch);
+        run.decode_s += now_s() - t0;
+        run.evaluated += m;
+        if (rc != 0) {
+            fprintf(stderr, "%s: llama_decode failed (%d) at position %d\n", run.name.c_str(), rc, pos0 + p);
+            ok = false;
+        }
+    }
+    llama_batch_free(batch);
+    return ok;
+}
+
+// n tokens at positions pos0 .., one per llama_decode; on_pos(i, logits, t[i + 1]) for each (t holds n + 1 tokens)
+template <class F>
+static bool decode_scored(llama_context* ctx, const llama_token* t, int n, int pos0, Run& run, F on_pos) {
+    llama_batch batch = llama_batch_init(1, 0, 1);
+    bool ok = true;
+    for (int i = 0; i < n && ok; ++i) {
+        batch.token[0] = t[i];
+        batch.pos[0] = pos0 + i;
+        batch.n_seq_id[0] = 1;
+        batch.seq_id[0][0] = 0;
+        batch.logits[0] = 1;
+        batch.n_tokens = 1;
+        const double t0 = now_s();
+        const int rc = llama_decode(ctx, batch);
+        run.decode_s += now_s() - t0;
+        run.evaluated += 1;
+        const float* lg = rc == 0 ? llama_get_logits_ith(ctx, 0) : nullptr;
+        if (!lg) {
+            fprintf(stderr, "%s: llama_decode failed (%d) or gave no logits at position %d\n", run.name.c_str(), rc,
+                    pos0 + i);
+            ok = false;
+            break;
+        }
+        on_pos(i, lg, t[i + 1]);
+    }
+    llama_batch_free(batch);
+    return ok;
+}
+
+// Context shift (see the header): fills the context, discards the older half as llama-completion does, then scores
+// o.kv_ops further tokens.
+template <class F>
+static bool eval_shift(llama_context* ctx, const std::vector<llama_token>& toks, const Options& o, bool add_bos,
+                       llama_token bos, Run& run, F on_pos) {
+    const int n_ctx = o.ctx, K = o.kv_ops;
+    llama_memory_t mem = llama_get_memory(ctx);
+    llama_memory_clear(mem, true);
+    std::vector<llama_token> ch(toks.begin(), toks.begin() + n_ctx + K + 1);
+    if (add_bos) ch[0] = bos;
+    bool ok = decode_tokens(ctx, ch.data(), n_ctx, 0, o.batch > 0 ? o.batch : n_ctx, run);
+    const int n_keep = add_bos ? 1 : 0;
+    const int n_discard = (n_ctx - n_keep) / 2;
+    if (ok && !llama_memory_seq_rm(mem, 0, n_keep, n_keep + n_discard)) {
+        fprintf(stderr, "%s: llama_memory_seq_rm refused the removal\n", run.name.c_str());
+        ok = false;
+    }
+    if (ok) {
+        llama_memory_seq_add(mem, 0, n_keep + n_discard, n_ctx, -n_discard);
+        ok = decode_scored(ctx, ch.data() + n_ctx, K, n_ctx - n_discard, run, on_pos);
+    }
+    run.ok = run.ok && ok;
+    return ok;
+}
+
+// Removal and reuse of cells (see the header): the third pass against the first on one backend.
+static bool eval_reuse(llama_context* ctx, const std::vector<llama_token>& toks, const Options& o, bool add_bos,
+                       llama_token bos, int n_vocab, Run& run) {
+    const int K = o.kv_ops, P = o.ctx / 2;
+    llama_memory_t mem = llama_get_memory(ctx);
+    llama_memory_clear(mem, true);
+    std::vector<llama_token> ch(toks.begin(), toks.begin() + P + 2 * K + 2);
+    if (add_bos) ch[0] = bos;
+    Reference first;
+    first.n_vocab = n_vocab;
+    first.logp.assign((size_t)K * n_vocab, 0.0f);
+    first.top1.assign((size_t)K, -1);
+    first.lp_next.assign((size_t)K, 0.0f);
+    std::vector<float> lp(n_vocab);
+    Run pass1, pass2;
+    pass1.name = pass2.name = run.name;
+    bool ok = decode_tokens(ctx, ch.data(), P, 0, o.batch > 0 ? o.batch : o.ctx, run);
+    ok = ok && decode_scored(ctx, ch.data() + P, K, P, pass1, [&](int i, const float* lg, llama_token next) {
+        reference_position(first, pass1, i, lg, next);
+    });
+    ok = ok && pass1.ok && llama_memory_seq_rm(mem, 0, P, -1);
+    ok = ok && decode_scored(ctx, ch.data() + P + K + 1, K, P, pass2, [](int, const float*, llama_token) {});
+    ok = ok && llama_memory_seq_rm(mem, 0, P, -1);
+    ok = ok && decode_scored(ctx, ch.data() + P, K, P, run, [&](int i, const float* lg, llama_token next) {
+        compare_position(first, run, lp, i, lg, next);
+    });
+    run.decode_s += pass1.decode_s + pass2.decode_s;
+    run.evaluated += pass1.evaluated + pass2.evaluated;
+    run.ok = run.ok && ok;
+    return ok;
 }
 
 static std::string piece(const llama_vocab* vocab, llama_token t) {
@@ -355,8 +507,8 @@ static llama_model* load_model(const Options& o, const char* path, ggml_backend_
 static llama_context* make_ctx(llama_model* m, const Options& o) {
     llama_context_params cp = llama_context_default_params();
     cp.n_ctx = (uint32_t)o.ctx;
-    cp.n_batch = (uint32_t)o.ctx;
-    cp.n_ubatch = (uint32_t)o.ctx;
+    cp.n_batch = (uint32_t)(o.batch > 0 ? o.batch : o.ctx);
+    cp.n_ubatch = cp.n_batch;
     cp.n_seq_max = 1;
     cp.n_threads = o.threads;
     cp.n_threads_batch = o.threads;
@@ -384,19 +536,26 @@ static void print_run(const Run& r, const Options& o, bool is_ref) {
     printf("run=%-12s ok=%d scored=%d ppl=%.4f", r.name.c_str(), (int)r.ok, r.scored, ppl);
     if (!is_ref) {
         double mean = 0.0, mx = 0.0;
-        for (double k : r.kld) {
-            mean += k;
-            mx = std::max(mx, k);
+        size_t at = 0;
+        for (size_t i = 0; i < r.kld.size(); ++i) {
+            mean += r.kld[i];
+            if (r.kld[i] > mx) {
+                mx = r.kld[i];
+                at = i;
+            }
         }
         mean = r.kld.empty() ? 0.0 : mean / (double)r.kld.size();
         printf(" kld_mean=%.3e kld_p99=%.3e kld_max=%.3e top1=%.2f%% dlogp_rms=%.4f", mean, percentile(r.kld, 0.99),
                mx, r.scored ? 100.0 * r.top1_same / r.scored : 0.0, r.scored ? std::sqrt(r.dlogp_sq / r.scored) : 0.0);
+        // chunk position of the largest divergence (meaningful when no position was dropped as non-finite)
+        if (r.chunk_positions && !r.kld.empty() && !r.nonfinite) {
+            printf(" kld_max_pos=%d", o.ctx / 2 + (int)(at % (size_t)scored_per_chunk(o)) * o.score_step);
+        }
     }
     printf(" decode_tok_s=%.2f", r.decode_s > 0 ? (double)r.evaluated / r.decode_s : 0.0);
     if (r.gpu_ops >= 0) printf(" gpu_mul_mat=%lld gpu_nodes=%lld", (long long)r.gpu_ops, (long long)r.gpu_nodes);
     if (r.nonfinite) printf(" nonfinite=%d", r.nonfinite);
     printf("\n");
-    (void)o;
 }
 
 static bool gate(const Run& r, const Options& o) {
@@ -410,7 +569,8 @@ static bool gate(const Run& r, const Options& o) {
 static void usage(const char* argv0) {
     fprintf(stderr,
             "usage: %s --model M.gguf --plugin libggml-ameva.so --text corpus.txt [--ref-model M_f32.gguf]\n"
-            "          [--ctx 256] [--chunks 2] [--threads 4] [--gen 32] [--prompt TEXT] [--no-cpu-decode]\n"
+            "          [--ctx 256] [--chunks 2] [--batch 0] [--score-step 1] [--threads 4] [--gen 32] [--prompt TEXT]\n"
+            "          [--no-cpu-decode] [--kv-ops 0]\n"
             "          [--fa on|off] [--kv f16|f32|q8_0|q4_0] [--gate-kld X]\n",
             argv0);
 }
@@ -427,6 +587,9 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--prompt") && has) o.prompt = argv[++i];
         else if (!strcmp(a, "--ctx") && has) o.ctx = atoi(argv[++i]);
         else if (!strcmp(a, "--chunks") && has) o.chunks = atoi(argv[++i]);
+        else if (!strcmp(a, "--batch") && has) o.batch = atoi(argv[++i]);
+        else if (!strcmp(a, "--score-step") && has) o.score_step = atoi(argv[++i]);
+        else if (!strcmp(a, "--kv-ops") && has) o.kv_ops = atoi(argv[++i]);
         else if (!strcmp(a, "--threads") && has) o.threads = atoi(argv[++i]);
         else if (!strcmp(a, "--gen") && has) o.gen = atoi(argv[++i]);
         else if (!strcmp(a, "--gate-kld") && has) o.gate_kld = atof(argv[++i]);
@@ -448,7 +611,8 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
-    if (!o.model || !o.plugin || !o.text || o.ctx < 8 || o.ctx % 2 || o.chunks < 1 || o.gen < 1) {
+    if (!o.model || !o.plugin || !o.text || o.ctx < 8 || o.ctx % 2 || o.chunks < 1 || o.gen < 1 || o.batch < 0 ||
+        o.score_step < 1 || o.kv_ops < 0 || o.kv_ops > o.ctx / 4) {
         usage(argv[0]);
         return 2;
     }
@@ -501,8 +665,9 @@ int main(int argc, char** argv) {
     std::vector<llama_token> toks(text.size() + 16);
     const int nt = llama_tokenize(vocab, text.data(), (int32_t)text.size(), toks.data(), (int32_t)toks.size(), add_bos,
                                   false);
-    if (nt < o.ctx * o.chunks) {
-        fprintf(stderr, "the text has %d tokens, %d are needed\n", nt, o.ctx * o.chunks);
+    const int nt_needed = std::max(o.ctx * o.chunks, o.kv_ops ? o.ctx + o.kv_ops + 1 : 0);
+    if (nt < nt_needed) {
+        fprintf(stderr, "the text has %d tokens, %d are needed\n", nt, nt_needed);
         return 2;
     }
     toks.resize((size_t)nt);
@@ -518,11 +683,12 @@ int main(int argc, char** argv) {
     char desc[128];
     llama_model_desc(model, desc, sizeof(desc));
     const char* base = strrchr(o.model, '/');
-    const int scored_total = o.chunks * (o.ctx - 1 - o.ctx / 2);
-    printf("AMEVA_LLM_PARITY model=\"%s\" file=%s params=%.2fM n_vocab=%d layers=%d ctx=%d chunks=%d scored=%d "
-           "threads=%d flash_attn=%s kv=%s reference=%s\n",
+    const int scored_total = o.chunks * scored_per_chunk(o);
+    printf("AMEVA_LLM_PARITY model=\"%s\" file=%s params=%.2fM n_vocab=%d layers=%d ctx=%d chunks=%d batch=%d "
+           "score_step=%d scored=%d threads=%d flash_attn=%s kv=%s reference=%s\n",
            desc, base ? base + 1 : o.model, llama_model_n_params(model) / 1e6, ref.n_vocab, llama_model_n_layer(model),
-           o.ctx, o.chunks, scored_total, o.threads, o.fa ? "on" : "off", ggml_type_name(o.kv_type),
+           o.ctx, o.chunks, o.batch > 0 ? o.batch : o.ctx, o.score_step, scored_total, o.threads, o.fa ? "on" : "off",
+           ggml_type_name(o.kv_type),
            o.ref_model ? "cpu-on-f32-dequantized-model" : "cpu-on-same-model");
     printf("tensor_types model: %s\n", tensor_types(o.model).c_str());
     if (o.ref_model) printf("tensor_types reference: %s\n", tensor_types(o.ref_model).c_str());
@@ -531,6 +697,13 @@ int main(int argc, char** argv) {
     ref.logp.assign((size_t)scored_total * ref.n_vocab, 0.0f);
     ref.top1.assign((size_t)scored_total, -1);
     ref.lp_next.assign((size_t)scored_total, 0.0f);
+
+    // --kv-ops: the CPU's log-probabilities after its own context shift
+    Reference ref_shift;
+    ref_shift.n_vocab = ref.n_vocab;
+    ref_shift.logp.assign((size_t)o.kv_ops * ref.n_vocab, 0.0f);
+    ref_shift.top1.assign((size_t)o.kv_ops, -1);
+    ref_shift.lp_next.assign((size_t)o.kv_ops, 0.0f);
 
     std::vector<Run> runs;
     std::vector<llama_token> gen_cpu, gen_gpu;
@@ -552,6 +725,23 @@ int main(int argc, char** argv) {
             d.name = "cpu-decode";
             run_compare(ctx, toks, o, add_bos, bos, true, ref, d);
             runs.push_back(d);
+            print_run(runs.back(), o, false);
+            fflush(stdout);
+        }
+        if (o.kv_ops) {
+            Run s;
+            s.name = "cpu-shift";
+            s.chunk_positions = false;
+            eval_shift(ctx, toks, o, add_bos, bos, s, [&](int si, const float* lg, llama_token next) {
+                reference_position(ref_shift, s, si, lg, next);
+            });
+            runs.push_back(s);
+            print_run(runs.back(), o, true);
+            Run u;
+            u.name = "cpu-reuse";
+            u.chunk_positions = false;
+            eval_reuse(ctx, toks, o, add_bos, bos, ref.n_vocab, u);
+            runs.push_back(u);
             print_run(runs.back(), o, false);
             fflush(stdout);
         }
@@ -603,6 +793,36 @@ int main(int argc, char** argv) {
             fflush(stdout);
             if (!gate(r, o)) pass = false;
         }
+        if (o.kv_ops) {
+            std::vector<float> lp(ref.n_vocab);
+            Run s;
+            s.name = "ameva-shift";
+            s.chunk_positions = false;
+            s.gpu_ops = 0;
+            const int64_t ops0 = g_gpu_ops(), nodes0 = g_gpu_nodes();
+            eval_shift(ctx, toks, o, add_bos, bos, s, [&](int si, const float* lg, llama_token next) {
+                compare_position(ref_shift, s, lp, si, lg, next);
+            });
+            s.gpu_ops = g_gpu_ops() - ops0;
+            s.gpu_nodes = g_gpu_nodes() - nodes0;
+            runs.push_back(s);
+            print_run(runs.back(), o, false);
+            if (!gate(s, o)) pass = false;
+            Run u;
+            u.name = "ameva-reuse";
+            u.chunk_positions = false;
+            u.gpu_ops = 0;
+            const int64_t ops1 = g_gpu_ops(), nodes1 = g_gpu_nodes();
+            eval_reuse(ctx, toks, o, add_bos, bos, ref.n_vocab, u);
+            u.gpu_ops = g_gpu_ops() - ops1;
+            u.gpu_nodes = g_gpu_nodes() - nodes1;
+            runs.push_back(u);
+            print_run(runs.back(), o, false);
+            fflush(stdout);
+            double mx = 0.0;
+            for (double k : u.kld) mx = std::max(mx, k);
+            if (!u.ok || (int)u.kld.size() != o.kv_ops || u.gpu_ops <= 0 || mx > 1e-4) pass = false;
+        }
         const llama_vocab* gvocab = llama_model_get_vocab(model);
         if (!greedy(ctx, gvocab, prompt, o.gen, gen_gpu, &gpu_step_s, &gpu_gen_ops, &gpu_steps)) pass = false;
         for (llama_token t : gen_gpu) text_gpu += piece(gvocab, t);
@@ -619,8 +839,9 @@ int main(int argc, char** argv) {
     printf("gen decode_tok_s cpu=%.2f ameva=%.2f ameva_gpu_mul_mat_per_token=%.1f\n",
            cpu_step_s > 0 ? cpu_steps / cpu_step_s : 0.0, gpu_step_s > 0 ? gpu_steps / gpu_step_s : 0.0,
            gpu_steps ? (double)gpu_gen_ops / gpu_steps : 0.0);
-    printf("AMEVA_LLM_PARITY=%s (gate: kld_mean<=%.3g against %s, gpu_mul_mat>0, both AMEVA runs)\n",
-           pass ? "PASS" : "FAIL", o.gate_kld, o.ref_model ? "the f32-dequantized model" : "the CPU backend");
+    printf("AMEVA_LLM_PARITY=%s (gate: kld_mean<=%.3g against %s, gpu_mul_mat>0, both AMEVA runs%s)\n",
+           pass ? "PASS" : "FAIL", o.gate_kld, o.ref_model ? "the f32-dequantized model" : "the CPU backend",
+           o.kv_ops ? "; with --kv-ops also ameva-shift, and ameva-reuse kld_max<=1e-4" : "");
     llama_backend_free();
     return pass ? 0 : 1;
 }

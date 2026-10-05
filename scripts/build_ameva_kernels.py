@@ -15,6 +15,7 @@
   variant per weight type (-DTYPE_<T>); the host chooses between it and the QMV layouts per device and shape.
 * QGEMM family (shaders/ameva_qgemm.comp): tiled MUL_MAT for many activation rows on repacked weights, one variant
   per weight type (-DTYPE_<T>).
+* QGEMMH family (shaders/ameva_qgemm.comp -DF16): the same with 16-bit float tiles and inner sums (shaderFloat16).
 * MMVQ family (shaders/ameva_mmvq.comp): token-generation MUL_MAT (one activation row) with integer dot products
   on repacked weights and int8 activations (ameva_quant_a8), one variant per weight type and weight rows per lane
   group (-DTYPE_<T> -DROWS=<r>, r = 4, 2, 1).
@@ -95,7 +96,7 @@ QMV_UPL = os.environ.get("AMEVA_BUILD_QMV_UPL", "")
 OPS = ["binary", "unary", "glu", "rms_norm", "rope", "set_rows", "get_rows", "cpy", "fa_combine", "quant_a8"]
 # op kernels compiled from one source with defines, appended to enum AmevaOpKernelId: (kernel name, source, defines)
 OPS_DEFINED = [("set_rows_q8_0", "set_rows_q", ["QTYPE_Q8_0"]), ("set_rows_q4_0", "set_rows_q", ["QTYPE_Q4_0"]),
-               ("quant_a8u", "quant_a8", ["EMU"])]
+               ("quant_a8u", "quant_a8", ["EMU"]), ("rope_f16", "rope", ["F16"])]
 
 # FLASH_ATTN_EXT tiles: (DMAX, BQ, BK). 128 invocations per workgroup; shared memory per workgroup:
 # 64: 14.5 KiB, 128: 27.4 KiB, 256: 25.7 KiB
@@ -205,7 +206,7 @@ def main():
               "/* compiler: %s, --target-env vulkan1.0, NOT checked by spirv-val (--spirv-val none) */" % version),
              "#ifndef GGML_AMEVA_KERNELS_SPV_H", "#define GGML_AMEVA_KERNELS_SPV_H", "",
              "#include <stddef.h>", "#include <stdint.h>", ""]
-    qmm, qmv, mali_qmv, qgemm, mmq, mmvq, mmvqe, fa, ops = [], [], [], [], [], [], [], [], []
+    qmm, qmv, mali_qmv, qgemm, qgemmh, mmq, mmvq, mmvqe, fa, ops = [], [], [], [], [], [], [], [], [], []
     with tempfile.TemporaryDirectory() as tmp:
         qsrc = os.path.join(SHADERS, "ameva_qmm.comp")
         qbind, qpush, qlocal = source_info(qsrc)
@@ -261,6 +262,15 @@ def main():
             emit_array(lines, var, data)
             qgemm.append((name, var, len(data), hashlib.sha256(data).hexdigest()))
             print("qgemm %-6s %6d bytes sha256=%s" % (name, len(data), qgemm[-1][3]))
+        for name, define in QMV_TYPES:
+            spv = os.path.join(tmp, "qgemmh_%s.spv" % name)
+            data, rsize = compile_module(args, gsrc, [define, "F16"], spv)
+            if rsize is not None and rsize != gpush:
+                fail("ameva_qgemm (F16) %s: reflection says %d push-constant bytes, source %d" % (name, rsize, gpush))
+            var = "kAmevaQgemmh_%s" % name
+            emit_array(lines, var, data)
+            qgemmh.append((name, var, len(data), hashlib.sha256(data).hexdigest()))
+            print("qgemmh %-6s %6d bytes sha256=%s" % (name, len(data), qgemmh[-1][3]))
         msrc = os.path.join(SHADERS, "ameva_mmq.comp")
         mbind, mpush, mlocal = source_info(msrc)
         for name, define in QMV_TYPES:
@@ -378,6 +388,11 @@ def main():
               "#define AMEVA_QGEMM_BINDINGS %d" % gbind,
               "#define AMEVA_QGEMM_PUSH_CONSTANT_BYTES %d" % gpush,
               "#define AMEVA_QGEMM_LOCAL_SIZE_X %d" % glocal, "",
+              "/* ameva_qgemm with 16-bit float tiles and inner sums (shaderFloat16) */",
+              "static const AmevaQgemmVariant kAmevaQgemmhVariants[] = {"]
+    for name, var, nbytes, sha in qgemmh:
+        lines.append('    { "%s", %s, %du, "%s" },' % (name, var, nbytes, sha))
+    lines += ["};", "#define AMEVA_QGEMMH_VARIANT_COUNT %d" % len(qgemmh), "",
               "typedef struct {",
               "    const char* type_name;   /* ggml_type_name() of the weight type (stored repacked) */",
               "    const uint32_t* spirv;", "    size_t spirv_bytes;", "    const char* spirv_sha256;",
@@ -433,8 +448,9 @@ def main():
     lines += ["};", "", "#endif /* GGML_AMEVA_KERNELS_SPV_H */", ""]
     with open(args.out, "w", newline="\n") as f:
         f.write("\n".join(lines))
-    print("wrote %s (%d qmm, %d qmv, %d mali_qmv, %d qgemm, %d mmq, %d mmvq, %d mmvqe, %d fa variants, %d op kernels)" %
-          (args.out, len(qmm), len(qmv), len(mali_qmv), len(qgemm), len(mmq), len(mmvq), len(mmvqe), len(fa), len(ops)))
+    print("wrote %s (%d qmm, %d qmv, %d mali_qmv, %d qgemm, %d qgemmh, %d mmq, %d mmvq, %d mmvqe, %d fa variants, "
+          "%d op kernels)" % (args.out, len(qmm), len(qmv), len(mali_qmv), len(qgemm), len(qgemmh), len(mmq), len(mmvq),
+                              len(mmvqe), len(fa), len(ops)))
 
 
 if __name__ == "__main__":
