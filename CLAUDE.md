@@ -62,18 +62,26 @@ evidence/poc_cuda_like/<timestamp>/
 
 ## 4. 현재 진행 중인 최우선 과제
 
-- **[최우선] 정수 내적 확장이 없는 Mali(S21·A53)용 정수 곱 에뮬레이션 커널** (사용자 결정 2026-10-04):
-  두 기기의 Vulkan 드라이버에는 `VK_KHR_shader_integer_dot_product`가 없어 `ameva_mmq`(프롬프트)와 `ameva_mmvq`(토큰 생성)가
-  동작하지 않는다. 32비트 정수 곱으로 같은 합을 구하는 커널을 추가해 Mali에서 GPU가 CPU를 넘는 것이 목표다.
-  수용 기준은 CPU 대비 KLD 평균 ≤ 0.01. 작업 브랜치 `perf/int-dot-emulation`, 설계와 진행은 `docs/handover/LATEST.md`.
-- **[다음]** 출력 투영(토큰 시간의 20~30 %), CPU 기록 시간(토큰당 2~9 ms), Mali의 1B 프롬프트(CPU의 0.6~0.8배).
+- **[최우선] 정수 내적 확장이 없는 Mali(S21·A53)에서 GPU가 CPU를 넘게 하기** (사용자 결정 2026-10-04). 2026-10-05까지의 결과:
+  토큰 생성 에뮬레이션(`550552e`)은 q4_K 모양에서만 선택되고 이득이 작다(A53 14.4 → 14.6, S21 21.8~22.8 → 22.9~23.1 t/s).
+  프롬프트 에뮬레이션은 f32 타일 커널보다 22~25배 느려 채택하지 않았다(`exp/int-dot-emulation-mmq`).
+  fp16 타일 커널은 f32의 1.06~1.28배이고 제품화 전이다(`exp/f16-tile-kernel`).
+  절제 측정(`AMEVA_BUILD_QMV_ABLATE`, S21)에서 GEMV는 로드 약 30 %·디코딩 약 40 %·곱 약 30 %, 출력 투영은 로드 75~90 %였다.
+  곱을 싸게 만드는 방법으로는 토큰 생성이 CPU를 넘지 못한다. 다음 방향은 사용자 확인이 필요하다(`docs/handover/LATEST.md` 4.2, 7장).
+- **[검증 부채] 컨텍스트 이동 수정(`f2265d1`, F16 ROPE)**: ameva-runtime 2.8.0의 백엔드(`c8aa8fd`)는 GPU 경로에서 문맥이 이동하면
+  (`--context-shift`) 중단한다. 수정은 S21에서만 검증했다. 나머지 기기에서 ameva-runtime `tools/fleet/lab/verify_kv.sh`로 검증한 뒤
+  2.8.x로 게시한다(게시는 사용자 승인 후).
+- **[다음 후보]** 토큰 생성 전용 FLASH_ATTN_EXT 경로(토큰 시간의 3~8 %), fp16 타일 커널 제품화(S21의 1B 프롬프트), 출력 투영(로드 한계).
+- **응답 텍스트도 판정 항목이다** (사용자 요청 2026-10-05): 긴 응답의 이질 문자(`text_soak.sh`, `soak_scan.py`), 긴 문맥과 KV 캐시 연산
+  (`parity_long.sh`, `ameva_llm_parity --kv-ops`). 평균 KLD와 짧은 생성만으로 통과를 말하지 않는다.
 - 현재 기준선(2026-10-04, 백엔드 `c8aa8fd`, Qwen2.5-0.5B Q4_K_M, `-c 2048 -t 4`, CPU / GPU t/s):
   프롬프트 약 370토큰 — S25 30~58 / 1010~1081, S20 60 / 181~197, A35 109~110 / 190, A53 55 / 67, S21 115~119 / 227.
   토큰 생성 64토큰 — S25 16~49 / 36~77(부하 없을 때 33~49 / 72~75), S20 25~27 / 23.6~24.4(441 MHz; 587 MHz에서 28~31 / 32.6~32.9),
   A35 35~37 / 21.5, A53 22~24 / 14.5, S21 46~47 / 23.0.
   측정 시 `Cpus_allowed_list`와 GPU 클럭(Adreno `max_gpuclk`)을 함께 기록하고, 한 세션에서 번갈아 측정한다
   (조건에 따라 2~3배 차이). 프롬프트 처리와 토큰 생성을 따로 보고한다. 도구는 ameva-runtime `tools/fleet/lab/perf_matrix.sh`.
-- 브랜치: 검증된 상태는 기본 브랜치 `amuda2-phase0-i2s-proof`와 `main`에 있다(2026-10-04, 같은 커밋).
+- 브랜치: 검증된 상태는 기본 브랜치 `amuda2-phase0-i2s-proof`와 `main`에 있다(2026-10-04, 같은 커밋 `c2aa00c`).
+  작업 브랜치는 `perf/int-dot-emulation`이다. 빌드 기기는 S25 또는 S21(S20은 Termux Vulkan 로더에 링크되어 거부된다).
 
 ### 종결 기록: ggml-ameva를 ameva-runtime llama 번들의 GPU 경로로 내장 (2026-10-04 종결)
 - ameva-runtime 2.8.0으로 게시(PyPI, npm, GitHub `uno-km/ameva-runtime-releases` v2.8.0, 번들 핀 `d459daa9c55c...`, 백엔드 `c8aa8fd`).
@@ -84,7 +92,8 @@ evidence/poc_cuda_like/<timestamp>/
 ### 종결 기록: 2026-10-03 개발분 실기기 검증 (2026-10-04 종결)
 - MMQ(`AMEVA_MMQ`): 확장을 제공하는 S25·S20·A35에서 f32 타일 커널 대비 프롬프트 2.6배·1.8배·2.0배. 지원 시 켜는 기본값 유지.
 - 연산 융합(`AMEVA_FUSE`): 5대 모두 속도 차이가 측정 오차 안. 확대(QKV 합치기 등)는 보류.
-- 양자화 KV 캐시: q8_0은 CPU와 같은 출력이고 속도 차이 없음, q4_0은 GPU·CPU 모두 품질 저하. 메모리 절감 용도.
+- 양자화 KV 캐시: q8_0은 같은 캐시 타입의 CPU와 같은 출력이고 속도 차이 없음, q4_0은 GPU·CPU 모두 품질 저하. 메모리 절감 용도.
+  (2026-10-05 보충: f16 캐시의 CPU를 기준으로 하면 q8_0 캐시는 CPU·GPU 모두 KLD 3e-2대이고 컨텍스트 이동 후 0.5로 벌어진다.)
 - 파이프라인 캐시: 유지. 커널 헤더는 기기 생성본(spirv-val 포함)으로 교체.
 - 토큰 생성 정수 내적 `ameva_mmvq`와 행당 스레드 4·2·1 레이아웃 추가(`c8aa8fd`): A35 12.5 → 19.0, S20 25.8 → 32.7 t/s.
 - 검증: `ameva_qmm_check` 516/516, KLD 기준 통과(인수인계서 `20261004-2240.md`).
