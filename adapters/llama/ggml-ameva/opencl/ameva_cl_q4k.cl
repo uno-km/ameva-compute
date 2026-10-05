@@ -47,16 +47,24 @@ float2 unit_scale(__global const uint4* ws, int u) {
     return (float2)(h2f(sw.x & 0xFFFFu) * (float)sc, h2f(sw.x >> 16) * (float)mn);
 }
 
+// One packed dot product of four int8 pairs added to s. DOT_KHR (kernel tuning) takes the OpenCL 3.0 built-in on
+// packed 32-bit words (cl_khr_integer_dot_product; the Galaxy A53's driver does not have it) instead of arm_dot_acc.
+#ifdef DOT_KHR
+#define DOT4(w, a, s) ((s) + dot_4x8packed_ss_int((uint)(w), (uint)(a)))
+#else
+#define DOT4(w, a, s) arm_dot_acc(as_char4(w), as_char4(a), (s))
+#endif
+
 // the 32 products of one unit: unpacked weights (lo: weights 0..15, hi: 16..31, one byte each) against 32 int8
 int dot32(uint4 lo, uint4 hi, int4 a0, int4 a1) {
-    int s = arm_dot_acc(as_char4(lo.x), as_char4(a0.x), 0);
-    s = arm_dot_acc(as_char4(lo.y), as_char4(a0.y), s);
-    s = arm_dot_acc(as_char4(lo.z), as_char4(a0.z), s);
-    s = arm_dot_acc(as_char4(lo.w), as_char4(a0.w), s);
-    s = arm_dot_acc(as_char4(hi.x), as_char4(a1.x), s);
-    s = arm_dot_acc(as_char4(hi.y), as_char4(a1.y), s);
-    s = arm_dot_acc(as_char4(hi.z), as_char4(a1.z), s);
-    s = arm_dot_acc(as_char4(hi.w), as_char4(a1.w), s);
+    int s = DOT4(lo.x, a0.x, 0);
+    s = DOT4(lo.y, a0.y, s);
+    s = DOT4(lo.z, a0.z, s);
+    s = DOT4(lo.w, a0.w, s);
+    s = DOT4(hi.x, a1.x, s);
+    s = DOT4(hi.y, a1.y, s);
+    s = DOT4(hi.z, a1.z, s);
+    s = DOT4(hi.w, a1.w, s);
     return s;
 }
 

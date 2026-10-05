@@ -58,6 +58,7 @@ OpenCL은 이벤트 프로파일의 커널 시간(연속 실행의 중앙값)입
 5. **GEMV에서는 int8과 f32의 차이가 작습니다**(같은 OpenCL 커널 구조에서 0.9~1.2배). 오전의 절제 측정(로드 30 %, 디코딩 40 %, 곱 30 %)과 같은 결론입니다.
 6. **타일 커널은 정수 내적의 산술 한계에서 멉니다.** S21, 8192×2048 타일의 절제 측정(ms, 1단위 / 8단위): 전체 100 / 68~70, 내적 제거 53 / 54, 스케일 연산 제거 99 / 74, 둘 다 제거 19 / 30. 내적 부분과 그 뒤 부동소수 연산의 조합이 시간의 대부분이고, 스테이징과 배리어만은 19~30 ms입니다. A53의 `arm_dot_acc` 산술 최대치는 264 GMAC/s인데 타일은 46 GMAC/s입니다. 커널 구조를 고칠 여지가 큽니다.
 7. S21의 Vulkan 커널 시간은 시각에 따라 두 배까지 달라졌습니다(2장 정정 고지). 원인은 확인하지 못했습니다. Exynos 커널에는 `gpu_cl_boost_*`(OpenCL 작업용 클럭 부스트) 항목이 있고 S21·A53은 켜져 있지만, 측정 중 상태는 `active(0)`이었습니다.
+8. **내적 내장 함수의 종류는 속도와 무관했습니다.** 표준 `dot_4x8packed_ss_int`(`cl_khr_integer_dot_product`, 빌드 옵션 `-DDOT_KHR`)와 벤더 `arm_dot_acc`를 S21에서 2회 번갈아 재면 타일 2048×2048이 16.8~18.2 대 16.8~17.7 ms, 8192×2048이 67.1~67.2 대 65.2~65.8 ms, GEMV가 1.20~1.22 / 1.03~1.04 대 1.18~1.21 / 1.02~1.03 ms입니다. A53의 드라이버(r32p1)에는 표준 내장 함수가 없어 컴파일이 실패합니다(`implicit declaration of function 'dot_4x8packed_ss_int'`). 기본값은 두 기기에서 모두 동작하는 `arm_dot_acc`로 둡니다. 내적 명령 자체를 바꾸는 것으로는 6의 격차가 줄지 않습니다.
 
 ## 4. 이것이 뜻하는 것
 
@@ -89,7 +90,7 @@ AMEVA_CL_UPR=8 bash cl_bench.sh 20          # ameva-runtime tools/fleet/lab/cl_b
 ```
 
 - 벤더 드라이버는 `OCL_ICD_VENDORS`로 지정합니다(스크립트가 `~/abi-lab/cl/icd/`에 항목을 만듭니다). `$PREFIX/etc/OpenCL/vendors`는 건드리지 않습니다.
-- 환경 변수: `AMEVA_CL_GEMV_ROWS`(기본 1), `AMEVA_CL_LOCAL`(기본 64), `AMEVA_CL_UPR`(기본 1), `AMEVA_CL_OPTS`(추가 빌드 옵션. 절제: `-DABL_NODOT`, `-DABL_NOSCALE`).
+- 환경 변수: `AMEVA_CL_GEMV_ROWS`(기본 1), `AMEVA_CL_LOCAL`(기본 64), `AMEVA_CL_UPR`(기본 1), `AMEVA_CL_OPTS`(추가 빌드 옵션. 절제: `-DABL_NODOT`, `-DABL_NOSCALE`. 표준 내적 내장 함수: `-DDOT_KHR`).
 - Vulkan과 비교할 때는 두 커널을 같은 분 안에 번갈아 재고 실행 중 GPU 클럭을 함께 기록합니다.
 
 ## 7. 한계
