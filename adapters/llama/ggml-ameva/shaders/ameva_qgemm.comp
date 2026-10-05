@@ -38,10 +38,17 @@ layout(push_constant) uniform PushConstants {
 
 #define BN 64u // weight rows per tile
 #define BM 32u // activation rows per tile
+#ifndef UPR
+// Units (32 weights) staged per barrier round. The round costs two barriers whatever it stages, so more units per
+// round means fewer barriers per multiply-accumulate; the shared tiles grow by 12 KiB per unit (maxComputeSharedMemory
+// of the fleet: 32 KiB). Kernel tuning builds set it (AMEVA_BUILD_QGEMM_UPR); measured first in the OpenCL prototype
+// of this tile (docs/design/opencl-mali-int8.md).
+#define UPR 1u
+#endif
 
 // tile_w[k * 16 + n / 4][n % 4] = W[n0 + n][k0 + k], tile_a[k * 8 + m / 4][m % 4] = A[m0 + m][k0 + k]
-shared vec4 tile_w[32 * (BN / 4u)];
-shared vec4 tile_a[32 * (BM / 4u)];
+shared vec4 tile_w[UPR * 32u * (BN / 4u)];
+shared vec4 tile_a[UPR * 32u * (BM / 4u)];
 
 void main() {
     const uint tid = gl_LocalInvocationID.x;
@@ -65,37 +72,48 @@ void main() {
     const uint tn = tid & 15u, tm = tid >> 4u;
     vec4 acc0 = vec4(0.0), acc1 = vec4(0.0), acc2 = vec4(0.0), acc3 = vec4(0.0);
 
-    for (uint u = 0u; u < U; ++u) {
-        if (tid < 64u) {
-            const uint b = u / UPB;
-            vec4 w[8];
-            decode(pc.q_off + (drow * U + u) * QPER, pc.h_off + drow * U + u, pc.s_off + drow * s_row + b * SB,
-                   u - b * UPB, w);
-            [[unroll]] for (uint i = 0u; i < 8u; ++i) {
-                const uint k = 4u * (i & 3u) + 16u * (i >> 2u); // w[i] holds weights k .. k + 3 of the unit
-                tile_w[(k + 0u) * 16u + dcol][dcomp] = w[i].x;
-                tile_w[(k + 1u) * 16u + dcol][dcomp] = w[i].y;
-                tile_w[(k + 2u) * 16u + dcol][dcomp] = w[i].z;
-                tile_w[(k + 3u) * 16u + dcol][dcomp] = w[i].w;
+    for (uint u0 = 0u; u0 < U; u0 += UPR) {
+        // a unit past the last one (U not a multiple of UPR) is staged as zeros: its products add nothing
+        for (uint p = 0u; p < UPR; ++p) {
+            const uint u = u0 + p;
+            const bool live = u < U;
+            const uint uc = min(u, U - 1u);
+            if (tid < 64u) {
+                const uint b = uc / UPB;
+                vec4 w[8];
+                decode(pc.q_off + (drow * U + uc) * QPER, pc.h_off + drow * U + uc, pc.s_off + drow * s_row + b * SB,
+                       uc - b * UPB, w);
+                [[unroll]] for (uint i = 0u; i < 8u; ++i) {
+                    const uint k = 32u * p + 4u * (i & 3u) + 16u * (i >> 2u); // w[i]: weights k .. k + 3 of the round
+                    const vec4 wi = live ? w[i] : vec4(0.0);
+                    tile_w[(k + 0u) * 16u + dcol][dcomp] = wi.x;
+                    tile_w[(k + 1u) * 16u + dcol][dcomp] = wi.y;
+                    tile_w[(k + 2u) * 16u + dcol][dcomp] = wi.z;
+                    tile_w[(k + 3u) * 16u + dcol][dcomp] = wi.w;
+                }
+            }
+            [[unroll]] for (uint e = 0u; e < 2u; ++e) {
+                const uint v = tid + 128u * e;
+                const uint r = v >> 3u, kq = v & 7u;
+                const vec4 x = a4[arow[e] + 8u * uc];
+                const uint kb = 32u * p + 4u * kq;
+                tile_a[(kb + 0u) * 8u + (r >> 2u)][r & 3u] = x.x;
+                tile_a[(kb + 1u) * 8u + (r >> 2u)][r & 3u] = x.y;
+                tile_a[(kb + 2u) * 8u + (r >> 2u)][r & 3u] = x.z;
+                tile_a[(kb + 3u) * 8u + (r >> 2u)][r & 3u] = x.w;
             }
         }
-        [[unroll]] for (uint e = 0u; e < 2u; ++e) {
-            const uint v = tid + 128u * e;
-            const uint r = v >> 3u, kq = v & 7u;
-            const vec4 x = a4[arow[e] + 8u * u];
-            tile_a[(4u * kq + 0u) * 8u + (r >> 2u)][r & 3u] = x.x;
-            tile_a[(4u * kq + 1u) * 8u + (r >> 2u)][r & 3u] = x.y;
-            tile_a[(4u * kq + 2u) * 8u + (r >> 2u)][r & 3u] = x.z;
-            tile_a[(4u * kq + 3u) * 8u + (r >> 2u)][r & 3u] = x.w;
-        }
         barrier();
-        [[unroll]] for (uint k = 0u; k < 32u; ++k) {
-            const vec4 wv = tile_w[k * 16u + tn];
-            const vec4 av = tile_a[k * 8u + tm];
-            acc0 = fma(wv, vec4(av.x), acc0);
-            acc1 = fma(wv, vec4(av.y), acc1);
-            acc2 = fma(wv, vec4(av.z), acc2);
-            acc3 = fma(wv, vec4(av.w), acc3);
+        for (uint p = 0u; p < UPR; ++p) {
+            const uint kb = 32u * p;
+            [[unroll]] for (uint k = 0u; k < 32u; ++k) { // constant bounds: the loop over a unit stays unrolled
+                const vec4 wv = tile_w[(kb + k) * 16u + tn];
+                const vec4 av = tile_a[(kb + k) * 8u + tm];
+                acc0 = fma(wv, vec4(av.x), acc0);
+                acc1 = fma(wv, vec4(av.y), acc1);
+                acc2 = fma(wv, vec4(av.z), acc2);
+                acc3 = fma(wv, vec4(av.w), acc3);
+            }
         }
         barrier();
     }

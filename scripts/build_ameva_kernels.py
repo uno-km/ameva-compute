@@ -93,6 +93,9 @@ QMV_UPL = os.environ.get("AMEVA_BUILD_QMV_UPL", "")
 # kernel tuning: the token-generation variant with a part of its work removed (shaders/ameva_qmv.comp, ABLATE); the
 # kernels of such a build give wrong results
 QMV_ABLATE = os.environ.get("AMEVA_BUILD_QMV_ABLATE", "")
+# kernel tuning: units staged per barrier round of the f32 tile kernel (shaders/ameva_qgemm.comp, UPR); the shader's
+# default unless set
+QGEMM_UPR = os.environ.get("AMEVA_BUILD_QGEMM_UPR", "")
 
 # op kernel families, in the order of enum AmevaOpKernelId
 OPS = ["binary", "unary", "glu", "rms_norm", "rope", "set_rows", "get_rows", "cpy", "fa_combine", "quant_a8"]
@@ -261,7 +264,12 @@ def main():
         gbind, gpush, glocal = source_info(gsrc)
         for name, define in QMV_TYPES:
             spv = os.path.join(tmp, "qgemm_%s.spv" % name)
-            data, rsize = compile_module(args, gsrc, [define], spv)
+            gdefs = [define]
+            if QGEMM_UPR:
+                if QGEMM_UPR not in ("1", "2"):
+                    fail("AMEVA_BUILD_QGEMM_UPR must be 1 or 2 (got %r)" % QGEMM_UPR)
+                gdefs.append("UPR=%su" % QGEMM_UPR)
+            data, rsize = compile_module(args, gsrc, gdefs, spv)
             if rsize is not None and rsize != gpush:
                 fail("ameva_qgemm %s: reflection says %d push-constant bytes, source %d" % (name, rsize, gpush))
             var = "kAmevaQgemm_%s" % name
