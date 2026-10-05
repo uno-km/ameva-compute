@@ -203,9 +203,18 @@ __kernel void gemm_q4k_i8(__global const uint4* wq, __global const uint4* ws, __
             for (int j = 0; j < 4; ++j) {
                 const int4 a0 = la[2 * (ab + j)], a1 = la[2 * (ab + j) + 1];
                 const float2 ds = las[ab + j];
+#if defined(ABL_NODOT) // kernel tuning (wrong results): everything but the dot products
+                const int4 s = (int4)((int)(lo[0].x ^ (uint)a0.x), (int)(lo[1].y ^ (uint)a0.y),
+                                      (int)(lo[2].z ^ (uint)a1.z), (int)(lo[3].w ^ (uint)a1.w)) & 0xFF;
+#else
                 const int4 s = (int4)(dot32(lo[0], hi[0], a0, a1), dot32(lo[1], hi[1], a0, a1),
                                       dot32(lo[2], hi[2], a0, a1), dot32(lo[3], hi[3], a0, a1));
+#endif
+#if defined(ABL_NOSCALE) // kernel tuning (wrong results): the sums without the scales
+                acc[j] += convert_float4(s);
+#else
                 acc[j] += ds.x * (dl * convert_float4(s)) - ml * ds.y;
+#endif
             }
         }
         barrier(CLK_LOCAL_MEM_FENCE);
