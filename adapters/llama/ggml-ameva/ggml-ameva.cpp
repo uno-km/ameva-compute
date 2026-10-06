@@ -1149,7 +1149,7 @@ static const char* ameva_bind_span(const struct ggml_tensor* t, uint64_t extra_o
     if (!ameva_is_ameva_buffer(t)) return "tensor is not in an AMEVA buffer";
     auto* bctx = (ggml_backend_ameva_buffer_context*)t->buffer->context;
     if (!bctx || !bctx->ac_buf) return "AMEVA buffer without context";
-    const uint64_t off = (uint64_t)((const char*)t->data - (const char*)bctx->mapped_ptr) + extra_off;
+    const uint64_t off = (uint64_t)((const char*)t->data - (const char*)bctx->base) + extra_off;
     const uint64_t align = s_limits.min_storage_buffer_offset_alignment;
     const uint64_t desc = off & ~(align - 1);
     const uint64_t resid = off - desc;

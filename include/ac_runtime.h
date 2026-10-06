@@ -101,7 +101,7 @@ typedef struct {
 typedef struct {
     uint32_t abi_version;       /* Must match AC_ABI_VERSION */
     uint32_t struct_size;       /* Must match sizeof(AcContextDesc) */
-    AcBackendKind backend_kind; /* Must be AC_BACKEND_VULKAN */
+    AcBackendKind backend_kind; /* AC_BACKEND_VULKAN or AC_BACKEND_OPENCL */
     uint32_t flags;             /* Reserved for future expansion; must be 0 */
 } AcContextDesc;
 
@@ -595,6 +595,66 @@ AcResult ac_runtime_batch_get_stats(
     const AcCommandBatch* batch,
     AcBatchStats* out_stats
 );
+
+/* ========================================================================= */
+/* AMUDA 2.3 additions: OpenCL backend and backend-neutral host access       */
+/* (descriptor layouts of 2.1 unchanged)                                     */
+/* ========================================================================= */
+/*
+ * AC_BACKEND_OPENCL (docs/design/opencl-prompt-path.md, stage B):
+ *   - The vendor OpenCL driver is loaded at context creation (AMEVA_OPENCL_LIBRARY=<path> names it); a missing driver
+ *     fails with AC_ERR_DRIVER_NOT_FOUND / AC_ERR_DRIVER_SYMBOL_MISSING.
+ *   - Buffers are coarse-grained SVM: the host reaches them only with ac_runtime_buffer_write / read / fill.
+ *     ac_runtime_buffer_get_mapped_ptr, _flush, _invalidate and _is_coherent return AC_ERR_BUFFER_NOT_MAPPED.
+ *     ac_runtime_buffer_get_address gives a stable address for offset arithmetic, not for host access.
+ *   - Kernels come from OpenCL C (ac_runtime_kernel_create_from_source). Argument i < binding_count is the pointer of
+ *     binding i (the bound range starts there); with push_constant_size > 0 the last argument is a struct of exactly
+ *     that size passed by value (shorter push data is zero-padded). The argument count is checked at creation.
+ *   - Batches: nothing runs before ac_runtime_batch_flush / _submit; the dispatches of a context run in recording
+ *     order on one in-order queue, so every dispatch sees the writes of the earlier ones (barriers are implied).
+ *   - Host access APIs are ordered after every dispatch already flushed or submitted on the context, and before the
+ *     dispatches of a batch that is still recording.
+ */
+
+/**
+ * @brief OpenCL C kernel creation descriptor (AC_BACKEND_OPENCL contexts).
+ * metadata: as for SPIR-V kernels; entry_point is the __kernel function, expected_spirv_sha256 is not used.
+ */
+typedef struct {
+    uint32_t abi_version;                    /* Must match AC_ABI_VERSION */
+    uint32_t struct_size;                    /* Must match sizeof(AcKernelSourceDesc) */
+    const char* source;                      /* OpenCL C source */
+    size_t source_size;                      /* bytes of source; 0: NUL-terminated */
+    const char* build_options;               /* NULL or options for the OpenCL C compiler */
+    const AcKernelRuntimeMetadata* metadata;
+} AcKernelSourceDesc;
+
+/** @brief The backend the context was created for. */
+AcResult ac_runtime_context_get_backend_kind(const AcContext* ctx, AcBackendKind* out_kind);
+
+/**
+ * @brief Create a kernel from OpenCL C source. AC_ERR_FEATURE_NOT_SUPPORTED on a Vulkan context (and
+ * ac_runtime_kernel_create, which takes SPIR-V for Vulkan, returns it on an OpenCL context).
+ */
+AcResult ac_runtime_kernel_create_from_source(AcContext* ctx, const AcKernelSourceDesc* desc, AcKernel** out_kernel);
+
+/**
+ * @brief Copy size_bytes from host memory into the buffer at offset; complete on return.
+ * Vulkan: copy through the mapping and flush the range. OpenCL: a blocking copy on the context's queue.
+ */
+AcResult ac_runtime_buffer_write(AcBuffer* buf, size_t offset, const void* src, size_t size_bytes);
+
+/** @brief Copy size_bytes of the buffer at offset into host memory; complete on return (Vulkan: invalidate first). */
+AcResult ac_runtime_buffer_read(AcBuffer* buf, size_t offset, void* dst, size_t size_bytes);
+
+/** @brief Set size_bytes of the buffer at offset to value; complete on return. */
+AcResult ac_runtime_buffer_fill(AcBuffer* buf, size_t offset, size_t size_bytes, uint8_t value);
+
+/**
+ * @brief A stable address of the buffer's first byte, for offset arithmetic (Vulkan: the mapping; OpenCL: the SVM
+ * pointer, which the host must not dereference).
+ */
+AcResult ac_runtime_buffer_get_address(const AcBuffer* buf, void** out_address);
 
 /* ========================================================================= */
 /* Error State Management APIs (AMUDA Generation-Based Error Tracking)       */

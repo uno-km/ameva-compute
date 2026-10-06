@@ -34,6 +34,7 @@ typedef uint32_t AcBackendKind;
 
 #define AC_BACKEND_UNKNOWN ((AcBackendKind)0u)
 #define AC_BACKEND_VULKAN  ((AcBackendKind)1u)
+#define AC_BACKEND_OPENCL  ((AcBackendKind)2u) /* AMUDA 2.3: OpenCL 2.0+ with coarse-grained SVM (ac_runtime.h) */
 
 /**
  * @brief Specialization Constant Types

@@ -44,6 +44,7 @@ clang++ -O2 -fPIC -shared -std=c++17 -I "$ROOT/include" -I "$ROOT/src" \
     "$ROOT"/src/backend/vulkan/ac_vk_buffer.cpp "$ROOT"/src/backend/vulkan/ac_vk_context.cpp \
     "$ROOT"/src/backend/vulkan/ac_vk_dispatch.cpp "$ROOT"/src/backend/vulkan/ac_vk_event.cpp \
     "$ROOT"/src/backend/vulkan/ac_vk_loader.cpp "$ROOT"/src/backend/vulkan/ac_vk_pipeline.cpp \
+    "$ROOT"/src/backend/opencl/ac_cl_backend.cpp \
     "$ROOT"/src/runtime/ac_runtime.cpp "$ROOT"/src/runtime/ac_error.cpp \
     -lvulkan -ldl -lm -Wl,-soname,libac_runtime.so.2 -o "$OUT/libac_runtime.so.2"
 

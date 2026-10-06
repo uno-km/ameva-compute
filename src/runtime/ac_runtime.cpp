@@ -20,6 +20,7 @@
 #include <math.h>
 #include <atomic>
 #include "../backend/vulkan/ac_vk_sha256.h"
+#include "../backend/opencl/ac_cl_backend.h"
 
 #define AC_MAGIC_CONTEXT 0xAC010001
 #define AC_MAGIC_BUFFER  0xAC010002
@@ -27,6 +28,7 @@
 #define AC_MAGIC_EVENT   0xAC010004
 #define AC_MAGIC_BATCH   0xAC010005
 
+/* Every handle carries the object of exactly one backend: vk_* for AC_BACKEND_VULKAN, cl_* for AC_BACKEND_OPENCL. */
 struct AcContext {
     uint32_t magic;
     uint32_t abi_version;
@@ -36,31 +38,49 @@ struct AcContext {
     uint32_t active_child_kernels;
     uint32_t active_child_events;
     uint32_t active_child_batches;
+    AcClContext* cl_ctx;
 };
 
 struct AcBuffer {
     uint32_t magic;
     AcContext* owning_context;
     AcVkBuffer* vk_buf;
+    AcClBuffer* cl_buf;
 };
 
 struct AcKernel {
     uint32_t magic;
     AcContext* owning_context;
     AcVkKernel* vk_kernel;
+    AcClKernel* cl_kernel;
 };
 
 struct AcEvent {
     uint32_t magic;
     AcContext* owning_context;
     AcVkEvent* vk_event;
+    AcClEvent* cl_event;
 };
 
 struct AcCommandBatch {
     uint32_t magic;
     AcContext* owning_context;
     AcVkCommandBatch* vk_batch;
+    AcClBatch* cl_batch;
 };
+
+static AcEvent* wrap_cl_event(AcContext* ctx, AcClEvent* cl_ev) {
+    AcEvent* ev = (AcEvent*)calloc(1, sizeof(AcEvent));
+    if (!ev) {
+        ac_cl_event_destroy(cl_ev);
+        return NULL;
+    }
+    ev->magic = AC_MAGIC_EVENT;
+    ev->owning_context = ctx;
+    ev->cl_event = cl_ev;
+    ctx->active_child_events++;
+    return ev;
+}
 
 
 /* ========================================================================= */
@@ -82,6 +102,24 @@ AcResult ac_runtime_context_create(const AcContextDesc* desc, AcContext** out_ct
     }
     if (desc->flags != 0) {
         return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (desc->backend_kind == AC_BACKEND_OPENCL) {
+        AcClContext* cl_ctx = NULL;
+        AcResult res = ac_cl_context_create(&cl_ctx);
+        if (res != AC_SUCCESS) {
+            return res;
+        }
+        AcContext* ctx = (AcContext*)calloc(1, sizeof(AcContext));
+        if (!ctx) {
+            ac_cl_context_destroy(cl_ctx);
+            return AC_ERR_OUT_OF_HOST_MEMORY;
+        }
+        ctx->magic = AC_MAGIC_CONTEXT;
+        ctx->abi_version = desc->abi_version;
+        ctx->backend_kind = AC_BACKEND_OPENCL;
+        ctx->cl_ctx = cl_ctx;
+        *out_ctx = ctx;
+        return AC_SUCCESS;
     }
     if (desc->backend_kind != AC_BACKEND_VULKAN) {
         return AC_ERR_DEVICE_NOT_SUPPORTED;
@@ -132,9 +170,32 @@ AcResult ac_runtime_context_destroy(AcContext* ctx) {
         }
         ctx->vk_ctx = NULL;
     }
+    if (ctx->cl_ctx) {
+        AcResult res = ac_cl_context_destroy(ctx->cl_ctx);
+        ctx->cl_ctx = NULL; /* released even when the final clFinish reported an error */
+        if (res != AC_SUCCESS) {
+            ctx->magic = 0;
+            free(ctx);
+            return res;
+        }
+    }
 
     ctx->magic = 0;
     free(ctx);
+    return AC_SUCCESS;
+}
+
+AcResult ac_runtime_context_get_backend_kind(const AcContext* ctx, AcBackendKind* out_kind) {
+    if (out_kind) {
+        *out_kind = AC_BACKEND_UNKNOWN;
+    }
+    if (!ctx || ctx->magic != AC_MAGIC_CONTEXT) {
+        return AC_ERR_INVALID_CONTEXT;
+    }
+    if (!out_kind) {
+        return AC_ERR_NULL_POINTER;
+    }
+    *out_kind = ctx->backend_kind;
     return AC_SUCCESS;
 }
 
@@ -152,6 +213,9 @@ AcResult ac_runtime_context_get_device_name(
     if (ctx->vk_ctx) {
         snprintf(out_name, max_len, "%s", ctx->vk_ctx->device_properties.deviceName);
         return AC_SUCCESS;
+    }
+    if (ctx->cl_ctx) {
+        return ac_cl_context_get_device_name(ctx->cl_ctx, out_name, max_len);
     }
     return AC_ERR_DEVICE_NOT_SUPPORTED;
 }
@@ -205,6 +269,27 @@ AcResult ac_runtime_buffer_create(AcContext* ctx, const AcBufferDesc* desc, AcBu
         return AC_ERR_INVALID_ARGUMENT;
     }
 
+    if (ctx->cl_ctx) {
+        /* usage and coherence preferences have no OpenCL counterpart: every SVM buffer serves every use, and the
+           host reaches it only through ac_runtime_buffer_write / read / fill */
+        AcClBuffer* cl_buf = NULL;
+        AcResult res = ac_cl_buffer_create(ctx->cl_ctx, desc->size_bytes, &cl_buf);
+        if (res != AC_SUCCESS) {
+            return res;
+        }
+        AcBuffer* buf = (AcBuffer*)calloc(1, sizeof(AcBuffer));
+        if (!buf) {
+            ac_cl_buffer_destroy(cl_buf);
+            return AC_ERR_OUT_OF_HOST_MEMORY;
+        }
+        buf->magic = AC_MAGIC_BUFFER;
+        buf->owning_context = ctx;
+        buf->cl_buf = cl_buf;
+        ctx->active_child_buffers++;
+        *out_buf = buf;
+        return AC_SUCCESS;
+    }
+
     VkBufferUsageFlags vk_usage = translate_buffer_usage(desc->usage);
     const bool force_non_coherent = (desc->force_non_coherent == 1u);
 
@@ -247,6 +332,11 @@ AcResult ac_runtime_buffer_destroy(AcBuffer* buf) {
         }
         buf->vk_buf = NULL;
     }
+    AcResult cl_res = AC_SUCCESS;
+    if (buf->cl_buf) {
+        cl_res = ac_cl_buffer_destroy(buf->cl_buf); /* freed in any case; an error reports the queue's state */
+        buf->cl_buf = NULL;
+    }
 
     if (buf->owning_context) {
         if (buf->owning_context->active_child_buffers > 0) {
@@ -257,18 +347,25 @@ AcResult ac_runtime_buffer_destroy(AcBuffer* buf) {
 
     buf->magic = 0;
     free(buf);
-    return AC_SUCCESS;
+    return cl_res;
+}
+
+static bool buffer_valid(const AcBuffer* buf) {
+    return buf && buf->magic == AC_MAGIC_BUFFER && (buf->vk_buf || buf->cl_buf);
 }
 
 AcResult ac_runtime_buffer_get_mapped_ptr(const AcBuffer* buf, void** out_ptr) {
     if (out_ptr) {
         *out_ptr = NULL;
     }
-    if (!buf || buf->magic != AC_MAGIC_BUFFER || !buf->vk_buf) {
+    if (!buffer_valid(buf)) {
         return AC_ERR_INVALID_ARGUMENT;
     }
     if (!out_ptr) {
         return AC_ERR_NULL_POINTER;
+    }
+    if (buf->cl_buf) {
+        return AC_ERR_BUFFER_NOT_MAPPED; /* OpenCL SVM: ac_runtime_buffer_write / read / fill */
     }
     *out_ptr = buf->vk_buf->mapped_ptr;
     return AC_SUCCESS;
@@ -278,13 +375,13 @@ AcResult ac_runtime_buffer_get_size(const AcBuffer* buf, size_t* out_size) {
     if (out_size) {
         *out_size = 0;
     }
-    if (!buf || buf->magic != AC_MAGIC_BUFFER || !buf->vk_buf) {
+    if (!buffer_valid(buf)) {
         return AC_ERR_INVALID_ARGUMENT;
     }
     if (!out_size) {
         return AC_ERR_NULL_POINTER;
     }
-    *out_size = buf->vk_buf->size_bytes;
+    *out_size = buf->cl_buf ? ac_cl_buffer_size(buf->cl_buf) : buf->vk_buf->size_bytes;
     return AC_SUCCESS;
 }
 
@@ -292,13 +389,13 @@ AcResult ac_runtime_buffer_get_allocation_size(const AcBuffer* buf, size_t* out_
     if (out_alloc_size) {
         *out_alloc_size = 0;
     }
-    if (!buf || buf->magic != AC_MAGIC_BUFFER || !buf->vk_buf) {
+    if (!buffer_valid(buf)) {
         return AC_ERR_INVALID_ARGUMENT;
     }
     if (!out_alloc_size) {
         return AC_ERR_NULL_POINTER;
     }
-    *out_alloc_size = buf->vk_buf->allocation_size_bytes;
+    *out_alloc_size = buf->cl_buf ? ac_cl_buffer_size(buf->cl_buf) : buf->vk_buf->allocation_size_bytes;
     return AC_SUCCESS;
 }
 
@@ -306,28 +403,115 @@ AcResult ac_runtime_buffer_is_coherent(const AcBuffer* buf, uint32_t* out_is_coh
     if (out_is_coherent) {
         *out_is_coherent = 0u;
     }
-    if (!buf || buf->magic != AC_MAGIC_BUFFER || !buf->vk_buf) {
+    if (!buffer_valid(buf)) {
         return AC_ERR_INVALID_ARGUMENT;
     }
     if (!out_is_coherent) {
         return AC_ERR_NULL_POINTER;
+    }
+    if (buf->cl_buf) {
+        return AC_ERR_BUFFER_NOT_MAPPED;
     }
     *out_is_coherent = buf->vk_buf->is_coherent ? 1u : 0u;
     return AC_SUCCESS;
 }
 
 AcResult ac_runtime_buffer_flush(AcBuffer* buf, size_t offset, size_t size_bytes) {
-    if (!buf || buf->magic != AC_MAGIC_BUFFER || !buf->vk_buf) {
+    if (!buffer_valid(buf)) {
         return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (buf->cl_buf) {
+        return AC_ERR_BUFFER_NOT_MAPPED;
     }
     return ac_vk_buffer_flush(buf->vk_buf, offset, size_bytes);
 }
 
 AcResult ac_runtime_buffer_invalidate(AcBuffer* buf, size_t offset, size_t size_bytes) {
-    if (!buf || buf->magic != AC_MAGIC_BUFFER || !buf->vk_buf) {
+    if (!buffer_valid(buf)) {
         return AC_ERR_INVALID_ARGUMENT;
     }
+    if (buf->cl_buf) {
+        return AC_ERR_BUFFER_NOT_MAPPED;
+    }
     return ac_vk_buffer_invalidate(buf->vk_buf, offset, size_bytes);
+}
+
+AcResult ac_runtime_buffer_write(AcBuffer* buf, size_t offset, const void* src, size_t size_bytes) {
+    if (!buffer_valid(buf)) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (!src && size_bytes) {
+        return AC_ERR_NULL_POINTER;
+    }
+    if (buf->cl_buf) {
+        return ac_cl_buffer_write(buf->cl_buf, offset, src, size_bytes);
+    }
+    const size_t size = buf->vk_buf->size_bytes;
+    if (offset > size || size_bytes > size - offset) {
+        return AC_ERR_INVALID_BUFFER_SIZE;
+    }
+    if (size_bytes == 0) {
+        return AC_SUCCESS;
+    }
+    memcpy((char*)buf->vk_buf->mapped_ptr + offset, src, size_bytes);
+    return ac_vk_buffer_flush(buf->vk_buf, offset, size_bytes);
+}
+
+AcResult ac_runtime_buffer_read(AcBuffer* buf, size_t offset, void* dst, size_t size_bytes) {
+    if (!buffer_valid(buf)) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (!dst && size_bytes) {
+        return AC_ERR_NULL_POINTER;
+    }
+    if (buf->cl_buf) {
+        return ac_cl_buffer_read(buf->cl_buf, offset, dst, size_bytes);
+    }
+    const size_t size = buf->vk_buf->size_bytes;
+    if (offset > size || size_bytes > size - offset) {
+        return AC_ERR_INVALID_BUFFER_SIZE;
+    }
+    if (size_bytes == 0) {
+        return AC_SUCCESS;
+    }
+    AcResult res = ac_vk_buffer_invalidate(buf->vk_buf, offset, size_bytes);
+    if (res != AC_SUCCESS) {
+        return res;
+    }
+    memcpy(dst, (const char*)buf->vk_buf->mapped_ptr + offset, size_bytes);
+    return AC_SUCCESS;
+}
+
+AcResult ac_runtime_buffer_fill(AcBuffer* buf, size_t offset, size_t size_bytes, uint8_t value) {
+    if (!buffer_valid(buf)) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (buf->cl_buf) {
+        return ac_cl_buffer_fill(buf->cl_buf, offset, size_bytes, value);
+    }
+    const size_t size = buf->vk_buf->size_bytes;
+    if (offset > size || size_bytes > size - offset) {
+        return AC_ERR_INVALID_BUFFER_SIZE;
+    }
+    if (size_bytes == 0) {
+        return AC_SUCCESS;
+    }
+    memset((char*)buf->vk_buf->mapped_ptr + offset, value, size_bytes);
+    return ac_vk_buffer_flush(buf->vk_buf, offset, size_bytes);
+}
+
+AcResult ac_runtime_buffer_get_address(const AcBuffer* buf, void** out_address) {
+    if (out_address) {
+        *out_address = NULL;
+    }
+    if (!buffer_valid(buf)) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (!out_address) {
+        return AC_ERR_NULL_POINTER;
+    }
+    *out_address = buf->cl_buf ? ac_cl_buffer_address(buf->cl_buf) : buf->vk_buf->mapped_ptr;
+    return AC_SUCCESS;
 }
 
 /* ========================================================================= */
@@ -403,6 +587,9 @@ AcResult ac_runtime_kernel_create(AcContext* ctx, const AcKernelDesc* desc, AcKe
     }
     if (desc->struct_size != sizeof(AcKernelDesc)) {
         return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (ctx->cl_ctx) {
+        return AC_ERR_FEATURE_NOT_SUPPORTED; /* SPIR-V for Vulkan; OpenCL contexts take ac_runtime_kernel_create_from_source */
     }
     if (!desc->spirv_code) {
         return AC_ERR_NULL_POINTER;
@@ -729,6 +916,63 @@ AcResult ac_runtime_kernel_create(AcContext* ctx, const AcKernelDesc* desc, AcKe
     return AC_SUCCESS;
 }
 
+AcResult ac_runtime_kernel_create_from_source(AcContext* ctx, const AcKernelSourceDesc* desc, AcKernel** out_kernel) {
+    if (out_kernel) {
+        *out_kernel = NULL;
+    }
+    if (!ctx || ctx->magic != AC_MAGIC_CONTEXT) {
+        return AC_ERR_INVALID_CONTEXT;
+    }
+    if (!desc || !out_kernel) {
+        return AC_ERR_NULL_POINTER;
+    }
+    if (desc->abi_version != AC_ABI_VERSION || desc->struct_size != sizeof(AcKernelSourceDesc)) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (!ctx->cl_ctx) {
+        return AC_ERR_FEATURE_NOT_SUPPORTED; /* Vulkan contexts take SPIR-V (ac_runtime_kernel_create) */
+    }
+    if (!desc->source || !desc->metadata) {
+        return AC_ERR_NULL_POINTER;
+    }
+    const AcKernelRuntimeMetadata* m = desc->metadata;
+    if (!m->kernel_name || m->kernel_name[0] == '\0' || !m->entry_point || m->entry_point[0] == '\0') {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (m->local_size.x == 0 || m->local_size.y == 0 || m->local_size.z == 0) {
+        return AC_ERR_INVALID_WORK_GROUP_SIZE;
+    }
+    if (m->push_constant_size > 128 || m->binding_count > 16 || (m->binding_count > 0 && !m->bindings)) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
+    for (uint32_t i = 0; i < m->binding_count; ++i) {
+        if (m->bindings[i].stage_flags != AC_STAGE_COMPUTE ||
+            (m->bindings[i].binding_type != AC_RUNTIME_BINDING_STORAGE_BUFFER &&
+             m->bindings[i].binding_type != AC_RUNTIME_BINDING_UNIFORM_BUFFER)) {
+            return AC_ERR_INVALID_ARGUMENT;
+        }
+    }
+    if (m->specialization_schema_count != 0) {
+        return AC_ERR_FEATURE_NOT_SUPPORTED; /* OpenCL C takes compile-time values as build options */
+    }
+    AcClKernel* cl_kernel = NULL;
+    AcResult res = ac_cl_kernel_create(ctx->cl_ctx, desc->source, desc->source_size, desc->build_options, m, &cl_kernel);
+    if (res != AC_SUCCESS) {
+        return res;
+    }
+    AcKernel* kernel = (AcKernel*)calloc(1, sizeof(AcKernel));
+    if (!kernel) {
+        ac_cl_kernel_destroy(cl_kernel);
+        return AC_ERR_OUT_OF_HOST_MEMORY;
+    }
+    kernel->magic = AC_MAGIC_KERNEL;
+    kernel->owning_context = ctx;
+    kernel->cl_kernel = cl_kernel;
+    ctx->active_child_kernels++;
+    *out_kernel = kernel;
+    return AC_SUCCESS;
+}
+
 AcResult ac_runtime_kernel_destroy(AcKernel* kernel) {
     if (!kernel || kernel->magic != AC_MAGIC_KERNEL) {
         return AC_ERR_INVALID_ARGUMENT;
@@ -740,6 +984,10 @@ AcResult ac_runtime_kernel_destroy(AcKernel* kernel) {
             return res;
         }
         kernel->vk_kernel = NULL;
+    }
+    if (kernel->cl_kernel) {
+        ac_cl_kernel_destroy(kernel->cl_kernel); /* released after the last recorded dispatch that uses it */
+        kernel->cl_kernel = NULL;
     }
 
     if (kernel->owning_context) {
@@ -762,7 +1010,7 @@ AcResult ac_runtime_kernel_get_pipeline_identity(
     if (out_hex && out_hex_size > 0) {
         out_hex[0] = '\0';
     }
-    if (!kernel || kernel->magic != AC_MAGIC_KERNEL || !kernel->vk_kernel) {
+    if (!kernel || kernel->magic != AC_MAGIC_KERNEL || (!kernel->vk_kernel && !kernel->cl_kernel)) {
         return AC_ERR_INVALID_ARGUMENT;
     }
     if (!out_hex) {
@@ -771,7 +1019,8 @@ AcResult ac_runtime_kernel_get_pipeline_identity(
     if (out_hex_size < AC_PIPELINE_IDENTITY_SHA256_HEX_SIZE) {
         return AC_ERR_INVALID_ARGUMENT;
     }
-    memcpy(out_hex, kernel->vk_kernel->pipeline_identity, AC_PIPELINE_IDENTITY_SHA256_HEX_SIZE);
+    memcpy(out_hex, kernel->cl_kernel ? ac_cl_kernel_identity(kernel->cl_kernel) : kernel->vk_kernel->pipeline_identity,
+           AC_PIPELINE_IDENTITY_SHA256_HEX_SIZE);
     return AC_SUCCESS;
 }
 
@@ -782,13 +1031,13 @@ AcResult ac_runtime_kernel_get_effective_local_size(
     if (out_local_size) {
         *out_local_size = (AcDim3){0, 0, 0};
     }
-    if (!kernel || kernel->magic != AC_MAGIC_KERNEL || !kernel->vk_kernel) {
+    if (!kernel || kernel->magic != AC_MAGIC_KERNEL || (!kernel->vk_kernel && !kernel->cl_kernel)) {
         return AC_ERR_INVALID_ARGUMENT;
     }
     if (!out_local_size) {
         return AC_ERR_NULL_POINTER;
     }
-    *out_local_size = kernel->vk_kernel->effective_local_size;
+    *out_local_size = kernel->cl_kernel ? ac_cl_kernel_local_size(kernel->cl_kernel) : kernel->vk_kernel->effective_local_size;
     return AC_SUCCESS;
 }
 
@@ -800,10 +1049,11 @@ AcResult ac_runtime_kernel_get_push_constant_size(
         return AC_ERR_NULL_POINTER;
     }
     *out_size = 0;
-    if (!kernel || kernel->magic != AC_MAGIC_KERNEL || !kernel->vk_kernel) {
+    if (!kernel || kernel->magic != AC_MAGIC_KERNEL || (!kernel->vk_kernel && !kernel->cl_kernel)) {
         return AC_ERR_INVALID_ARGUMENT;
     }
-    *out_size = (size_t)kernel->vk_kernel->push_constant_size;
+    *out_size = kernel->cl_kernel ? ac_cl_kernel_push_constant_size(kernel->cl_kernel)
+                                  : (size_t)kernel->vk_kernel->push_constant_size;
     return AC_SUCCESS;
 }
 
@@ -851,6 +1101,53 @@ AcResult ac_runtime_dispatch(AcContext* ctx, const AcLaunchDesc* desc, AcEvent**
     }
     if (desc->buffer_count > 16) {
         return AC_ERR_INVALID_ARGUMENT;
+    }
+
+    if (ctx->cl_ctx) {
+        /* one batch of one dispatch, every buffer bound whole */
+        if (desc->push_constants_size > 128 || (desc->push_constants_size > 0 && !desc->push_constants)) {
+            return AC_ERR_INVALID_ARGUMENT;
+        }
+        AcClBuffer* cl_bufs[16];
+        uint64_t offsets[16], ranges[16];
+        for (uint32_t i = 0; i < desc->buffer_count; ++i) {
+            const AcBuffer* b = desc->buffers[i];
+            if (!b || b->magic != AC_MAGIC_BUFFER || !b->cl_buf) {
+                return AC_ERR_NULL_POINTER;
+            }
+            if (b->owning_context != ctx) {
+                return AC_ERR_CONTEXT_MISMATCH;
+            }
+            cl_bufs[i] = b->cl_buf;
+            offsets[i] = 0;
+            ranges[i] = ac_cl_buffer_size(b->cl_buf);
+        }
+        AcClBatch* cb = NULL;
+        AcResult res = ac_cl_batch_begin(ctx->cl_ctx, 1, 0, &cb);
+        if (res != AC_SUCCESS) {
+            return res;
+        }
+        res = ac_cl_batch_dispatch(cb, desc->kernel->cl_kernel, cl_bufs, offsets, ranges, desc->buffer_count,
+                                   desc->push_constants, desc->push_constants_size, desc->grid_dim);
+        AcClEvent* cl_ev = NULL;
+        if (res == AC_SUCCESS) {
+            res = ac_cl_batch_submit(cb, &cl_ev);
+        }
+        ac_cl_batch_destroy(cb);
+        if (res != AC_SUCCESS) {
+            return res;
+        }
+        if (out_event == NULL) {
+            AcResult wait_res = ac_cl_event_wait(cl_ev, UINT64_MAX);
+            ac_cl_event_destroy(cl_ev);
+            return wait_res;
+        }
+        AcEvent* ev = wrap_cl_event(ctx, cl_ev);
+        if (!ev) {
+            return AC_ERR_OUT_OF_HOST_MEMORY;
+        }
+        *out_event = ev;
+        return AC_SUCCESS;
     }
 
     AcVkBuffer* vk_bufs[16];
@@ -936,15 +1233,21 @@ AcResult ac_runtime_dispatch(AcContext* ctx, const AcLaunchDesc* desc, AcEvent**
 }
 
 AcResult ac_runtime_event_wait(AcEvent* event, uint64_t timeout_ns) {
-    if (!event || event->magic != AC_MAGIC_EVENT || !event->vk_event) {
+    if (!event || event->magic != AC_MAGIC_EVENT || (!event->vk_event && !event->cl_event)) {
         return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (event->cl_event) {
+        return ac_cl_event_wait(event->cl_event, timeout_ns);
     }
     return ac_vk_event_wait(event->vk_event, timeout_ns);
 }
 
 AcResult ac_runtime_event_get_timing(AcEvent* event, uint64_t* out_wall_latency_ns, uint64_t* out_gpu_duration_ns) {
-    if (!event || event->magic != AC_MAGIC_EVENT || !event->vk_event) {
+    if (!event || event->magic != AC_MAGIC_EVENT || (!event->vk_event && !event->cl_event)) {
         return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (event->cl_event) {
+        return ac_cl_event_get_timing(event->cl_event, out_wall_latency_ns, out_gpu_duration_ns);
     }
     return ac_vk_event_get_timing(event->vk_event, out_wall_latency_ns, out_gpu_duration_ns);
 }
@@ -960,6 +1263,10 @@ AcResult ac_runtime_event_destroy(AcEvent* event) {
             return res;
         }
         event->vk_event = NULL;
+    }
+    if (event->cl_event) {
+        ac_cl_event_destroy(event->cl_event);
+        event->cl_event = NULL;
     }
 
     if (event->owning_context) {
@@ -993,20 +1300,24 @@ AcResult ac_runtime_batch_begin(
     }
 
     AcVkCommandBatch* vk_batch = NULL;
-    AcResult res = ac_vk_batch_begin(context->vk_ctx, 8, &vk_batch);
+    AcClBatch* cl_batch = NULL;
+    AcResult res = context->cl_ctx ? ac_cl_batch_begin(context->cl_ctx, 8, 0, &cl_batch)
+                                   : ac_vk_batch_begin(context->vk_ctx, 8, &vk_batch);
     if (res != AC_SUCCESS) {
         return res;
     }
 
     AcCommandBatch* batch = (AcCommandBatch*)calloc(1, sizeof(AcCommandBatch));
     if (!batch) {
-        ac_vk_batch_destroy(vk_batch);
+        if (cl_batch) ac_cl_batch_destroy(cl_batch);
+        else ac_vk_batch_destroy(vk_batch);
         return AC_ERR_OUT_OF_HOST_MEMORY;
     }
 
     batch->magic = AC_MAGIC_BATCH;
     batch->owning_context = context;
     batch->vk_batch = vk_batch;
+    batch->cl_batch = cl_batch;
     context->active_child_batches++;
 
     *out_batch = batch;
@@ -1043,6 +1354,29 @@ AcResult ac_runtime_batch_dispatch(
 
     if (launch->buffer_count > 16) {
         return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (batch->cl_batch) {
+        /* logical per-dispatch events are a Vulkan feature of this older entry point; the completion event of
+           ac_runtime_batch_submit covers OpenCL batches */
+        if (out_event) {
+            return AC_ERR_FEATURE_NOT_SUPPORTED;
+        }
+        AcClBuffer* cl_bufs[16];
+        uint64_t offsets[16], ranges[16];
+        for (uint32_t i = 0; i < launch->buffer_count; ++i) {
+            const AcBuffer* b = launch->buffers[i];
+            if (!b || b->magic != AC_MAGIC_BUFFER || !b->cl_buf) {
+                return AC_ERR_NULL_POINTER;
+            }
+            if (b->owning_context != batch->owning_context) {
+                return AC_ERR_CONTEXT_MISMATCH;
+            }
+            cl_bufs[i] = b->cl_buf;
+            offsets[i] = 0;
+            ranges[i] = ac_cl_buffer_size(b->cl_buf);
+        }
+        return ac_cl_batch_dispatch(batch->cl_batch, kernel->cl_kernel, cl_bufs, offsets, ranges, launch->buffer_count,
+                                    launch->push_constants, launch->push_constants_size, launch->grid_dim);
     }
     AcVkBuffer* vk_bufs[16];
     for (uint32_t i = 0; i < launch->buffer_count; ++i) {
@@ -1097,6 +1431,21 @@ AcResult ac_runtime_batch_submit(
     if (!batch || batch->magic != AC_MAGIC_BATCH) {
         return AC_ERR_INVALID_ARGUMENT;
     }
+    if (batch->cl_batch) {
+        AcClEvent* cl_ev = NULL;
+        AcResult res = ac_cl_batch_submit(batch->cl_batch, out_completion_event ? &cl_ev : NULL);
+        if (res != AC_SUCCESS) {
+            return res;
+        }
+        if (out_completion_event && cl_ev) {
+            AcEvent* ev = wrap_cl_event(batch->owning_context, cl_ev);
+            if (!ev) {
+                return AC_ERR_OUT_OF_HOST_MEMORY;
+            }
+            *out_completion_event = ev;
+        }
+        return AC_SUCCESS;
+    }
 
     AcVkEvent* comp_vk_ev = NULL;
     AcResult res = ac_vk_batch_submit(batch->vk_batch, out_completion_event ? &comp_vk_ev : NULL);
@@ -1125,6 +1474,9 @@ AcResult ac_runtime_batch_abort(
     if (!batch || batch->magic != AC_MAGIC_BATCH) {
         return AC_ERR_INVALID_ARGUMENT;
     }
+    if (batch->cl_batch) {
+        return ac_cl_batch_abort(batch->cl_batch);
+    }
     return ac_vk_batch_abort(batch->vk_batch);
 }
 
@@ -1138,6 +1490,10 @@ void ac_runtime_batch_destroy(
     if (batch->vk_batch) {
         ac_vk_batch_destroy(batch->vk_batch);
         batch->vk_batch = NULL;
+    }
+    if (batch->cl_batch) {
+        ac_cl_batch_destroy(batch->cl_batch);
+        batch->cl_batch = NULL;
     }
 
     if (batch->owning_context) {
@@ -1155,20 +1511,23 @@ void ac_runtime_batch_destroy(
 /* Graph Batch Additions                                                     */
 /* ========================================================================= */
 
+/* OpenCL contexts keep program binaries in the same calls (a format of their own, checked against device and driver) */
 AcResult ac_runtime_pipeline_cache_merge(AcContext* ctx, const void* data, size_t size) {
-    if (!ctx || ctx->magic != AC_MAGIC_CONTEXT || !ctx->vk_ctx) return AC_ERR_INVALID_CONTEXT;
+    if (!ctx || ctx->magic != AC_MAGIC_CONTEXT || (!ctx->vk_ctx && !ctx->cl_ctx)) return AC_ERR_INVALID_CONTEXT;
     if (!data) return AC_ERR_NULL_POINTER;
+    if (ctx->cl_ctx) return ac_cl_program_cache_merge(ctx->cl_ctx, data, size);
     return ac_vk_pipeline_cache_merge(ctx->vk_ctx, data, size);
 }
 
 AcResult ac_runtime_pipeline_cache_get_data(AcContext* ctx, void* data, size_t* inout_size) {
-    if (!ctx || ctx->magic != AC_MAGIC_CONTEXT || !ctx->vk_ctx) return AC_ERR_INVALID_CONTEXT;
+    if (!ctx || ctx->magic != AC_MAGIC_CONTEXT || (!ctx->vk_ctx && !ctx->cl_ctx)) return AC_ERR_INVALID_CONTEXT;
     if (!inout_size) return AC_ERR_NULL_POINTER;
+    if (ctx->cl_ctx) return ac_cl_program_cache_get_data(ctx->cl_ctx, data, inout_size);
     return ac_vk_pipeline_cache_get_data(ctx->vk_ctx, data, inout_size);
 }
 
 AcResult ac_runtime_context_get_limits(const AcContext* ctx, AcDeviceLimits* out_limits) {
-    if (!ctx || ctx->magic != AC_MAGIC_CONTEXT || !ctx->vk_ctx) {
+    if (!ctx || ctx->magic != AC_MAGIC_CONTEXT || (!ctx->vk_ctx && !ctx->cl_ctx)) {
         return AC_ERR_INVALID_CONTEXT;
     }
     if (!out_limits) {
@@ -1179,6 +1538,9 @@ AcResult ac_runtime_context_get_limits(const AcContext* ctx, AcDeviceLimits* out
     if (out_limits->abi_version != AC_ABI_VERSION || out_limits->struct_size < base_size ||
         out_limits->struct_size > sizeof(AcDeviceLimits)) {
         return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (ctx->cl_ctx) {
+        return ac_cl_context_get_limits(ctx->cl_ctx, out_limits);
     }
     const AcVkContext* vk = ctx->vk_ctx;
     const VkPhysicalDeviceLimits* l = &vk->device_properties.limits;
@@ -1225,6 +1587,24 @@ AcResult ac_runtime_batch_begin_ex(
     if (desc->flags & ~(AC_BATCH_FLAG_EXPLICIT_BARRIERS | AC_BATCH_FLAG_TIMESTAMPS | AC_BATCH_FLAG_DISPATCH_TIMESTAMPS)) {
         return AC_ERR_INVALID_ARGUMENT;
     }
+    if (context->cl_ctx) {
+        AcClBatch* cl_batch = NULL;
+        AcResult res = ac_cl_batch_begin(context->cl_ctx, desc->max_dispatches, desc->flags, &cl_batch);
+        if (res != AC_SUCCESS) {
+            return res;
+        }
+        AcCommandBatch* batch = (AcCommandBatch*)calloc(1, sizeof(AcCommandBatch));
+        if (!batch) {
+            ac_cl_batch_destroy(cl_batch);
+            return AC_ERR_OUT_OF_HOST_MEMORY;
+        }
+        batch->magic = AC_MAGIC_BATCH;
+        batch->owning_context = context;
+        batch->cl_batch = cl_batch;
+        context->active_child_batches++;
+        *out_batch = batch;
+        return AC_SUCCESS;
+    }
     uint32_t vk_flags = 0;
     if (desc->flags & AC_BATCH_FLAG_EXPLICIT_BARRIERS) vk_flags |= AC_VK_BATCH_FLAG_EXPLICIT_BARRIERS;
     if (desc->flags & AC_BATCH_FLAG_TIMESTAMPS) vk_flags |= AC_VK_BATCH_FLAG_TIMESTAMPS;
@@ -1260,7 +1640,7 @@ AcResult ac_runtime_batch_dispatch_bindings(
     if (!batch || !kernel || (binding_count > 0 && !bindings)) {
         return AC_ERR_NULL_POINTER;
     }
-    if (batch->magic != AC_MAGIC_BATCH || kernel->magic != AC_MAGIC_KERNEL || !kernel->vk_kernel) {
+    if (batch->magic != AC_MAGIC_BATCH || kernel->magic != AC_MAGIC_KERNEL || (!kernel->vk_kernel && !kernel->cl_kernel)) {
         return AC_ERR_INVALID_ARGUMENT;
     }
     if (kernel->owning_context != batch->owning_context) {
@@ -1271,6 +1651,24 @@ AcResult ac_runtime_batch_dispatch_bindings(
     }
     if (push_constants_size > 128 || (push_constants_size > 0 && !push_constants)) {
         return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (batch->cl_batch) {
+        AcClBuffer* cl_bufs[16];
+        uint64_t offsets[16], ranges[16];
+        for (uint32_t i = 0; i < binding_count; ++i) {
+            const AcBuffer* b = bindings[i].buffer;
+            if (!b || b->magic != AC_MAGIC_BUFFER || !b->cl_buf) {
+                return AC_ERR_NULL_POINTER;
+            }
+            if (b->owning_context != batch->owning_context) {
+                return AC_ERR_CONTEXT_MISMATCH;
+            }
+            cl_bufs[i] = b->cl_buf;
+            offsets[i] = bindings[i].offset;
+            ranges[i] = bindings[i].range;
+        }
+        return ac_cl_batch_dispatch(batch->cl_batch, kernel->cl_kernel, cl_bufs, offsets, ranges, binding_count,
+                                    push_constants, push_constants_size, grid_dim);
     }
     AcVkBuffer* vk_bufs[16];
     uint64_t offsets[16];
@@ -1295,12 +1693,18 @@ AcResult ac_runtime_batch_barrier(AcCommandBatch* batch) {
     if (!batch || batch->magic != AC_MAGIC_BATCH) {
         return AC_ERR_INVALID_ARGUMENT;
     }
+    if (batch->cl_batch) {
+        return ac_cl_batch_barrier(batch->cl_batch);
+    }
     return ac_vk_batch_barrier(batch->vk_batch);
 }
 
 AcResult ac_runtime_batch_flush(AcCommandBatch* batch) {
     if (!batch || batch->magic != AC_MAGIC_BATCH) {
         return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (batch->cl_batch) {
+        return ac_cl_batch_flush(batch->cl_batch);
     }
     return ac_vk_batch_flush(batch->vk_batch);
 }
@@ -1312,6 +1716,9 @@ AcResult ac_runtime_batch_get_dispatch_times(const AcCommandBatch* batch, uint64
     }
     if (!batch || batch->magic != AC_MAGIC_BATCH) {
         return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (batch->cl_batch) {
+        return ac_cl_batch_get_dispatch_times(batch->cl_batch, out_ns, capacity, out_count);
     }
     return ac_vk_batch_get_dispatch_times(batch->vk_batch, out_ns, capacity, out_count);
 }
@@ -1325,6 +1732,10 @@ AcResult ac_runtime_batch_get_stats(const AcCommandBatch* batch, AcBatchStats* o
     }
     if (out_stats->abi_version != AC_ABI_VERSION || out_stats->struct_size != sizeof(AcBatchStats)) {
         return AC_ERR_INVALID_ARGUMENT;
+    }
+    if (batch->cl_batch) {
+        ac_cl_batch_get_stats(batch->cl_batch, out_stats);
+        return AC_SUCCESS;
     }
     out_stats->dispatches = ac_vk_batch_get_dispatch_count(batch->vk_batch);
     out_stats->barriers = ac_vk_batch_get_inserted_barriers(batch->vk_batch);
