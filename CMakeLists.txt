@@ -111,6 +111,7 @@ set(AC_VK_SOURCES
     src/backend/opencl/ac_cl_backend.cpp
     src/runtime/ac_runtime.cpp
     src/runtime/ac_error.cpp
+    src/runtime/ac_security_guard.c
 )
 # The OpenCL backend (AC_BACKEND_OPENCL) opens the vendor driver with dlopen; it needs the Khronos headers only.
 find_path(AC_OPENCL_INCLUDE_DIR CL/cl.h PATHS ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -404,6 +405,21 @@ if(AMEVA_BUILD_VISION_NCNN_TESTS)
         add_test(NAME vision_pointwise_conv_relu COMMAND test_vision_pointwise_conv_relu)
     endif()
 endif()
+
+# =============================================================================
+# AMUDA Modality Adapters (Isolated Modules - Default OFF)
+# =============================================================================
+option(AC_BUILD_ADAPTER_BITNET "Build isolated BitNet GPU adapter" OFF)
+option(AC_BUILD_ADAPTER_VISION "Build isolated Vision GPU adapter" OFF)
+
+if(AC_BUILD_ADAPTER_BITNET)
+    add_subdirectory(adapters/bitnet)
+endif()
+
+if(AC_BUILD_ADAPTER_VISION)
+    add_subdirectory(adapters/vision)
+endif()
+
 
 
 

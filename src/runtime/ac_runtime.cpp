@@ -21,6 +21,7 @@
 #include <atomic>
 #include "../backend/vulkan/ac_vk_sha256.h"
 #include "../backend/opencl/ac_cl_backend.h"
+#include "ac_security_guard.h"
 
 #define AC_MAGIC_CONTEXT 0xAC010001
 #define AC_MAGIC_BUFFER  0xAC010002
@@ -102,6 +103,10 @@ AcResult ac_runtime_context_create(const AcContextDesc* desc, AcContext** out_ct
     }
     if (desc->flags != 0) {
         return AC_ERR_INVALID_ARGUMENT;
+    }
+    AcResult sec_res = ac_security_verify_host_environment();
+    if (sec_res != AC_SUCCESS) {
+        return sec_res;
     }
     if (desc->backend_kind == AC_BACKEND_OPENCL) {
         AcClContext* cl_ctx = NULL;
