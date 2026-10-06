@@ -63,6 +63,38 @@ f32 커널만 쓰도록 `AMEVA_MMQ=0 AMEVA_MMVQ=0`을 요구(아니면 abort). �
 - **프롬프트 경로 연산 이식**: 프롬프트 그래프가 GPU로 돌리는 연산 중 프롬프트에 실제로 쓰이는 것부터. 최소 집합은 MUL_MAT(블록 정수 타일), RMS_NORM, ROPE, GLU(SwiGLU), ADD/MUL/SCALE, CPY/CONT, FLASH_ATTN_EXT. GET_ROWS·SET_ROWS는 토큰당 1회로 CPU에 둘 수 있는지 확인한다.
 - 수용 못 하는 연산은 **거절하지 않고 실패한다**(철학 1, Fail-Fast). 프롬프트 경로가 완성되기 전에는 OpenCL 백엔드를 기본값으로 두지 않는다.
 
+#### 단계 B 사전 측정: Vulkan과 OpenCL의 메모리 공유 (2026-10-06, S21에서 불가)
+
+OpenCL 백엔드 전체 대신 "Vulkan 그래프 + MUL_MAT만 OpenCL"(같은 메모리를 두 API가 공유, 복사 없음)이 가능한지 먼저 쟀다.
+가능하면 이식할 연산이 MUL_MAT 하나로 줄어든다.
+
+- 공유 수단(현물 확인): Mali 드라이버는 Vulkan 메모리를 dma_buf로 내보내지 못하고 AHardwareBuffer(AHB)로만 내보낸다.
+  OpenCL은 `cl_arm_import_memory_android_hardware_buffer`로 AHB를 가져온다. Vulkan 매핑 주소의 호스트 가져오기는 거부된다
+  (`tests/ameva_vk_cl_interop_probe.c`, -6). AHB로 내보낼 수 있는 메모리 타입은 모두 host-visible이다(0x7, 0xB).
+  가져온 메모리에 대한 `clEnqueueMapBuffer`·`clEnqueueWriteBuffer`는 -59(CL_INVALID_OPERATION)로 거부된다.
+- 시험(`tests/ameva_vk_cl_gpu_handoff_probe.c`, 256 MB × 10라운드): 라운드마다 앞 절반에 새 값 e를 쓰고(생성), OpenCL 커널이
+  `2·a + 라운드 + 1`을 뒤 절반에 쓰고, Vulkan 커널이 두 절반을 검사해 **공유되지 않은 별도 버퍼**에 판정을 쓴다.
+  오류는 본 값으로 분류한다(OpenCL이 이전 라운드 입력을 읽음 / Vulkan이 이전 라운드 OpenCL 결과를 읽음 / Vulkan 입력 오류).
+  생성 경로 5종: gpu(Vulkan 커널이 씀, 그래프의 활성값과 같은 경우, 호스트는 공유 메모리에 접근하지 않음), cpu, launder,
+  staged(vkCmdCopyBuffer), compute(셰이더 복사).
+
+| 기기 (GPU, 드라이버) | 결과 |
+| :--- | :--- |
+| A53 (Mali-G68 r1p1, r32p1) | 5개 경로 14/14 통과 (이전 판 포함 추가 12회 통과) |
+| A35 (Mali-G68 r1p1, r38p1) | 5개 경로 11/11 통과 |
+| S21 (Mali-G78 r0p1, r38p0) | **모든 경로·모든 동기화 변형에서 실패** (회당 1~115개 64바이트 라인) |
+
+- S21의 실패는 거의 전부 **"OpenCL이 이전 라운드의 입력을 읽음"**이다. 값이 64바이트 라인 단위로 틀리고, 같은 라인이 이어지는
+  라운드에서 반복되기도 한다. 반대 방향(OpenCL이 쓴 결과를 Vulkan이 읽음)은 결과 버퍼를 분리한 뒤 오류가 없었다.
+- S21에서 효과가 없었던 동기화 변형(모두 각 3~12회): 호스트 대기 뒤 50 ms 지연, `VK_QUEUE_FAMILY_FOREIGN_EXT` 소유권 이전,
+  매 라운드 재가져오기, `clEnqueueMigrateMemObjects`, 커널 시작의 device-scope acquire 펜스, 일반 CL 버퍼 map/unmap,
+  host-cached 메모리 타입, dma_buf를 `CL_IMPORT_DMA_BUF_DATA_CONSISTENCY_WITH_HOST_ARM`으로 가져오기(OpenCL 시간 약 6배),
+  volatile 로드, 외부 세마포어(Vulkan sync_fd → `cl_khr_external_semaphore_sync_fd`, 호스트 대기 없음).
+- 지연이 효과가 없으므로 타이밍 경쟁이 아니라 S21의 OpenCL 작업이 다른 API가 쓴 라인을 무효화하지 않는 것으로 **추정**한다.
+  같은 r38 계열 드라이버의 A35(G68)는 통과하므로 G78 또는 r38p0 고유 문제로 보이나, 원인은 확인하지 못했다.
+- **결론: 두 API가 메모리를 공유하는 혼합 구조는 S21에서 결과가 틀린다. 단계 B는 API 간 메모리 공유 없이 구성한다.**
+  A53·A35에서는 공유가 성립하지만, 기기별로 구조를 나누면 S21이 빠지므로 기본 설계로 삼지 않는다.
+
 ### 단계 C — 실모델 측정과 판정
 
 - `verify_kv.sh`와 같은 틀로 S21·A53에서 CPU 대비 프롬프트 t/s와 KL 발산, `test-backend-ops`(OpenCL 백엔드), 응답 텍스트를 잰다.

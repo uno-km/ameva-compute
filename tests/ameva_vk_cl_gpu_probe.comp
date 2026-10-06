@@ -1,0 +1,33 @@
+#version 450
+// Vulkan side of tests/ameva_vk_cl_gpu_handoff_probe.c (GPU -> GPU handoff):
+//   mode 0  produce: a[i] = e = (i % 1000003) * 0.5 + round for i < nhalf (what the OpenCL kernel then reads; a new
+//           value every round, so data left from an earlier round is caught)
+//   mode 1  check: the OpenCL kernel wrote a[nhalf + i] = 2 a[i] + round + 1. Into the result buffer r (binding 2,
+//           never shared with OpenCL, so the host does not touch the shared memory in the GPU produce mode):
+//           r[i] = 1 if a[i] == e and a[nhalf + i] == 2e + round + 1;
+//           r[i] = 0.25 if this kernel reads a[i] != e (the Vulkan side sees a wrong input);
+//           r[i] = -a[nhalf + i] otherwise (the OpenCL result as this kernel sees it, for the host to classify)
+//   mode 2  launder: a[i] = bits(a[i]) ^ round with round = 0 - every value read and written back unchanged
+//   mode 3  compute copy: a[i] = s[i] from the host-written staging buffer (binding 1), a shader store instead of
+//           vkCmdCopyBuffer
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(std430, binding = 0) buffer B { float a[]; };
+layout(std430, binding = 1) readonly buffer S { float s[]; };
+layout(std430, binding = 2) writeonly buffer R { float r[]; };
+layout(push_constant) uniform P { uint nhalf; uint mode; uint round; } pc;
+
+void main() {
+    const uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * 65535u * 64u;
+    if (i >= pc.nhalf) return;
+    if (pc.mode == 0u) {
+        a[i] = float(i % 1000003u) * 0.5 + float(pc.round);
+    } else if (pc.mode == 1u) {
+        const float e = float(i % 1000003u) * 0.5 + float(pc.round);
+        const float o = a[pc.nhalf + i];
+        r[i] = a[i] != e ? 0.25 : (o == e * 2.0 + float(pc.round + 1u) ? 1.0 : -o);
+    } else if (pc.mode == 2u) {
+        a[i] = uintBitsToFloat(floatBitsToUint(a[i]) ^ pc.round);
+    } else {
+        a[i] = s[i];
+    }
+}
