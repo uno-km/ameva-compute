@@ -302,10 +302,31 @@ static bool ggml_backend_ameva_device_supports_buft(ggml_backend_dev_t dev, ggml
     return buft == ggml_backend_ameva_buffer_type(0);
 }
 
+// AMEVA_OFFLOAD=<n> (experiment, docs/design/opencl-prompt-path.md stage B): with the weights in CPU memory (-ngl 0),
+// the scheduler runs a MUL_MAT of n or more activation rows here instead of on the CPU, copying the weight in for each
+// graph. This measures the cost of that structure (CPU holds weights and KV cache, a GPU backend takes only the large
+// MUL_MATs) before an OpenCL backend is built on it. Unset or 0: no offload (the default).
+static int64_t ameva_offload_min_batch() {
+    static const int64_t v = [] {
+        const char* s = getenv("AMEVA_OFFLOAD");
+        if (!s || !*s) return (int64_t)0;
+        char* end = nullptr;
+        const long long n = strtoll(s, &end, 10);
+        if (*end != '\0' || n < 0) {
+            fprintf(stderr, "ggml-ameva: AMEVA_OFFLOAD='%s' is not a non-negative integer (minimum batch rows)\n", s);
+            abort();
+        }
+        if (n > 0) fprintf(stderr, "ggml-ameva: AMEVA_OFFLOAD=%lld: MUL_MAT with >= %lld rows offloaded from CPU weights\n", n, n);
+        return (int64_t)n;
+    }();
+    return v;
+}
+
 static bool ggml_backend_ameva_device_offload_op(ggml_backend_dev_t dev, const struct ggml_tensor* op) {
     (void)dev;
-    (void)op;
-    return false; // Zero unsolicited offload
+    const int64_t min_batch = ameva_offload_min_batch();
+    if (min_batch <= 0 || !op || op->op != GGML_OP_MUL_MAT || !op->src[1]) return false;
+    return op->src[1]->ne[1] >= min_batch;
 }
 
 // Designated initializers throughout: ggml-backend-impl.h inserts members into these vtables between releases,
