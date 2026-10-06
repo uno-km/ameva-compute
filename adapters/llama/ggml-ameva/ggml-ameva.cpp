@@ -1360,6 +1360,53 @@ static bool ameva_mmq_enabled(void) {
 // Scratch bytes per activation unit of 32: 32 int8 + d and two half sums (shaders/ameva_quant_a8.comp)
 static const uint64_t kMmqUnitBytes = 40;
 
+// Quality check of block-wise int8 activations (docs/design/opencl-prompt-path.md, stage A): AMEVA_ACT_FQ rounds the
+// activations of quantized-weight MUL_MATs to int8 per block and back (shaders/ameva_act_fq.comp) before the f32
+// kernels read them, so what a kernel with such activations computes can be measured on any device:
+//   256  weights of the 256-element super-block types (q2_K .. q6_K, iq4_xs ...): one scale per 256 activations,
+//        ggml's Q8_K, which the CPU backend multiplies these types with; other weight types unchanged
+//   32   every quantized weight: one scale per 32 activations (Q8_0)
+//   cpu  the CPU backend's choice: 256 for the super-block types, 32 for the others
+// The int8 kernels quantize the activations themselves, so the mode needs AMEVA_MMQ=0 and AMEVA_MMVQ=0.
+static uint32_t ameva_act_fq_mode(void) { // 0 off, 256, 32, 1 = cpu
+    static int mode = -1;
+    if (mode < 0) {
+        const char* e = getenv("AMEVA_ACT_FQ");
+        if (!e || !*e || !strcmp(e, "0")) mode = 0;
+        else if (!strcmp(e, "256")) mode = 256;
+        else if (!strcmp(e, "32")) mode = 32;
+        else if (!strcmp(e, "cpu")) mode = 1;
+        else GGML_ABORT("ggml-ameva: AMEVA_ACT_FQ must be 0, 256, 32 or cpu (got \"%s\")", e);
+        if (mode) {
+            const char* q = getenv("AMEVA_MMQ");
+            const char* v = getenv("AMEVA_MMVQ");
+            if (!q || strcmp(q, "0") || !v || strcmp(v, "0"))
+                GGML_ABORT("ggml-ameva: AMEVA_ACT_FQ=%s needs AMEVA_MMQ=0 and AMEVA_MMVQ=0 (the int8 kernels quantize "
+                           "the activations themselves)", e);
+            fprintf(stderr, "ggml-ameva: AMEVA_ACT_FQ=%s: activations of quantized-weight MUL_MATs rounded to int8 per "
+                            "block before the f32 kernels\n", e);
+        }
+    }
+    return (uint32_t)mode;
+}
+
+// Block size of the activation rounding of MUL_MAT `node` (0: none)
+static uint32_t ameva_act_fq_blk(const struct ggml_tensor* node) {
+    const uint32_t mode = ameva_act_fq_mode();
+    if (!mode || node->op != GGML_OP_MUL_MAT) return 0;
+    const struct ggml_tensor* src0 = node->src[0];
+    const struct ggml_tensor* src1 = node->src[1];
+    if (!ggml_is_quantized(src0->type) || src1->type != GGML_TYPE_F32) return 0;
+    const bool super = ggml_blck_size(src0->type) == 256;
+    const uint32_t blk = mode == 1 ? (super ? 256u : 32u) : (mode == 256 ? (super ? 256u : 0u) : 32u);
+    return blk && (uint32_t)src0->ne[0] % blk == 0 ? blk : 0u;
+}
+
+// Scratch bytes of the rounded activations of `node` (one f32 row of K per activation row)
+static uint64_t ameva_act_fq_bytes(const struct ggml_tensor* node) {
+    return ameva_act_fq_blk(node) ? (uint64_t)node->src[1]->ne[1] * (uint64_t)node->src[0]->ne[0] * 4 : 0;
+}
+
 static uint32_t ameva_qgemm_min_rows(void);
 
 // Whether MUL_MAT `node` runs ameva_mmq, and then the activation rows quantized per chunk (one scratch fill) and the
@@ -2341,6 +2388,32 @@ static const char* enc_mul_mat(AmevaRecorder& rec, const struct ggml_tensor* nod
         kernel = vi >= 0 ? ameva_qmm_kernel(vi) : nullptr;
         if (!kernel) return "no ameva_qmm kernel";
     }
+    // AMEVA_ACT_FQ: the activations rounded to int8 per block into the scratch buffer; the kernels below read them
+    // from there (contiguous rows of K)
+    const uint32_t fq_blk = ameva_act_fq_blk(node);
+    const uint32_t s1_src = st(src1, 1);
+    AmevaBind bfq = {};
+    if (fq_blk) {
+        if (!s_scratch || (uint64_t)M * K * 4 > s_scratch_bytes) return "AMEVA_ACT_FQ scratch not reserved";
+        AcKernel* fq = ameva_op_kernel(AMEVA_K_ACT_FQ);
+        if (!fq) return "no ameva_act_fq kernel";
+        AmevaBind ba;
+        const char* ef = ameva_bind_span(src1, 0, ((uint64_t)(M - 1) * s1_src + K) * 4, 4, &ba);
+        if (ef) return ef;
+        if (ba.elem % 4 != 0) return "activation offset not a multiple of 16 bytes";
+        bfq.b.buffer = s_scratch;
+        bfq.b.offset = 0;
+        bfq.b.range = std::min<uint64_t>(s_scratch_bytes, s_limits.max_storage_buffer_range) & ~3ull;
+        bfq.key = s_scratch;
+        bfq.lo = 0;
+        bfq.hi = (uint64_t)M * K * 4;
+        if (bfq.hi > bfq.b.range) return "AMEVA_ACT_FQ activations larger than one binding";
+        const uint32_t pcf[6] = { M, K, ba.elem, s1_src, 0u, fq_blk };
+        const AcBufferBinding bindf[2] = { ba.b, bfq.b };
+        ef = ameva_record(rec, fq, &ba, 1, &bfq, 1, bindf, 2, pcf, sizeof(pcf),
+                          ameva_grid_1d((uint64_t)M * (K / fq_blk), 64), (double)M * K);
+        if (ef) return ef;
+    }
     const char* e = nullptr;
     const uint64_t span = ameva_max_binding_span();
     uint64_t slice_cap = std::min<uint64_t>(span / slice_row_bytes, 65535ull * rows_per_wg);
@@ -2351,7 +2424,7 @@ static const char* enc_mul_mat(AmevaRecorder& rec, const struct ggml_tensor* nod
         slice_cap = std::min<uint64_t>(slice_cap, std::max<uint64_t>(64, mac_rows & ~63ull));
     }
     const uint32_t rows_per_slice = (uint32_t)std::max<uint64_t>(1, std::min<uint64_t>((uint64_t)N, slice_cap));
-    const uint32_t s1 = st(src1, 1), sd = st(node, 1);
+    const uint32_t s1 = fq_blk ? K : s1_src, sd = st(node, 1);
     // activation/output rows per dispatch: at most kDispatchMac multiply-accumulates and one binding for the rows of
     // src1 and of dst it touches; whole 8-row tiles when the 8-column kernel runs
     const uint64_t rows_fit = std::max<uint64_t>(1, std::min<uint64_t>(span / ((uint64_t)s1 * 4), span / ((uint64_t)sd * 4)));
@@ -2381,7 +2454,15 @@ static const char* enc_mul_mat(AmevaRecorder& rec, const struct ggml_tensor* nod
             const uint32_t mc = (uint32_t)std::min<uint64_t>(mc_max, M - m0);
             // src1 rows [m0, m0 + mc) and columns [n0, n0 + nc) of the same dst rows, each bound as its own range
             AmevaBind b1, bd;
-            e = ameva_bind_span(src1, (uint64_t)m0 * s1 * 4, ((uint64_t)(mc - 1) * s1 + K) * 4, 4, &b1);
+            if (fq_blk) { // rows [m0, m0 + mc) of the rounded activations in the scratch buffer
+                b1 = bfq;
+                b1.elem = m0 * K;
+                b1.lo = (uint64_t)m0 * K * 4;
+                b1.hi = (uint64_t)(m0 + mc) * K * 4;
+                e = nullptr;
+            } else {
+                e = ameva_bind_span(src1, (uint64_t)m0 * s1 * 4, ((uint64_t)(mc - 1) * s1 + K) * 4, 4, &b1);
+            }
             if (!e) e = ameva_bind_span(node, ((uint64_t)m0 * sd + n0) * 4, ((uint64_t)(mc - 1) * sd + nc) * 4, 4, &bd);
             if (e) return e;
             if (b1.elem % 4 != 0) return "activation offset not a multiple of 16 bytes";
@@ -2973,6 +3054,7 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
             uint64_t bytes = 0;
             if (ameva_mmq_plan(node, &rows, &bytes)) scratch_need = std::max<uint64_t>(scratch_need, bytes);
             else scratch_need = std::max<uint64_t>(scratch_need, ameva_mmvq_scratch_bytes(node));
+            scratch_need = std::max<uint64_t>(scratch_need, ameva_act_fq_bytes(node));
         }
     }
     if (scratch_need && !ameva_scratch_reserve(scratch_need)) {
