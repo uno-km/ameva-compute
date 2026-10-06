@@ -8,6 +8,11 @@
 - 관련: `ameva-runtime` 브랜치 `feat/ggml-ameva-bundle`(2.8.1 후보, 게시하지 않음), `main` = `93b99b9` 그대로
 - 대상: llama.cpp b8471(ggml 0.9.8) + `libggml-ameva.so` + `libac_runtime.so.2`
 
+> **갱신 2026-10-06**: ameva-runtime **2.8.1 게시 완료**(PyPI `5a66ba86...`·npm·GitHub `v2.8.1` non-latest). A35까지
+> 5대 전부 `verify_kv.sh`·`test_rel.sh` 통과(A35 `test-backend-ops`는 `rt098` ggml 불일치로 최초 거짓 통과 → 번들 ggml로
+> 재실행해 2024/2024 확인), 공개 경로 설치 S20·A35 PASS. 플릿 운영 설치는 2.7.9 그대로. 다음: Mali OpenCL 프롬프트 경로
+> 수학 증명(자동 CPU 폴백 없이 GPU가 될 때까지) → 전 모달리티 AMUDA화. 상세: ameva-runtime `docs/handover/20261006-0045.md`.
+
 ## 1. 요약
 
 - **사용자 지시(2026-10-05 저녁) 네 가지와 결과**
