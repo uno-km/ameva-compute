@@ -66,9 +66,17 @@ evidence/poc_cuda_like/<timestamp>/
   Vulkan에 정수 내적이 없는 S21·A53의 OpenCL 드라이버는 int8 내적(`arm_dot_acc`)을 제공한다. 이 GPU에서는 로드가 비용이고
   내적은 거의 무료다(로드 한 개가 내적 11~12개 값). 활성 스케일을 256개 블록마다 두고 블록 안에서 정수로 누적하는 커널
   (`gemm_q4k_i8_blk`, `gemv_q4k_i8_blk`)이 Vulkan f32 타일보다 S21 1.6~2.2배, A53 2.2~2.9배 빠르다(q4_K, 커널 시간, 번갈아 측정).
-  다음은 다른 가중치 타입, 기기별 조합 선택, 프롬프트 그래프의 OpenCL 실행으로 실모델 t/s와 KLD 측정이다.
-  실모델 수치가 나오기 전에는 "Mali에서 GPU가 CPU를 넘었다"고 쓰지 않는다. 작업 항목의 행 수·로컬 크기에 따라 같은 커널이
-  3배 이상 달라지므로 조합을 훑어 본 뒤 판단한다.
+  작업 항목의 행 수·로컬 크기에 따라 같은 커널이 3배 이상 달라지므로 조합을 훑어 본 뒤 판단한다.
+  **2026-10-07 (`8726dd5`, `docs/design/opencl-prompt-path.md` 단계 B 진행)**: 그래프 전체가 OpenCL에서 실행된다
+  (`AMEVA_BACKEND=opencl`, 커널은 `scripts/glsl_to_opencl.py`가 GLSL에서 번역, `ac_runtime`의 `AC_BACKEND_OPENCL`).
+  A53·A35에서 `ameva_qmm_check` 516/516, kvq·chunk·fuse, `test-backend-ops` 2025/2025·1768/1768.
+  Qwen2.5-0.5B t/s(3회 교대, 텍스트 CPU와 동일) — A53: 프롬프트 CPU 55 / Vulkan 67 / OpenCL 110, 생성 CPU 21.2~22.6 /
+  Vulkan 14.6 / OpenCL 20.0. A35(ssh 코어 0-2): 프롬프트 Vulkan 189 / OpenCL 91~93, 생성 Vulkan 18.9 / OpenCL 22.5.
+  **CPU를 넘은 것은 A53의 프롬프트뿐이다.** 생성은 토큰마다 가중치 373 MB를 읽는 메모리 대역 한계(CPU도 같은 하한)에 있다.
+  모든 CPU 코어가 쉬면 Mali OpenCL 커널이 최대 2배 느려져서 OpenCL 대기는 잠들지 않는다(`AMEVA_CL_WAIT=spin`, 기본값).
+  KLD는 배치·한 토큰씩·2048토큰 구간이 기준 안이고, 이동 후 구간은 f16 키 회전의 반올림 잡음이 지배한다(f32 캐시 CPU
+  기준으로 f16 CPU 자신이 1.4e-2~1.7e-2. 128위치에서는 게시된 Vulkan f32 경로도 3.3e-2). 이동 구간 판정 기준을 다시 정해야 한다.
+  다음: 블록 정수 MUL_MAT을 GLSL 커널군으로(두 API 공용), 번역 타일 커널이 Vulkan보다 느린 원인(A35 2.1~2.9배), S21 측정.
 - **[완료] ameva-runtime 2.8.1 게시**(2026-10-06, 컨텍스트 이동 수정 `f2265d1`, 백엔드 `7e99154`, 번들 핀 `1d086faf6227...`):
   PyPI(wheel `5a66ba86...`)·npm(`@ameva/runtime@2.8.1`)·GitHub(태그 `v2.8.1`, non-latest, `latest`는 `v2.7.3` 그대로)에 게시.
   5대 전부 `verify_kv.sh`·`test_rel.sh` 통과, 공개 경로 설치 S20·A35 PASS. A35 `test-backend-ops`는 기기 `rt098`의 ggml 불일치로
