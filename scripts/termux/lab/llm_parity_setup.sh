@@ -1,4 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
+# Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
 # Build ameva_llm_parity / ameva_quantize (into OUT, default ~/abi-lab/out-g2) against the llama.h of the installed
 # libllama (b8471) and fetch the corpus.
 set -u

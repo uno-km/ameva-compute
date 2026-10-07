@@ -1,4 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
+# Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
 # tune_verify.sh TAG [ROUNDS]
 # Verification of the token-generation GEMV layout selection (ggml-ameva.cpp) from a source tree synced to
 # ~/abi-lab/src-TAG, built into ~/abi-lab/out-TAG. Start with nohup; summary in ~/abi-lab/results/tunev_TAG.txt,

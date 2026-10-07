@@ -1,4 +1,6 @@
 #!/bin/bash
+# Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
 set -u
 
 BUILD_DIR="/data/data/com.termux/files/home/ameva-compute/build-audit"

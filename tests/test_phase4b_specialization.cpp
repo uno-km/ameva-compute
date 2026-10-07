@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
+/**
  * @file test_phase4b_specialization.cpp
  * @brief Phase 4B: Specialization Constants & Pipeline Identity Verification Suite
  *

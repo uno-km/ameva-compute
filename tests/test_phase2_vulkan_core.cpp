@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
+/**
  * @file test_phase2_vulkan_core.cpp
  * @brief Phase 2: Modular Vulkan Compute Core Verification & Regression Test
  * 

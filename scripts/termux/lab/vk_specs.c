@@ -1,3 +1,7 @@
+/**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
 // vk_specs: properties of the first Vulkan device that could steer kernel selection (lab probe).
 //   device, vendor/device ID, driver version and driver info, subgroup size and its controllable range, shared memory,
 //   workgroup limits, integer dot product, and on Arm GPUs the shader core count (VK_ARM_shader_core_builtins /

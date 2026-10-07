@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
+/**
  * @file test_whisper_fixture_backend.cpp
  * @brief Formal verification of Whisper fixture parity, failure injection, and lifecycle symmetry
  */

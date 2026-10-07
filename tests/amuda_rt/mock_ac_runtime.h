@@ -1,3 +1,7 @@
+/**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
 /* TEST DOUBLE state, see mock_ac_runtime.c */
 #ifndef MOCK_AC_RUNTIME_H
 #define MOCK_AC_RUNTIME_H

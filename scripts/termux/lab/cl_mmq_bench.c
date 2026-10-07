@@ -1,3 +1,7 @@
+/**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
 // cl_mmq_bench M N K [REPS]: OpenCL int8 matrix multiplication on Arm Mali (lab experiment).
 //   dst[m][n] = sum_k (wq[n][k] * ws[n][k/32]) * (aq[m][k] * as[m][k/32])   (Q8_0-style blocks of 32, int8 values)
 // Two kernels with the same work split (one work-item: 4 weight rows x 4 activation rows, 32 values per step):

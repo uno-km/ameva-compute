@@ -1,4 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
+# Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
 # qgemm_crossover.sh [TYPE]
 # Repacked-weight MUL_MAT time for small activation-row counts M: ameva_qmv (COLS = 8, default below
 # AMEVA_QGEMM_MIN_M) against ameva_qgemm (AMEVA_QGEMM_MIN_M=2), for the two FFN shapes of Qwen2.5-0.5B.

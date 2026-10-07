@@ -1,4 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
+# Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
 # decode_bench.sh MODEL.gguf TAG MODE [N_DECODE]
 # Token generation speed with llama-completion (prompt "The three primary colors are", greedy, FA on).
 #   MODE gpu  AMEVA0 with the graph engine in OUT (default ~/abi-lab/out-g2); AMEVA_* variables pass through

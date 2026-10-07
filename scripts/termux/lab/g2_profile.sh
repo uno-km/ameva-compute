@@ -1,4 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
+# Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
 # g2_profile.sh MODEL.gguf TAG [N_DECODE] [PROMPT_TOKENS]
 # GPU time per op kind (AMEVA_PROFILE=2) for (1) token generation and (2) prompt processing, using llama-completion
 # with the graph engine in OUT (default ~/abi-lab/out-g2). Logs in ~/abi-lab/results/prof_TAG_{decode,prompt}.log.

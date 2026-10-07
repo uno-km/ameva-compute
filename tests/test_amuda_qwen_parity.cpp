@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
+/**
  * @file test_amuda_qwen_parity.cpp
  * @brief AMUDA 2.0 Track 1 Part 2: Real Qwen2.5-0.5B Weight Tensor MatMul & Parity Suite
  *

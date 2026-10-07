@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
+/**
  * @file main.cpp
  * @brief Native Standalone CLI Application for Termux/ARM64 (Strict Fail-Fast).
  */

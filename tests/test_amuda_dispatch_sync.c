@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
+/**
  * @file test_amuda_dispatch_sync.c
  * @brief P0-2A Comprehensive Verification: OpenCL Synchronous Dispatch Contract & Failure Invariant Probe
  *

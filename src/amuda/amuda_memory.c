@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
+/**
  * @file amuda_memory.c
  * @brief UMA Zero-Copy Memory Management, 64-Byte Alignment, and Cache Coherency
  */

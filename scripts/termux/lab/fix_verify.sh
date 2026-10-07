@@ -1,4 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
+# Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
 # fix_verify.sh TAG [full]
 # Verification of a source tree synced to ~/abi-lab/src-TAG, built into ~/abi-lab/out-TAG (kept apart from other
 # sessions' src / out directories). Start with nohup; summary in ~/abi-lab/results/fixv_TAG.txt, ending with FIXV_DONE.

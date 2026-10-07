@@ -1,4 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
+# Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
 # wait_cool.sh [MAX_MINUTES] [TARGET_HZ]
 # Waits until the Adreno thermal cap (/sys/class/kgsl/kgsl-3d0/max_gpuclk) is back at TARGET_HZ (default: the largest
 # value seen in the available frequency list, else 587000000) or MAX_MINUTES (default 20) pass. Prints the state.

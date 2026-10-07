@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
+/**
  * @file llama_bitnet_core.h
  * @brief BitNet Core Engine Context Internal Definitions with GGUF Tensor and True Forward Pipeline.
  */

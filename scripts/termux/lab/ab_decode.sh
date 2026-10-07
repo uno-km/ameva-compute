@@ -1,4 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
+# Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
 # ab_decode.sh MODEL.gguf ROUNDS BUILD...
 # Token generation A/B: decode_bench.sh for every build directory name under ~/abi-lab (e.g. out-h0 out-h1), the
 # builds alternating within each round so that thermal drift spreads over all of them. Prints one line per run with

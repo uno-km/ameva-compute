@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
+/**
  * @file llama_bitnet_core.cpp
  * @brief BitNet Core Engine Implementation with True GGUF Binary Parser & SIMD Kernels.
  * @author uno-km (https://github.com/uno-km)

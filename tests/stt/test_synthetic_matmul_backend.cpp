@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
+/**
  * @file test_synthetic_matmul_backend.cpp
  * @brief Formal verification of synthetic GGML graph MatMul execution via AMEVA Vulkan backend
  */

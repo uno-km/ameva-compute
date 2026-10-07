@@ -1,3 +1,7 @@
+/**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
 /* SPDX-License-Identifier: Apache-2.0 */
 /*
  * TEST DOUBLE for the AMUDA C ABI (ac_runtime). It records what amuda_rt asks for and executes NOTHING.

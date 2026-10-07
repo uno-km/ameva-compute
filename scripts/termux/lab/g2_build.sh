@@ -1,4 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
+# Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
 # Build the graph-engine plugin from ~/abi-lab/src into OUT (default ~/abi-lab/out-g2):
 # kernels header -> plugin + ac_runtime -> backend checks -> batch KATs. Prints only results.
 # Backend checks (each prints one summary line):

@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
+/**
  * @file test_batch_api_kat.cpp
  * @brief Phase B1 Known-Answer-Test (KAT) & Verification Suite for Vulkan Command Batching
  *

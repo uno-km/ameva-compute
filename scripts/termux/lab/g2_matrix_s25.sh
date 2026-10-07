@@ -1,4 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
+# Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
 # Graph-engine (out-g2) parity on the S25 model set, flash attention on; summary in results/g2_matrix_s25.txt
 set -u
 LAB=$HOME/abi-lab

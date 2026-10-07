@@ -1,3 +1,7 @@
+/**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
 // Auto-generated from residual_add.spv via glslangValidator. DO NOT EDIT.
 #pragma once
 #include <cstdint>

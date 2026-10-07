@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
 # SPDX-License-Identifier: Apache-2.0
 """
 amudacc - AMUDA CUDA-like kernel compiler (POC v0.1)

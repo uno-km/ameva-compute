@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
+/**
  * @file ggml-ameva.h
  * @brief AMEVA Compute Hardware Vulkan Backend Adapter for whisper.cpp
  *

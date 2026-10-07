@@ -1,4 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
+# Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
 # Build the plugin from ~/abi-lab/src (QMM engine) against llama.cpp b8471 ggml and run the exactness check.
 set -u
 LAB=$HOME/abi-lab

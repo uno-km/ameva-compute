@@ -1,4 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
+# Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
 # llm_parity_run.sh MODEL.gguf TAG [ameva_llm_parity args...]
 # Runs the CPU-vs-AMEVA parity on one model; full log in ~/abi-lab/results/parity_TAG.log, summary on stdout.
 # OUT selects the build directory holding libggml-ameva.so, libac_runtime.so.2 and ameva_llm_parity

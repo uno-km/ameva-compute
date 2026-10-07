@@ -1,4 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
+# Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
 # mm_bench_shapes.sh [ITER]
 # ameva_mm_bench (OUT/ameva_mm_bench, default ~/abi-lab/out-g2) over the MUL_MAT shapes of Qwen2.5-0.5B Q4_K_M:
 # token generation (M=1) and a 185-token prompt (M=185), ggml layout (ameva_qmm) against repacked (ameva_qmv).

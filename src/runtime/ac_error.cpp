@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
+/**
  * @file ac_error.cpp
  * @brief AMUDA Generation-Based Error Tracking Implementation
  * Owned by AMEVA Compute Runtime Core.

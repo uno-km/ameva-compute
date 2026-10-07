@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
+/**
  * @file ac_vision_pointwise_conv.cpp
  * @brief AMUDA Vision Pointwise Conv2D 1x1 Lowered to MatMul Implementation
  *

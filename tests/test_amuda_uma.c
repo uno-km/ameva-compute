@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
+/**
  * @file test_amuda_uma.c
  * @brief UMA Zero-Copy & Vector Add Kernel Dispatch Verification Test
  *

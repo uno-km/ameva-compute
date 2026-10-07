@@ -1,3 +1,7 @@
+/**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
 // vk_exts_all: device name, driver version and every device extension of the first Vulkan device (lab probe).
 #include <vulkan/vulkan.h>
 #include <stdio.h>

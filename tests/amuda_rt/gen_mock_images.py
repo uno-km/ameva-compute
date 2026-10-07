@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
 """Builds a test-only header: real amudacc metadata + a placeholder SPIR-V blob (the mock never executes it)."""
 import hashlib, os, sys
 HERE = os.path.dirname(os.path.abspath(__file__))

@@ -1,3 +1,7 @@
+/**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
 #include "vulkan_bitnet_engine.h"
 #include "../shaders/bitnet_gemv_i2_s_spv.h"
 #include "../shaders/swiglu_silu_spv.h"

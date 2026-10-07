@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
+/**
  * @file test_amuda_dispatch_validation.c
  * @brief P0-2B Comprehensive Verification: Dispatch Input Validation, Overflow Disambiguation & Fail-Closed Contract
  *

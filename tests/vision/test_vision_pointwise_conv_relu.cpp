@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
+/**
  * @file test_vision_pointwise_conv_relu.cpp
  * @brief AMUDA Vision Fused Pointwise Conv2D 1x1 + ReLU & Device-Resident Verification
  *

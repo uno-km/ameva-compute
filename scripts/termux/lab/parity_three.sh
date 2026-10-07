@@ -1,4 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
+# Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
 # parity_three.sh TAG_PREFIX
 # ameva_llm_parity on the three models of ~/.cache/termux-llamacpp/models (Qwen2.5-0.5B, Llama-3.2-1B and
 # Gemma-2-2B Q4_K_M; ctx 256 for the two larger ones) with the build in OUT (default ~/abi-lab/out-g2). Start with

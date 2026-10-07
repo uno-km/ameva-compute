@@ -1,4 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
+# Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
 # ab_mali.sh TAG [ROUNDS]
 # Same-session comparison of the token-generation GEMV on a Mali device, Qwen2.5-0.5B Q4_K_M:
 # ameva_qmv (AMEVA_MALI_QMV=0) against mali_qmv (AMEVA_MALI_QMV=1), the two alternating within each round, with a

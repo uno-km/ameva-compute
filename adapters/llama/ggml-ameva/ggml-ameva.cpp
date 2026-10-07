@@ -1,3 +1,7 @@
+/**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
 #include "ggml-ameva.h"
 #include "ggml-ameva-impl.h"
 #include "ggml-ameva-repack.h"
@@ -505,7 +509,29 @@ static AcKernel* ameva_make_kernel_ex(const char* name, const uint32_t* spirv, s
         AcKernelRuntimeMetadata meta = {
             name, AMEVA_CL_ENTRY_POINT, bindings, kBindings, push_bytes, local, 0, sha, 0, nullptr
         };
-        const std::string source = std::string(kAmevaClPrelude) + cl_source;
+        std::string source = std::string(kAmevaClPrelude) + cl_source;
+        // AMEVA_CL_SOURCE_DIR=<dir> (kernel tuning): a file <dir>/<kernel name>.cl replaces the built-in text of that
+        // kernel, and <dir>/_prelude.cl the common prelude, so a kernel can be changed on the device without a build.
+        // Every replacement is announced. The kernel must keep its bindings, push constants and workgroup size.
+        if (const char* dir = getenv("AMEVA_CL_SOURCE_DIR")) {
+            auto slurp = [](const std::string& path, std::string& out) {
+                FILE* f = fopen(path.c_str(), "rb");
+                if (!f) return false;
+                out.clear();
+                char buf[4096];
+                size_t n;
+                while ((n = fread(buf, 1, sizeof(buf), f)) > 0) out.append(buf, n);
+                fclose(f);
+                return true;
+            };
+            std::string body, prelude;
+            if (*dir && slurp(std::string(dir) + "/" + name + ".cl", body)) {
+                const bool own_prelude = slurp(std::string(dir) + "/_prelude.cl", prelude);
+                source = (own_prelude ? prelude : std::string(kAmevaClPrelude)) + body;
+                fprintf(stderr, "ggml-ameva: kernel %s from %s/%s.cl%s (AMEVA_CL_SOURCE_DIR)\n", name, dir, name,
+                        own_prelude ? " with _prelude.cl" : "");
+            }
+        }
         // AMEVA_CL_OPTIONS=<clBuildProgram options> (kernel tuning; default none: the OpenCL C defaults, i.e. IEEE
         // arithmetic without contraction). The options are part of the program cache key.
         static const char* options = [] {

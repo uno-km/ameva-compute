@@ -1,3 +1,7 @@
+/**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
 /* SPDX-License-Identifier: Apache-2.0 */
 /* AMUDA CUDA-like runtime: backend-independent layer (validation, ordering, memory visibility). */
 #include "amuda_rt_internal.h"

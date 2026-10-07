@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
+/**
  * @file c_api.cpp
  * @brief C ABI Bridge for Direct Native Tensor Operations and Diagnostics.
  */

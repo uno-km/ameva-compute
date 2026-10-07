@@ -1,3 +1,7 @@
+/**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
 // SPDX-License-Identifier: Apache-2.0
 // ac_cl_kat: known-answer test of the OpenCL backend of ac_runtime (AC_BACKEND_OPENCL) through the public C ABI, and
 // of the backend-neutral host access calls (ac_runtime_buffer_write / read / fill / get_address) on both backends.

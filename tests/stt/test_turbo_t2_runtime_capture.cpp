@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
+/**
  * @file test_turbo_t2_runtime_capture.cpp
  * @brief Phase T2: Real Turbo weight + Real runtime activation single node parity on AMEVA Mali-G68
  */

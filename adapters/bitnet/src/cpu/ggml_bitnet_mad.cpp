@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
+/**
  * @file ggml_bitnet_mad.cpp
  * @brief High-performance 1.58-bit (i2_s) Quantized Dot-Product Kernels.
  *        Standardized with QK=128 memory interleaving layout and ARM NEON / DotProd acceleration.

@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
+/**
  * @file test_phase2_1_failure_injection.cpp
  * @brief Phase 2.1: Robustness, Security, and Failure-Injection Verification Suite
  *

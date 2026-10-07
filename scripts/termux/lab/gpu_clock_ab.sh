@@ -1,4 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
+# Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
 # gpu_clock_ab.sh TAG [ROUNDS]
 # Token-generation speed of the GEMV layouts together with the GPU clock the governor chose during each run, on
 # Samsung Exynos devices that expose /sys/kernel/gpu (gpu_clock in kHz, gpu_busy, gpu_tmu). Per round the three modes

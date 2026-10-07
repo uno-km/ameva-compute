@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
+/**
  * @file ac_cl_backend.cpp
  * @brief OpenCL backend of ac_runtime (AC_BACKEND_OPENCL). Contract: ac_cl_backend.h.
  *

@@ -1,4 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
+# Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
 # tbo_paths.sh TAG
 # test-backend-ops for AMEVA0 with the build in OUT (default ~/abi-lab/out-g2) under several settings, so that the paths
 # for large tensors and long KV caches run with the small shapes of the test suite:

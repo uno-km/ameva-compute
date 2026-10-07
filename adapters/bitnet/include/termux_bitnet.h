@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
+/**
  * @file termux_bitnet.h
  * @brief C ABI Interface for BitNet 1.58-bit (i2_s) On-Device Inference Engine.
  * @author uno-km (https://github.com/uno-km)

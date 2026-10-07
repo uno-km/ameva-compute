@@ -1,3 +1,7 @@
+/**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
 #pragma once
 // Internal to libggml-ameva: declarations shared by the buffer implementation (ggml-ameva-buffer.cpp), the graph
 // engine (ggml-ameva.cpp) and the device (ggml-ameva-device.cpp). Not installed, not part of the plugin ABI.

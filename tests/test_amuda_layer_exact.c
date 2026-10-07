@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
+/**
  * @file test_amuda_layer_exact.c
  * @brief Ground-Truth Full BitNet Layer 0 Forward Pass Test Suite
  */
