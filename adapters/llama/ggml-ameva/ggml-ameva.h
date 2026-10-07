@@ -63,6 +63,11 @@ GGML_API int64_t ggml_backend_ameva_get_mmq_mul_mat_count(void);
 GGML_API int64_t ggml_backend_ameva_get_mmqb_mul_mat_count(void);
 // node pairs computed by one fused dispatch sequence (graph-engine fusion, AMEVA_FUSE); counted when recorded
 GGML_API int64_t ggml_backend_ameva_get_fused_pair_count(void);
+// CONV_2D nodes completed on the GPU by ameva_conv (not cleared by reset_counters), and how that kernel converts f16
+// weights: -1 not determined yet (no f16 convolution was computed), 0 the exact decoder, 1 the built-in conversion,
+// taken after a check of the device's conversion (AMEVA_CONV_F16)
+GGML_API int64_t ggml_backend_ameva_get_conv_count(void);
+GGML_API int ggml_backend_ameva_get_conv_f16_decoder(void);
 GGML_API const char* ggml_backend_ameva_get_build_commit(void);
 GGML_API void ggml_backend_ameva_reset_counters(void);
 

@@ -24,7 +24,8 @@
 // Adreno 650 (Turnip) 158.8 / 155.9 and 170.5 / 167.3 ms.
 //
 //   source  f32 [W, H, T, C], element w + W * (h + H * (t + T * c))               (2D: T = 1)
-//   weights N rows of K in the repacked layout (ameva_qdecode.glsl; TYPE_F16 is the exact mode)
+//   weights N rows of K in the repacked layout (ameva_qdecode.glsl; TYPE_F16 and TYPE_F32 are the exact mode,
+//           with F16_UNPACK the f16 values go through the built-in conversion)
 //   dst     f32 [OW, OH, OT, N], element ow + OW * (oh + OH * (ot + OT * n))
 //   units   one word per unit: tap offset in source elements along w, h, t (dilation applied) in bits 0..7, 8..15,
 //           16..23 and the channel group in bits 24..31
@@ -50,11 +51,13 @@ layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
 #include "ameva_common.glsl"
 #include "ameva_qdecode.glsl"
 
+// one declaration per binding (scripts/build_ameva_kernels.py counts them)
 #if defined(STAGE_VEC4)
-layout(std430, binding = 3) readonly buffer BufA { vec4 a4[]; };
+#define SOURCE_ARRAY vec4 a4[]
 #else
-layout(std430, binding = 3) readonly buffer BufA { float src[]; };
+#define SOURCE_ARRAY float src[]
 #endif
+layout(std430, binding = 3) readonly buffer BufA { SOURCE_ARRAY; };
 layout(std430, binding = 4) writeonly buffer BufD { float dst[]; };
 layout(std430, binding = 5) readonly buffer BufB { float bias[]; };
 layout(std430, binding = 6) readonly buffer BufU { uint units[]; };

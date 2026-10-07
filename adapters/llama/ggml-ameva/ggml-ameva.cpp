@@ -49,6 +49,10 @@
 //   RMS_NORM, ROPE (normal, neox, frequency factors), SET_ROWS, GET_ROWS, CPY/CONT/DUP (f32/f16)
 //   FLASH_ATTN_EXT             ameva_flash_attn: tiles of query rows of one KV head (GQA heads share K/V loads),
 //                              f16 or f32 K/V, f16 mask, softcap, ALiBi; fully masked key blocks skipped
+//   CONV_2D                    ameva_conv: the tile of ameva_qgemm with the activations staged from the source
+//                              tensor, no column matrix; f16 or f32 kernel tensor, brought into the kernel's K
+//                              order per node by ameva_conv_w (scratch buffer). SPIR-V only: declined on the
+//                              OpenCL backend. IM2COL is declined, so a graph has to use the direct op
 // Index-driven kernels report out-of-range indices through a status buffer; the host fails the graph on them.
 // Tensors must live in AMEVA buffers: the scheduler copies inputs produced elsewhere (supports_buft accepts only
 // AMEVA buffers), nothing is staged behind its back.
@@ -266,6 +270,17 @@ static AcKernel* s_mmvq[AMEVA_MMVQ_VARIANT_COUNT] = {};
 static AcKernel* s_mmvqe[AMEVA_MMVQE_VARIANT_COUNT] = {};
 static AcKernel* s_fa[AMEVA_FA_VARIANT_COUNT] = {};
 static AcKernel* s_ops[AMEVA_K_COUNT] = {};
+static AcKernel* s_vk[AMEVA_VK_COUNT] = {}; // SPIR-V-only kernels (ameva_vk_kernel)
+// Constants of the convolution kernel (shaders/ameva_conv.comp): a zero vector for the bias binding and the unit
+// tables, which depend on the kernel size, the dilation and the number of channel groups only. Created on first use,
+// never written again (so they take no part in hazard tracking), released at teardown.
+struct AmevaConvUnits {
+    uint32_t kw, kh, d0, d1, groups;
+    AcBuffer* buf;
+    uint64_t bytes;
+};
+static AcBuffer* s_conv_zero = nullptr;
+static std::vector<AmevaConvUnits> s_conv_units;
 static AcBuffer* s_status = nullptr; // [0] out-of-range index count, [1] lowest offending node
 // Engine-owned device memory for intermediate results that are not tensors (flash-attention key splits). Sized before
 // a graph is recorded (ameva_scratch_reserve) and reused by every node of the graph; the hazard tracker orders reuse.
@@ -757,6 +772,79 @@ static AcKernel* ameva_op_kernel(AmevaOpKernelId id) {
     return s_ops[id];
 }
 
+// SPIR-V-only kernels (scripts/build_ameva_kernels.py VK_ONLY): NULL on the OpenCL backend, which has no translation
+// of them; the op contract declines their ops there.
+static AcKernel* ameva_vk_kernel(AmevaVkKernelId id) {
+    if (ameva_backend_is_opencl()) return nullptr;
+    std::lock_guard<std::mutex> lock(s_mutex);
+    if (!s_vk[id] && s_ctx) {
+        const AmevaOpKernel& k = kAmevaVkKernels[id];
+        s_vk[id] = ameva_make_kernel(k.name, k.spirv, k.spirv_bytes, k.spirv_sha256, k.bindings, k.push_constant_bytes,
+                                     k.local_size_x, nullptr);
+    }
+    return s_vk[id];
+}
+
+// A device buffer of `bytes` (rounded up to 64) for the engine's own constants. NULL on failure.
+static AcBuffer* ameva_const_buffer_locked(uint64_t bytes, uint64_t* out_bytes) {
+    if (!s_ctx) return nullptr;
+    const uint64_t size = (std::max<uint64_t>(bytes, 1) + 63) & ~63ull;
+    AcBufferDesc bdesc = { AC_ABI_VERSION, sizeof(AcBufferDesc), (size_t)size, AC_BUFFER_USAGE_STORAGE, 0 };
+    AcBuffer* buf = nullptr;
+    if (ac_runtime_buffer_create(s_ctx, &bdesc, &buf) != AC_SUCCESS || !buf) return nullptr;
+    ameva_increment_buffer_create_count();
+    if (ac_runtime_buffer_fill(buf, 0, (size_t)size, 0) != AC_SUCCESS) {
+        ac_runtime_buffer_destroy(buf);
+        ameva_increment_buffer_destroy_count();
+        return nullptr;
+    }
+    *out_bytes = size;
+    return buf;
+}
+
+// AMEVA_CONV_MAX_OC zero floats: the bias binding of a convolution whose bias is a separate node of the graph.
+#define AMEVA_CONV_ZERO_BYTES 65536u
+static AcBuffer* ameva_conv_zero_buffer(void) {
+    std::lock_guard<std::mutex> lock(s_mutex);
+    if (!s_conv_zero) {
+        uint64_t bytes = 0;
+        s_conv_zero = ameva_const_buffer_locked(AMEVA_CONV_ZERO_BYTES, &bytes);
+    }
+    return s_conv_zero;
+}
+
+// The unit table of shaders/ameva_conv.comp for a kw x kh kernel with dilation (d0, d1) over `groups` groups of 32
+// channels, in the unit order of shaders/ameva_conv_w.comp: unit u = group * taps + tap, tap = kx + kw * ky. One word
+// per unit: tap offset along w, h, t in bits 0..7, 8..15, 16..23 and the group in bits 24..31.
+static AcBuffer* ameva_conv_units_buffer(uint32_t kw, uint32_t kh, uint32_t d0, uint32_t d1, uint32_t groups,
+                                         uint64_t* out_bytes) {
+    std::lock_guard<std::mutex> lock(s_mutex);
+    for (const AmevaConvUnits& e : s_conv_units) {
+        if (e.kw == kw && e.kh == kh && e.d0 == d0 && e.d1 == d1 && e.groups == groups) {
+            *out_bytes = e.bytes;
+            return e.buf;
+        }
+    }
+    const uint32_t taps = kw * kh;
+    std::vector<uint32_t> units((size_t)taps * groups);
+    for (uint32_t g = 0; g < groups; ++g) {
+        for (uint32_t t = 0; t < taps; ++t) {
+            units[(size_t)g * taps + t] = ((t % kw) * d0) | ((t / kw) * d1) << 8 | g << 24;
+        }
+    }
+    uint64_t bytes = 0;
+    AcBuffer* buf = ameva_const_buffer_locked(units.size() * 4, &bytes);
+    if (!buf) return nullptr;
+    if (ac_runtime_buffer_write(buf, 0, units.data(), units.size() * 4) != AC_SUCCESS) {
+        ac_runtime_buffer_destroy(buf);
+        ameva_increment_buffer_destroy_count();
+        return nullptr;
+    }
+    s_conv_units.push_back({ kw, kh, d0, d1, groups, buf, bytes });
+    *out_bytes = bytes;
+    return buf;
+}
+
 static bool ameva_status_buffer(void) {
     std::lock_guard<std::mutex> lock(s_mutex);
     if (s_status) return true;
@@ -816,6 +904,18 @@ void ggml_backend_ameva_teardown(void) {
         ameva_increment_buffer_destroy_count();
         s_status = nullptr;
     }
+    if (s_conv_zero) {
+        AcResult r = ac_runtime_buffer_destroy(s_conv_zero);
+        if (r != AC_SUCCESS) fprintf(stderr, "ggml-ameva: convolution zero buffer destroy failed (code %d)\n", r);
+        ameva_increment_buffer_destroy_count();
+        s_conv_zero = nullptr;
+    }
+    for (AmevaConvUnits& u : s_conv_units) {
+        AcResult r = ac_runtime_buffer_destroy(u.buf);
+        if (r != AC_SUCCESS) fprintf(stderr, "ggml-ameva: convolution unit table destroy failed (code %d)\n", r);
+        ameva_increment_buffer_destroy_count();
+    }
+    s_conv_units.clear();
     for (AcKernel*& k : s_qmm) {
         if (k) {
             ac_runtime_kernel_destroy(k);
@@ -880,6 +980,13 @@ void ggml_backend_ameva_teardown(void) {
         }
     }
     for (AcKernel*& k : s_ops) {
+        if (k) {
+            ac_runtime_kernel_destroy(k);
+            k = nullptr;
+            ameva_increment_kernel_destroy_count();
+        }
+    }
+    for (AcKernel*& k : s_vk) {
         if (k) {
             ac_runtime_kernel_destroy(k);
             k = nullptr;
@@ -1068,6 +1175,59 @@ static bool ameva_op_is_empty(enum ggml_op op) {
            op == GGML_OP_TRANSPOSE;
 }
 
+// GGML_OP_CONV_2D (ggml_conv_2d_direct): src0 = kernel [KW, KH, IC, OC] f16 or f32, src1 = data [W, H, IC, B] f32,
+// result [OW, OH, OC, B] f32; op params s0, s1, p0, p1, d0, d1. Computed by shaders/ameva_conv.comp without a column
+// matrix: K = taps x (IC rounded up to 32) weights per output channel, in units of 32 channels at one tap.
+#define AMEVA_CONV_MAX_OC 16384u // floats of the zero vector bound as bias (ameva_conv_zero_buffer)
+struct AmevaConv2d {
+    uint32_t KW, KH, IC, OC, W, H, B, OW, OH;
+    uint32_t s0, s1, p0, p1, d0, d1;
+    uint32_t taps, groups, K, U; // groups of 32 channels; U = K / 32 = taps * groups
+    uint64_t weight_bytes;       // the weights in the K order of ameva_conv (written to the scratch buffer per node)
+};
+
+// Fills g and returns NULL when ameva_conv can compute the node, otherwise the reason it cannot.
+static const char* ameva_conv2d_geometry(const struct ggml_tensor* op, AmevaConv2d* g) {
+    if (ameva_backend_is_opencl()) return "convolution kernels have no OpenCL C translation";
+    const struct ggml_tensor *a = op->src[0], *b = op->src[1];
+    if (!a || !b) return "convolution without kernel or data";
+    if (!(is_f16(a) || is_f32(a)) || !is_f32(b) || !is_f32(op)) return "convolution types (kernel f16/f32, data and result f32)";
+    if (!ggml_is_contiguous(a) || !ggml_is_contiguous(b) || !ggml_is_contiguous(op)) return "convolution tensor not contiguous";
+    const int32_t* prm = (const int32_t*)op->op_params;
+    for (int i = 0; i < 6; ++i) {
+        const bool pad = i == 2 || i == 3;
+        if (prm[i] < (pad ? 0 : 1) || prm[i] > 255) return "convolution stride, padding or dilation outside 1..255 (padding 0..255)";
+    }
+    if (!fits_kernel_indexing(a) || !fits_kernel_indexing(b) || !fits_kernel_indexing(op)) return "exceeds 32-bit indexing";
+    g->KW = (uint32_t)a->ne[0], g->KH = (uint32_t)a->ne[1], g->IC = (uint32_t)a->ne[2], g->OC = (uint32_t)a->ne[3];
+    g->W = (uint32_t)b->ne[0], g->H = (uint32_t)b->ne[1], g->B = (uint32_t)b->ne[3];
+    g->OW = (uint32_t)op->ne[0], g->OH = (uint32_t)op->ne[1];
+    g->s0 = (uint32_t)prm[0], g->s1 = (uint32_t)prm[1], g->p0 = (uint32_t)prm[2], g->p1 = (uint32_t)prm[3];
+    g->d0 = (uint32_t)prm[4], g->d1 = (uint32_t)prm[5];
+    if (b->ne[2] != a->ne[2] || op->ne[2] != a->ne[3] || op->ne[3] != b->ne[3]) return "convolution channel or batch counts differ";
+    if (g->KW == 0 || g->KH == 0 || g->IC == 0 || g->OC == 0 || g->OW == 0 || g->OH == 0) return "empty convolution";
+    if ((uint64_t)(g->KW - 1) * g->d0 > 255 || (uint64_t)(g->KH - 1) * g->d1 > 255) return "convolution tap offset above 255";
+    const int64_t span_w = (int64_t)g->W + 2 * (int64_t)g->p0 - (int64_t)g->d0 * (g->KW - 1) - 1;
+    const int64_t span_h = (int64_t)g->H + 2 * (int64_t)g->p1 - (int64_t)g->d1 * (g->KH - 1) - 1;
+    // ggml_calc_conv_output_size with its integer division: a kernel larger than the padded source still has one
+    // output position, all of whose taps fall outside the source (the kernel stages zeros for them)
+    if ((int64_t)g->OW != span_w / (int64_t)g->s0 + 1 || (int64_t)g->OH != span_h / (int64_t)g->s1 + 1)
+        return "convolution output shape";
+    g->taps = g->KW * g->KH;
+    g->groups = (g->IC + 31) / 32;
+    if (g->groups > 256) return "more than 8192 input channels";
+    if (g->OC > AMEVA_CONV_MAX_OC) return "more than 16384 output channels";
+    if ((uint64_t)g->taps * g->groups > (1u << 22)) return "convolution kernel too large";
+    g->U = g->taps * g->groups;
+    g->K = g->U * 32;
+    g->weight_bytes = (uint64_t)g->OC * g->K * ggml_type_size(a->type);
+    const size_t span = ameva_max_binding_span();
+    if (!span || g->weight_bytes > span || g->weight_bytes / 4 > UINT32_MAX) return "convolution weights exceed a buffer binding";
+    if (!fits_binding(a) || !fits_binding(b) || !fits_binding(op)) return "tensor exceeds a buffer binding";
+    if ((g->OW + 31) / 32 > 65535) return "grid";
+    return nullptr;
+}
+
 // Returns NULL when the AMEVA graph engine can compute op, otherwise the reason it cannot.
 const char* ameva_op_unsupported_reason(const struct ggml_tensor* op) {
     if (!op) return "null op";
@@ -1234,6 +1394,10 @@ const char* ameva_op_unsupported_reason(const struct ggml_tensor* op) {
             if ((uint64_t)q->ne[1] * (uint64_t)q->ne[2] > 65535ull * 65535ull) return "grid";
             return nullptr;
         }
+        case GGML_OP_CONV_2D: {
+            AmevaConv2d g;
+            return ameva_conv2d_geometry(op, &g);
+        }
         default:
             return "op has no ameva kernel";
     }
@@ -1310,6 +1474,7 @@ struct AmevaRecorder {
     int64_t mmq_nodes = 0;
     int64_t mmqb_nodes = 0;   // of mmq_nodes, the ones that ran ameva_mmqb
     int64_t mmvq_nodes = 0;
+    int64_t conv_nodes = 0;   // CONV_2D nodes (ameva_conv)
     int64_t fused_pairs = 0;      // node pairs computed by one dispatch sequence (ameva_find_fusion)
     // The activation row whose int8 form (ameva_quant_a8) is in the scratch buffer, for the ameva_mmvq products that
     // follow with the same src1 (Q, K, V share theirs, gate and up too). Cleared by a write to the scratch buffer or
@@ -3174,6 +3339,228 @@ static AmevaFusion ameva_find_fusion(const struct ggml_tensor* n0, const struct 
     return f;
 }
 
+// =============================================================================
+// CONV_2D (shaders/ameva_conv.comp, shaders/ameva_conv_w.comp)
+// =============================================================================
+// f16 convolution weights become f32 in the kernel either through the exact decoder of ameva_qdecode.glsl or through
+// GLSL's unpackHalf2x16, which is faster (Mali-G68, 2026-10-07: 277 against 307 ms for a 19.33 GFLOP convolution) but
+// may, by the language, round f16 subnormals to zero. So the built-in conversion is used only after this device has
+// reproduced, through the kernel itself, the exact value of every f16 subnormal, both zeros and 2048 normal values
+// spread over the finite range (ameva_conv_f16_check, once per process, about 4 KiB of weights and two dispatches).
+// AMEVA_CONV_F16=auto (default) does that; AMEVA_CONV_F16=exact always takes the exact decoder. Any other value
+// aborts.
+static std::atomic<int> s_conv_f16_decoder{-1}; // -1 not determined, 0 exact decoder, 1 built-in conversion
+static std::atomic<int64_t> s_conv_count{0};    // CONV_2D nodes completed on the GPU
+
+int ggml_backend_ameva_get_conv_f16_decoder(void) { return s_conv_f16_decoder.load(); }
+int64_t ggml_backend_ameva_get_conv_count(void) { return s_conv_count.load(); }
+
+// One 1x1 convolution of 32 channels to 64, 32 positions, source = the identity (position w has 1 in channel w and 0
+// elsewhere), so output (n, w) is weight (n, w) alone: every other term is a weight times zero. Two rounds of 2048
+// weights. *builtin_ok tells whether all of them came out with the bits of the CPU conversion (zeros compared as
+// zeros of either sign: the kernel adds +0 terms and a +0 bias). Returns an error when the check itself cannot run.
+static const char* ameva_conv_f16_check(bool* builtin_ok, uint32_t* mismatches, uint32_t* first_half) {
+    AcKernel* kernel = ameva_vk_kernel(AMEVA_VK_CONV_F16U_S);
+    if (!kernel) return "no ameva_conv kernel";
+    uint64_t ub = 0;
+    AcBuffer* units = ameva_conv_units_buffer(1, 1, 1, 1, 1, &ub);
+    AcBuffer* zero = ameva_conv_zero_buffer();
+    if (!units || !zero) return "convolution constants could not be allocated";
+    AcBuffer* bufs[3] = { nullptr, nullptr, nullptr }; // weights 64 x 32 f16, source 32 x 32 f32, dst 64 x 32 f32
+    const size_t sizes[3] = { 4096, 4096, 8192 };
+    const char* err = nullptr;
+    for (int i = 0; i < 3 && !err; ++i) {
+        AcBufferDesc bdesc = { AC_ABI_VERSION, sizeof(AcBufferDesc), sizes[i], AC_BUFFER_USAGE_STORAGE, 0 };
+        if (ac_runtime_buffer_create(s_ctx, &bdesc, &bufs[i]) != AC_SUCCESS) {
+            bufs[i] = nullptr;
+            err = "buffer allocation failed";
+        } else {
+            ameva_increment_buffer_create_count();
+        }
+    }
+    std::vector<float> src(32 * 32, 0.0f), out(64 * 32);
+    for (int c = 0; c < 32; ++c) src[c + 32 * c] = 1.0f;
+    if (!err && ac_runtime_buffer_write(bufs[1], 0, src.data(), sizes[1]) != AC_SUCCESS) err = "source write failed";
+    *mismatches = 0;
+    *first_half = 0;
+    for (int round = 0; round < 2 && !err; ++round) {
+        std::vector<uint16_t> w(2048);
+        for (uint32_t t = 0; t < 2048; ++t) {
+            w[t] = round == 0 ? (uint16_t)(t < 1024 ? t : (0x8000u | (t - 1024)))                  // zeros and subnormals
+                              : (uint16_t)((0x0400u + t * 15u) | ((t & 1u) ? 0x8000u : 0u));        // normal values
+        }
+        if (ac_runtime_buffer_write(bufs[0], 0, w.data(), sizes[0]) != AC_SUCCESS ||
+            ac_runtime_buffer_fill(bufs[2], 0, sizes[2], 0xFF) != AC_SUCCESS) {
+            err = "weight write failed";
+            break;
+        }
+        // N 64, K 32, offsets 0; source 32 x 1 x 1 x 32; output 32 x 1, plane 32, row 0; stride 1, padding 0
+        const uint32_t pc[19] = { 64, 32, 0, 0, 0, 0, 0, 0, 32, 1, 1, 32, 32, 1, 32, 0, 1u | 1u << 8 | 1u << 16, 0, 0 };
+        const AcBufferBinding bind[7] = { { bufs[0], 0, sizes[0] }, { bufs[0], 0, sizes[0] }, { bufs[0], 0, sizes[0] },
+                                          { bufs[1], 0, sizes[1] }, { bufs[2], 0, sizes[2] },
+                                          { zero, 0, AMEVA_CONV_ZERO_BYTES }, { units, 0, ub } };
+        const AcBatchDesc bd = { AC_ABI_VERSION, sizeof(AcBatchDesc), 4, AC_BATCH_FLAG_EXPLICIT_BARRIERS };
+        AcCommandBatch* batch = nullptr;
+        if (ac_runtime_batch_begin_ex(s_ctx, &bd, &batch) != AC_SUCCESS) {
+            err = "batch begin failed";
+            break;
+        }
+        AcEvent* ev = nullptr;
+        AcResult r = ac_runtime_batch_dispatch_bindings(batch, kernel, bind, 7, pc, sizeof(pc), { 1, 1, 1 });
+        if (r == AC_SUCCESS) r = ac_runtime_batch_submit(batch, &ev);
+        if (r == AC_SUCCESS) r = ac_runtime_event_wait(ev, 30000000000ull);
+        if (ev) ac_runtime_event_destroy(ev);
+        ac_runtime_batch_destroy(batch);
+        if (r != AC_SUCCESS || ac_runtime_buffer_read(bufs[2], 0, out.data(), sizes[2]) != AC_SUCCESS) {
+            err = "dispatch failed";
+            break;
+        }
+        for (uint32_t t = 0; t < 2048; ++t) {
+            const float want = ggml_fp16_to_fp32((ggml_fp16_t)w[t]);
+            const float got = out[t]; // plane n = t / 32, position w = t % 32
+            const bool same = (w[t] & 0x7FFFu) == 0 ? got == 0.0f : fbits(got) == fbits(want);
+            if (!same && (*mismatches)++ == 0) *first_half = w[t];
+        }
+    }
+    for (AcBuffer* b : bufs) {
+        if (b) {
+            ac_runtime_buffer_destroy(b);
+            ameva_increment_buffer_destroy_count();
+        }
+    }
+    if (err) return err;
+    *builtin_ok = *mismatches == 0;
+    return nullptr;
+}
+
+// Decides the f16 decoder of this process (see above). Called before a graph with an f16 convolution is recorded.
+static const char* ameva_conv_f16_prepare(void) {
+    if (s_conv_f16_decoder.load() >= 0) return nullptr;
+    const char* e = getenv("AMEVA_CONV_F16");
+    if (e && *e && strcmp(e, "auto") != 0 && strcmp(e, "exact") != 0) {
+        GGML_ABORT("ggml-ameva: AMEVA_CONV_F16 must be auto or exact (got \"%s\")", e);
+    }
+    if (e && !strcmp(e, "exact")) {
+        s_conv_f16_decoder.store(0);
+        fprintf(stderr, "ggml-ameva: f16 convolution weights through the exact decoder (AMEVA_CONV_F16=exact)\n");
+        return nullptr;
+    }
+    bool ok = false;
+    uint32_t bad = 0, first = 0;
+    if (const char* err = ameva_conv_f16_check(&ok, &bad, &first)) return err;
+    s_conv_f16_decoder.store(ok ? 1 : 0);
+    if (ok) {
+        fprintf(stderr, "ggml-ameva: f16 convolution weights through the built-in conversion (4096 values checked on "
+                        "this device, every f16 subnormal among them)\n");
+    } else {
+        fprintf(stderr, "ggml-ameva: f16 convolution weights through the exact decoder: the built-in conversion of "
+                        "this device differs for %u of 4096 checked values (first 0x%04x)\n", bad, first);
+    }
+    return nullptr;
+}
+
+// AMEVA_CONV_STAGE: how ameva_conv reads the source when the stride along w is 1. vec4: three aligned vec4 loads per
+// invocation and unit; scalar: eight scalar loads. auto (default) takes vec4 on Mali and scalar elsewhere, as
+// measured 2026-10-07 for a 19.33 GFLOP convolution with f16 weights, vec4 / scalar: Mali-G68 307 / 319 ms,
+// Adreno 650 (Turnip) 170.5 / 170.2 and 202.2 / 189.7 ms, Adreno 830 45.8 / 45.5 ms. A stride above 1 always takes
+// scalar. Any other value aborts.
+static bool ameva_conv_prefers_vec4(void) {
+    static const int pref = [] {
+        const char* e = getenv("AMEVA_CONV_STAGE");
+        if (!e || !*e || !strcmp(e, "auto")) return strstr(s_device_name, "Mali") ? 1 : 0;
+        if (!strcmp(e, "vec4")) return 1;
+        if (!strcmp(e, "scalar")) return 0;
+        GGML_ABORT("ggml-ameva: AMEVA_CONV_STAGE must be auto, vec4 or scalar (got \"%s\")", e);
+    }();
+    return pref == 1;
+}
+
+// CONV_2D. The weights go into the scratch buffer in the K order of the kernel (one dispatch of ameva_conv_w, bit
+// patterns unchanged), then each batch element is convolved in slices of weight rows and output rows that keep a
+// dispatch under kDispatchMac. The bias binding is the zero vector: sd.cpp adds the bias as a node of its own.
+static const char* enc_conv_2d(AmevaRecorder& rec, const struct ggml_tensor* node) {
+    AmevaConv2d g;
+    if (const char* why = ameva_conv2d_geometry(node, &g)) return why;
+    const struct ggml_tensor *a = node->src[0], *b = node->src[1];
+    const bool f32w = is_f32(a);
+    if (!f32w && s_conv_f16_decoder.load() < 0) return "f16 decoder of the convolution not determined";
+    const uint32_t esize = f32w ? 4u : 2u;
+    if (!s_scratch || g.weight_bytes > s_scratch_bytes) return "convolution weight scratch not reserved";
+    uint64_t units_bytes = 0;
+    AcBuffer* units = ameva_conv_units_buffer(g.KW, g.KH, g.d0, g.d1, g.groups, &units_bytes);
+    AcBuffer* zero = ameva_conv_zero_buffer();
+    if (!units || !zero) return "convolution constants could not be allocated";
+
+    AmevaBind bw, bsrc, bdst, bq = {};
+    const char* e = ameva_bind(a, esize, &bw);
+    if (!e) e = ameva_bind(b, 4, &bsrc);
+    if (!e) e = ameva_bind(node, 4, &bdst);
+    if (e) return e;
+    bq.b.buffer = s_scratch;
+    bq.b.offset = 0;
+    bq.b.range = std::min<uint64_t>(s_scratch_bytes, s_limits.max_storage_buffer_range) & ~15ull;
+    bq.key = s_scratch;
+    bq.lo = 0;
+    bq.hi = g.weight_bytes;
+    if (bq.hi > bq.b.range) return "convolution weights larger than one binding";
+
+    // 1. weights into the K order
+    AcKernel* wk = ameva_vk_kernel(f32w ? AMEVA_VK_CONV_W_F32 : AMEVA_VK_CONV_W_F16);
+    if (!wk) return "no ameva_conv_w kernel";
+    {
+        const uint64_t words = g.weight_bytes / 4;
+        const uint32_t pcw[6] = { g.taps, g.IC, g.OC, g.U, bw.elem, 0u };
+        const AcBufferBinding bindw[2] = { bw.b, bq.b };
+        e = ameva_record(rec, wk, &bw, 1, &bq, 1, bindw, 2, pcw, sizeof(pcw), ameva_grid_1d(words, 64), (double)words);
+        if (e) return e;
+    }
+
+    // 2. the convolution. Aligned vec4 staging needs the stride 1 and every vec4 that holds a source float inside
+    // the binding (a binding that ends in a partial vec4 hides its last floats from a vec4 array)
+    const uint64_t src_floats = (uint64_t)g.W * g.H * g.IC * g.B;
+    const bool vec4 = g.s0 == 1 && ameva_conv_prefers_vec4() &&
+                      (((uint64_t)bsrc.elem + src_floats) * 4 + 15) / 16 * 16 <= bsrc.b.range;
+    const bool builtin = !f32w && s_conv_f16_decoder.load() == 1;
+    AcKernel* kernel = ameva_vk_kernel(f32w ? (vec4 ? AMEVA_VK_CONV_F32_V : AMEVA_VK_CONV_F32_S)
+                                            : builtin ? (vec4 ? AMEVA_VK_CONV_F16U_V : AMEVA_VK_CONV_F16U_S)
+                                                      : (vec4 ? AMEVA_VK_CONV_F16_V : AMEVA_VK_CONV_F16_S));
+    if (!kernel) return "no ameva_conv kernel";
+    const uint64_t P = (uint64_t)g.OW * g.OH;
+    const uint32_t qper = f32w ? 8u : 4u; // Q vector elements per unit (ameva_qdecode.glsl QPER)
+    const uint32_t tiles_w = (g.OW + 31) / 32;
+    // weight rows per dispatch: whole 64-row tiles under kDispatchMac for all output rows when that is possible;
+    // output rows per dispatch: one grid dimension, and kDispatchMac for the weight rows of the slice
+    const uint64_t mac_rows = (uint64_t)(kDispatchMac / ((double)P * (double)g.K));
+    const uint32_t rows_per_slice = (uint32_t)std::min<uint64_t>(g.OC, std::max<uint64_t>(64, mac_rows & ~63ull));
+    const uint32_t stride = g.s0 | g.s1 << 8 | 1u << 16, pad = g.p0 | g.p1 << 8;
+    const AcBufferBinding bzero = { zero, 0, AMEVA_CONV_ZERO_BYTES }, bunits = { units, 0, units_bytes };
+    for (uint32_t bi = 0; bi < g.B; ++bi) {
+        const uint32_t a_off = bsrc.elem + bi * g.W * g.H * g.IC;
+        for (uint32_t n0 = 0; n0 < g.OC; n0 += rows_per_slice) {
+            const uint32_t nc = std::min(rows_per_slice, g.OC - n0);
+            const uint64_t out_mac_rows = (uint64_t)(kDispatchMac / ((double)g.OW * (double)nc * (double)g.K));
+            const uint32_t rows_max = (uint32_t)std::max<uint64_t>(1, std::min<uint64_t>(65535u / tiles_w, out_mac_rows));
+            // the planes this slice writes (hazard tracking: slices of one node do not wait for each other)
+            AmevaBind bd = bdst;
+            bd.lo = bdst.lo + ((uint64_t)bi * g.OC + n0) * P * 4;
+            bd.hi = bd.lo + (uint64_t)nc * P * 4;
+            for (uint32_t r0 = 0; r0 < g.OH; r0 += rows_max) {
+                const uint32_t rc = std::min(rows_max, g.OH - r0);
+                const uint32_t pc[19] = { nc, g.K, n0 * g.U * qper, 0u, 0u, a_off,
+                                          (uint32_t)(bdst.elem + ((uint64_t)bi * g.OC + n0) * P), n0,
+                                          g.W, g.H, 1u, g.IC, g.OW, g.OH, (uint32_t)P, r0, stride, pad, 0u };
+                const AcBufferBinding bind[7] = { bq.b, bq.b, bq.b, bsrc.b, bdst.b, bzero, bunits };
+                const AmevaBind reads[2] = { bq, bsrc };
+                e = ameva_record(rec, kernel, reads, 2, &bd, 1, bind, 7, pc, sizeof(pc),
+                                 { (nc + 63) / 64, tiles_w * rc, 1 }, (double)rc * g.OW * nc * g.K);
+                if (e) return e;
+            }
+        }
+    }
+    rec.conv_nodes++;
+    return nullptr;
+}
+
 static const char* ameva_encode(AmevaRecorder& rec, const struct ggml_tensor* node) {
     switch (node->op) {
         case GGML_OP_MUL_MAT: return enc_mul_mat(rec, node);
@@ -3192,6 +3579,7 @@ static const char* ameva_encode(AmevaRecorder& rec, const struct ggml_tensor* no
         case GGML_OP_CONT:
         case GGML_OP_DUP: return enc_cpy(rec, node);
         case GGML_OP_FLASH_ATTN_EXT: return enc_flash_attn(rec, node);
+        case GGML_OP_CONV_2D: return enc_conv_2d(rec, node);
         default: return "op has no ameva encoder";
     }
 }
@@ -3279,6 +3667,18 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
             if (ameva_mmq_plan(node, &rows, &bytes)) scratch_need = std::max<uint64_t>(scratch_need, bytes);
             else scratch_need = std::max<uint64_t>(scratch_need, ameva_mmvq_scratch_bytes(node));
             scratch_need = std::max<uint64_t>(scratch_need, ameva_act_fq_bytes(node));
+        } else if (node->op == GGML_OP_CONV_2D) {
+            // the weights in the kernel's K order; the f16 decoder is decided before anything is recorded
+            AmevaConv2d g;
+            if (!ameva_conv2d_geometry(node, &g)) {
+                scratch_need = std::max<uint64_t>(scratch_need, g.weight_bytes);
+                if (is_f16(node->src[0])) {
+                    if (const char* e = ameva_conv_f16_prepare()) {
+                        fprintf(stderr, "ggml-ameva: f16 conversion check of the convolution kernel failed: %s (FAIL-FAST)\n", e);
+                        return GGML_STATUS_FAILED;
+                    }
+                }
+            }
         }
     }
     if (scratch_need && !ameva_scratch_reserve(scratch_need)) {
@@ -3473,6 +3873,7 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
     g_prof_mul_mat.fetch_add((uint64_t)rec.mul_mat_nodes);
     ameva_count_mul_mat(rec.mul_mat_nodes);
     ameva_count_qmv_mul_mat(rec.qmv_nodes);
+    s_conv_count.fetch_add(rec.conv_nodes);
     ameva_count_mmq_mul_mat(rec.mmq_nodes);
     ameva_count_mmqb_mul_mat(rec.mmqb_nodes);
     g_prof_fused.fetch_add((uint64_t)rec.fused_pairs);

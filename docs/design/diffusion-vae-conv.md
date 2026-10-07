@@ -5,7 +5,8 @@
   `ggml-vulkan.cpp` change). No remote fetch. The A35 device binary is the 2.7.9 bundle `sd-cli` (older sd.cpp layout),
   so line numbers of the local tree are approximate for it.
 - Status: measurements and design. Step 1 of section 6 (the kernel in isolation, `ameva_conv_bench`) is measured on
-  three devices: section 7. Nothing is in ggml-ameva yet. Section 5 lists what is predicted and not measured.
+  three devices: section 7. CONV_2D is in ggml-ameva and checked on devices: section 8. The other decoder ops and
+  sd.cpp on ggml-ameva are not done. Section 5 lists what is predicted and not measured.
 
 ## 1. Measured: 2D VAE decode on the Galaxy A35 (Mali-G68, Vulkan)
 
@@ -206,3 +207,52 @@ Turnip Adreno 650, cores 0-7, `max_gpuclk` 587 MHz. matrix / conv_s:
   subnormals on the device at load); (2) a channels-last activation layout inside ggml-ameva would remove the planar
   output and the shift, and the matrix columns above are what such a kernel reads and writes; (3) int8 activations
   (`ameva_mmq` structure) are not in this bench; (4) a source or destination above one binding is refused by the bench.
+
+## 8. K1 2D in ggml-ameva (step 2 of section 6, convolution part, 2026-10-08)
+
+User decisions of 2026-10-07 applied: the built-in f16 conversion after a check on the device, and ggml's planar
+layout kept.
+
+- **Op.** `GGML_OP_CONV_2D` is computed by the graph engine (`enc_conv_2d`, contract in `ameva_conv2d_geometry`,
+  `adapters/llama/ggml-ameva/ggml-ameva.cpp`): f16 or f32 kernel tensor, f32 data and result, stride, padding and
+  dilation up to 255, a batch, up to 8192 input and 16384 output channels, every tensor inside one binding.
+  `IM2COL` stays declined, so a graph has to carry the direct op (sd.cpp: `--vae-conv-direct`).
+- **Weights.** Per node one dispatch of `shaders/ameva_conv_w.comp` copies the bit patterns of the kernel tensor into
+  the scratch buffer in the K order of `ameva_conv` (channel groups of 32, all taps of a group, channels). No side
+  buffer is kept, so no weight memory is added; the copy runs again at every `graph_compute`. The unit tables (per
+  kernel size, dilation and group count) and one zero vector for the bias binding are created once. The bias is
+  still a node of its own in the graph (not fused).
+- **Kernels.** A SPIR-V-only family of `scripts/build_ameva_kernels.py` (`VK_ONLY`: `conv_{f16,f16u,f32}_{s,v}`,
+  `conv_w_{f16,f32}`, table `kAmevaVkKernels`). `ggml_ameva_kernels_spv.h` was regenerated on the S25 (glslang
+  16.3.0, spirv-val): 4030 added lines, no existing module changed, and the OpenCL header is identical. On the
+  OpenCL backend the op is declined with a reason: `scripts/glsl_to_opencl.py` does not translate these kernels.
+- **f16 decoder.** Once per process, before the first graph with an f16 convolution is recorded, a 1x1 convolution
+  runs through the kernel with every f16 subnormal, both zeros and 2048 normal values as weights against an identity
+  source. The built-in conversion is used only when all 4096 results carry the bits of the CPU conversion; otherwise
+  the exact decoder, with one line on stderr either way. `AMEVA_CONV_F16=exact` forces the exact decoder. The check
+  selected the built-in conversion on the A35, S20 and S25.
+- **Staging.** `AMEVA_CONV_STAGE=auto` takes aligned vec4 loads on Mali and scalar loads elsewhere (section 7);
+  scalar for a stride above 1 and when the source ends in a partial vec4 of its binding.
+
+Verification, plugin built against ggml b8471 and run with the ggml libraries of the 2.8.1 bundle
+(`scripts/termux/lab/conv_check.sh`, logs `~/abi-lab/out-convk/` on each device):
+
+| | A35, Mali-G68 | S20, Turnip Adreno 650 | S25, Adreno 830 |
+|---|---|---|---|
+| `tests/ameva_conv_check` (12 cases x 5 kernel selections, f32 CPU reference) | 12/12 x 5, bit-equal to the fused reference | 12/12 x 5, bit-equal to the multiply-then-add reference | 11/11 x 5, same reference as S20 (sources before the last two edits) |
+| `test-backend-ops -b AMEVA0 -o CONV_2D` | 1568/1568, none declined | 1568/1568, none declined | not run |
+| `ameva_qmm_check` (MUL_MAT regression) | 516/516 | 516/516 | 516/516 |
+| ms per 19.33 GFLOP convolution through `graph_compute`, f16 kernel (128x128x256, 64x64x512, 256x256x128) | 271.7 / 287.6 / 271.3 | 158.8 / 163.8 / 182.4 | not measured |
+
+- The twelfth case is a kernel larger than the padded source (one output row, every tap outside), which ggml
+  defines and `test-backend-ops` contains 111 times; it was declined until the last edit. The S25 stopped answering
+  (connection timed out from about 01:10 on 2026-10-08) before the final sources and `test-backend-ops` could run there.
+- A35 against ggml-vulkan MUL_MAT (1180 ms): 4.10-4.34x per convolution node, weight copy included. The isolated
+  kernel of section 7 took 277 / 287 / 278 ms, so the integration adds nothing measurable. A35 timing conditions:
+  cores 0-2, GPU clock sampled (949 MHz while computing), second run 272.2 / 286.6 / 271.0. One earlier run
+  directly after the 12-minute plugin compile on the device gave 364 / 289 / 354 ms; its clock was not sampled.
+- Device trap met on the A35: no `patchelf`, so the plugin keeps `$PREFIX/lib` before `$ORIGIN` in its RUNPATH, and
+  the bundle's lib directory holds an older `libggml-ameva.so`. With that directory first on `LD_LIBRARY_PATH` every
+  test failed at load ("cannot locate symbol"); `conv_check.sh` now puts its own output directory first.
+- Not done: bias fusion, CONV_3D, tensors above one binding (declined), an OpenCL translation, group norm and the
+  other decoder ops (K2, K3), and sd.cpp built against ggml-ameva (step 3). No decoded image exists yet.

@@ -1,35 +1,37 @@
 # Current Engineering Checkpoint
 
-**Timestamp**: 2026-10-07T23:58:00+09:00  
-**Branch**: `perf/opencl-mali` (uncommitted: this file, `docs/design/diffusion-vae-conv.md`, new `shaders/ameva_conv.comp`, `tests/ameva_conv_bench.cpp`, `scripts/termux/lab/conv_bench.sh`; changed `shaders/ameva_qdecode.glsl` (`TYPE_F16`), `shaders/ameva_qgemm.comp` (`ABLATE`, tuning only))  
+**Timestamp**: 2026-10-08T02:25:00+09:00  
+**Branch**: `perf/opencl-mali`, not pushed: `ea0a336` (conv kernel and bench), then the commit that carries this file (CONV_2D in ggml-ameva)  
 **Current Goal**: 5-Modality Pipeline Optimization (1. Diffusion -> 2. STT -> 3. BitNet -> 4. Vision -> 5. TTS); STRICTLY LOCAL under `dev/` (no remote branch fetch).
 
 ### Verified (Ground Truth)
 - [PASS] Zero-Source Leakage Audit, Engine Isolation (`adapters/`), A53 clean-slate auto-provisioning, 5-modality real-device inference on A53, `ac_security_guard` (`AMEVA-SEC-001`). Details: git log up to `09e0186`.
-- [PASS] Block-integer MUL_MAT (`ameva_mmqb`, opt-in `AMEVA_MMQB`, `29b5362` + 2-row fix): `ameva_qmm_check` 516/516 on A53 OpenCL 9/9 and A35 18/18. Wins on Mali OpenCL (A53 Llama-3.2-1B prompt 46 -> 58 t/s, text equal to CPU), loses on every Vulkan driver and Adreno OpenCL. `ameva_mmvqb.comp` written, not built in, no gain on A53.
-- Fleet defaults: A53 OpenCL MMQB 2x8, A35 Vulkan tile, S25/S20 MMQB off. Numbers: `docs/design/opencl-prompt-path.md`, git log.
-- **Stage 1 (Diffusion), 2026-10-07. Design, tables, bench results: `docs/design/diffusion-vae-conv.md` (sections 1-2 A35 `sd-cli`, section 7 the bench).**
-- A35 VAE decode of one 256x256 image: default 432.74 s (two convolutions with a 288 MiB IM2COL matrix run on the CPU, unreported); 192x192 23.55 s; `--vae-tile-size 24` 92.37 s; `--vae-conv-direct` 226.89 s. GPU part: MUL_MAT 97.1 % at 12.2-16.8 GFLOPS (1180 ms per 19.33 GFLOP convolution).
-- Wan 2.1 VAE (code reading, not run): ggml `[W,H,T,B*C]`, `B == 1`; PERMUTE+CONT around RMS_NORM, 6-node CausalConv3d with a 27x column matrix; 13.5 TFLOP per 480x832 latent frame (calculated).
-- **`ameva_conv_bench` (direct `ac_runtime`, kernel `ameva_conv.comp`: tile of `ameva_qgemm`, activations staged from the source tensor, host unit table, f16 or q8_0 weights).** 3 VAE shapes + one 3x3x3 causal + 4 small (stride, dilation, padded channels), A35 / S25 / S20, every output compared with an f32 CPU convolution: A35 bit-equal to the fused-multiply-add reference, S25 and S20 bit-equal to the multiply-then-add reference (they do not fuse `fma()`), 2.9e-6 of rms from the other.
-- ms per 19.33 GFLOP convolution, matrix (`ameva_qgemm` on a CPU-built column matrix) / conv: A35 q8_0 238-246 / 273-275, f16 248-257 / 307-315 (277-287 with `unpackHalf2x16`, still bit-equal there); S25 56-57 / 45-46 (both types); S20 q8_0 172-179 / 152-171, f16 196-206 / 170-190. 3x3x3: A35 293 / 348 and 311 / 381, S25 71 / 56, S20 214 / 186.
-- Mali-G68 ablation (q8_0): conv 273 = 199 + 45 planar output + 29 source loads; qgemm 236 = 201 + 35 matrix loads. The deficit on Mali is ggml's planar output (64 runs in 64 planes per tile), not the staging.
-- Gate of step 1 (A35, 4x ggml-vulkan MUL_MAT, exact f16): 3.74-3.84x with the exact decoder (not met), 4.10-4.26x with the built-in conversion, 4.29-4.32x with q8_0 weights.
+- [PASS] Block-integer MUL_MAT (`ameva_mmqb`, opt-in `AMEVA_MMQB`, `29b5362` + 2-row fix): wins on Mali OpenCL only. Fleet defaults: A53 OpenCL MMQB 2x8, A35 Vulkan tile, S25/S20 MMQB off. Numbers: `docs/design/opencl-prompt-path.md`.
+- **Stage 1 (Diffusion). Everything below with tables: `docs/design/diffusion-vae-conv.md` (sections 1-2 A35 `sd-cli`, 7 the kernel bench, 8 the integration).**
+- A35 VAE decode of one 256x256 image with the 2.7.9 bundle: default 432.74 s (two convolutions with a 288 MiB IM2COL matrix run on the CPU, unreported); `--vae-tile-size 24` 92.37 s; `--vae-conv-direct` 226.89 s. GPU part: MUL_MAT 97.1 % (1180 ms per 19.33 GFLOP convolution).
+- `ameva_conv` kernel alone (`ameva_conv_bench`, direct `ac_runtime`): bit-equal to an f32 CPU convolution with each driver's arithmetic (A35 fuses `fma()`, S25 and S20 do not). Against the same tile kernel on a column matrix: faster on Adreno (S25 1.22-1.28x, S20 1.00-1.18x), 0.80-0.90x on Mali-G68, where ggml's planar output costs 45 of 273 ms.
+- **CONV_2D in ggml-ameva (2026-10-08)**: `enc_conv_2d`; weights copied per node into the kernel's K order in the scratch buffer (`ameva_conv_w`), no side buffer; SPIR-V-only kernel family (`VK_ONLY`, header regenerated on the S25, existing modules unchanged); declined on the OpenCL backend; IM2COL stays declined.
+- f16 decoder: built-in `unpackHalf2x16` after a per-process device check of 4096 values (every f16 subnormal), else the exact decoder (`AMEVA_CONV_F16=exact` forces it). Built-in selected on A35, S20, S25. Layout: ggml's planar layout kept (user decisions 2026-10-07).
+- `tests/ameva_conv_check` (12 cases x 5 kernel selections, bit comparison with an f32 CPU reference): A35 12/12 x 5, S20 12/12 x 5, S25 11/11 x 5 (sources before the last two edits). `test-backend-ops -o CONV_2D` on AMEVA0: S20 and A35 1568/1568, none declined. `ameva_qmm_check` 516/516 on all three.
+- Through `graph_compute`, f16 kernel, ms per 19.33 GFLOP convolution: A35 271.7 / 287.6 / 271.3 (4.10-4.34x ggml-vulkan MUL_MAT, cores 0-2, 949 MHz), S20 158.8 / 163.8 / 182.4.
 
 ### Known, Not Examined
 - Llama-3.2-1B 64-token text departs from the CPU's at byte 70 (A53 OpenCL, A35 Vulkan and OpenCL); S25 OpenCL `ameva_qmm_check` 510/516 (q2_K M=1); S20 OpenCL `ameva_qmm_check` exits 139.
 - S20 `sd-cli` (OpenCL build `3f8527a`) aborts in the UNet (`clEnqueueNDRangeKernel` -54); S20 `~/sd-cli-vulkan` asserts `compute_ctx.expired()` with `GGML_VK_PERF_LOGGER`.
 - A35 Vulkan 2-row `ameva_mmqb` layouts slow (60-120 ms). S21 `mmqb_s21.txt` (watcher pid 22747) not read yet.
-- Stage 1 unmeasured: ggml-vulkan MUL_MAT time on S25/S20 (no gate there), conv bench on S21/A53, `unpackHalf2x16` on subnormals outside the A35, int8 activations in the conv kernel and their image effect, Wan VAE on a device, tensors above one binding (bench refuses them).
+- S25 unreachable since about 01:10 on 2026-10-08 (connection timed out): final sources and `test-backend-ops` not run there. Conv on S21/A53, ggml-vulkan MUL_MAT time on S25/S20, int8 activations in the conv kernel, Wan VAE on a device: not measured.
+- A35 throttles an idle ssh session (a compile sat at 1 % CPU until polled); one timing run right after a 12-minute compile read 364 / 289 / 354 ms.
 
 ### Current Problem & Focus
-- Decisions open for the user: (a) f16 decoder of the product kernel: exact everywhere, or built-in conversion after a load-time subnormal check per device; (b) keep ggml's planar layout (Mali pays 16 %) or a channels-last layout inside ggml-ameva for VAE activations.
-- Earlier decisions (2026-10-07) stand: default tile size 24 on 256 MiB devices and fail-fast on CPU split; exact mode first, int8 behind a switch after a PSNR check; full Wan VAE on S25-class only, `taew2_1` elsewhere.
+- Convolution is one of the decoder's ops. No decoded image exists yet: GROUP_NORM, UPSCALE, PAD, CONCAT, SOFT_MAX, f32 MUL_MAT for the middle attention and the bias ADD after each convolution still decide whether a VAE graph stays on ggml-ameva.
+- Earlier decisions stand: default tile size 24 on 256 MiB devices and fail-fast on CPU split; exact mode first, int8 behind a switch after a PSNR check; full Wan VAE on S25-class only, `taew2_1` elsewhere.
 
 ### Relevant Files
-- `docs/design/diffusion-vae-conv.md`, `adapters/llama/ggml-ameva/shaders/ameva_conv.comp`, `ameva_qgemm.comp`, `ameva_qdecode.glsl`, `tests/ameva_conv_bench.cpp`, `scripts/termux/lab/conv_bench.sh` (`all|build|run`, `SHAPES`, `TYPES`, `EXTRA_DEFS=F16_UNPACK`, `AMEVA_CONV_BENCH_ABLATE=1`, `_REF=muladd`)
-- Devices: `~/abi-lab/src-conv` (sources), `~/abi-lab/out-conv/run_final.log`, `run_ref_*.log` (A35, S25, S20), A35 `~/abi-lab/out-conv-unpack/`, A35 `~/claude_vae_prof/`
+- `adapters/llama/ggml-ameva/ggml-ameva.cpp` (`enc_conv_2d`, `ameva_conv2d_geometry`, `ameva_conv_f16_check`), `shaders/ameva_conv.comp`, `ameva_conv_w.comp`, `ameva_qdecode.glsl`, `scripts/build_ameva_kernels.py` (`VK_ONLY`)
+- `tests/ameva_conv_check.cpp`, `scripts/termux/lab/conv_check.sh` (`kernels`, `SKIP_PLUGIN_BUILD=1`, `TIME_SHAPES`), `tests/ameva_conv_bench.cpp`, `scripts/termux/lab/conv_bench.sh`
+- Devices: `~/abi-lab/src-conv`, `~/abi-lab/out-convk/` (plugin, `conv_check_run.log`, `tbo_conv2d.txt`), `~/abi-lab/out-conv/` (bench logs)
 
 ### Next Actions
-1. K1 2D in ggml-ameva (CONV_2D accepted, weights converted once to the unit order, unit table, dispatch as the bench) + group norm + remaining ops; sd.cpp built with ggml-ameva (ggml `8e800cef`); gates in the design, section 6.
-2. Then STT -> BitNet -> Vision -> TTS. Keep this file under 40 lines.
+1. VAE op census on ggml-ameva (`tests/ameva_graph_census.cpp` on the SD 1.x decoder graph), then K2 group norm, K3 ops and the bias fused into the convolution.
+2. sd.cpp built against ggml-ameva (leejet ggml `8e800cef` headers, ABI probe); gate: decoded image against the f16 Vulkan image, decode time per 256 px tile, no scheduler split.
+3. Re-run `conv_check.sh` and `test-backend-ops -o CONV_2D` on the S25 when it answers. Then STT -> BitNet -> Vision -> TTS. Keep this file under 40 lines.

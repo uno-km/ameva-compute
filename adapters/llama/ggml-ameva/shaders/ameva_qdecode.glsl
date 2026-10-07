@@ -6,8 +6,8 @@
 // decode_i8() gives the same unit as 32 small integers v (int8 bytes) and per 16-weight half a scale and an offset,
 // weight k = sc[k / 16] * v[k] + mc[k / 16], for integer dot products (ameva_mmq).
 // qdecode_init() must be called by every invocation at the start of main (it contains a barrier for the IQ4 table).
-// TYPE_F16 (convolution kernels, exact mode): a unit is 32 f16 values in weight order in Q (64 bytes), H and S are
-// not read, and there is no decode_i8().
+// TYPE_F16 and TYPE_F32 (convolution kernels, exact mode): a unit is 32 f16 or f32 values in weight order in Q (64 or
+// 128 bytes), H and S are not read, and there is no decode_i8().
 
 #if defined(TYPE_Q8_0)
 #define QVEC uvec4
@@ -15,6 +15,9 @@
 #elif defined(TYPE_F16)
 #define QVEC uvec4
 #define QPER 4u
+#elif defined(TYPE_F32)
+#define QVEC uvec4
+#define QPER 8u
 #elif defined(TYPE_Q2_K) || defined(TYPE_Q3_K)
 #define QVEC uvec2
 #define QPER 1u
@@ -65,7 +68,7 @@ vec4 kv4(uint q) { return vec4(s_kv[q & 0xFu], s_kv[(q >> 8u) & 0xFu], s_kv[(q >
 #endif
 
 #if defined(TYPE_Q4_0) || defined(TYPE_Q4_1) || defined(TYPE_Q5_0) || defined(TYPE_Q5_1) || defined(TYPE_Q8_0) || \
-    defined(TYPE_IQ4_NL) || defined(TYPE_F16)
+    defined(TYPE_IQ4_NL) || defined(TYPE_F16) || defined(TYPE_F32)
 #define BLOCK_ELEMS 32u
 #else
 #define BLOCK_ELEMS 256u
@@ -85,7 +88,7 @@ vec4 kv4(uint q) { return vec4(s_kv[q & 0xFu], s_kv[(q >> 8u) & 0xFu], s_kv[(q >
 #define SB 18u
 #elif defined(TYPE_IQ4_XS)
 #define SB 8u
-#elif defined(TYPE_F16)
+#elif defined(TYPE_F16) || defined(TYPE_F32)
 #define SB 0u
 #else
 #error "define one TYPE_<T>"
@@ -249,6 +252,11 @@ void decode(uint qi, uint hi, uint sb, uint j, out vec4 w[8]) {
         w[2u * i + 1u] = h2f4(uvec4(q.z & 0xFFFFu, q.z >> 16u, q.w & 0xFFFFu, q.w >> 16u));
 #endif
     }
+#elif defined(TYPE_F32)
+    // Q: 32 f32, weight k in word k
+    [[unroll]] for (uint i = 0u; i < 8u; ++i) {
+        w[i] = uintBitsToFloat(qv[qi + i]);
+    }
 #endif
 }
 
@@ -268,7 +276,7 @@ uint kv_bytes4(uint q) {
 // One unit as int8: byte k % 4 of v[k / 4] is v_k (unsigned 0..63 or, for q8_0 and the IQ4 types, signed), and
 // weight k = sc[h] * v_k + mc[h] with h = k / 16. The scales are those of decode(); the constant offsets of the
 // types without a stored minimum (-8 d, -16 d, -4 dl, -32 dl) move into mc, so v stays non-negative.
-#if !defined(TYPE_F16)
+#if !defined(TYPE_F16) && !defined(TYPE_F32)
 void decode_i8(uint qi, uint hi, uint sb, uint j, out uint v[8], out vec2 sc, out vec2 mc) {
 #if defined(TYPE_Q4_0)
     const uvec4 q = qv[qi];
@@ -393,7 +401,7 @@ void decode_i8(uint qi, uint hi, uint sb, uint j, out uint v[8], out vec2 sc, ou
     mc = vec2(-32.0 * dl0, -32.0 * dl1);
 #endif
 }
-#endif // !TYPE_F16
+#endif // !TYPE_F16 && !TYPE_F32
 
 void qdecode_init(uint tid) {
     s_last = uint(sw.length()) - 1u;
