@@ -1,7 +1,7 @@
 # Current Engineering Checkpoint
 
 **Timestamp**: 2026-10-07T21:10:00+09:00  
-**Branch**: `perf/opencl-mali` (code at `e3a3af8`, committed 2026-10-07 and not pushed; origin is at `1b58ea8`)  
+**Branch**: `perf/opencl-mali` (code at `e3a3af8`; local commits `1b58ea8`, `e3a3af8` and the checkpoint commits after it are not pushed: origin was at `29b5362` at the last fetch)  
 **Current Goal**: Mali OpenCL prompt path (primary S21 Mali-G78, A53 Mali-G68; secondary S25, A35, S20) & Wan 2.1 5D Broadcast  
 
 ### Verified (Ground Truth)
