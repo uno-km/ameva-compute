@@ -16,6 +16,8 @@
 // the f32 sum over k = 0..K-1 in order.
 // A 128 x 32 tile with an 8 x 4 block per invocation (8 vec4 accumulators live across the decode) ran about 6 times
 // slower on Adreno 650 (q5_0 4864x896, M = 185: 210 ms against 33 ms per dispatch), as if registers spilled.
+// ABLATE=<n> (kernel tuning; such a kernel gives wrong results): 1 no activation loads, 2 no activation loads and the
+// activation tile written one whole vec4 per store.
 //
 //   bindings 0..2: repacked weights (ameva_qdecode.glsl), binding 3: src1 F32 as vec4, binding 4: dst F32
 //   push: M, K, N (weight rows of this dispatch), q_off, h_off (Q / H vector elements), s_off (bytes, even), a_off,
@@ -82,11 +84,19 @@ void main() {
         [[unroll]] for (uint e = 0u; e < 2u; ++e) {
             const uint v = tid + 128u * e;
             const uint r = v >> 3u, kq = v & 7u;
+#if defined(ABLATE) && ABLATE == 2
+            tile_a[v] = vec4(1.0);
+#else
+#if defined(ABLATE) && ABLATE == 1
+            const vec4 x = vec4(1.0);
+#else
             const vec4 x = a4[arow[e] + 8u * u];
+#endif
             tile_a[(4u * kq + 0u) * 8u + (r >> 2u)][r & 3u] = x.x;
             tile_a[(4u * kq + 1u) * 8u + (r >> 2u)][r & 3u] = x.y;
             tile_a[(4u * kq + 2u) * 8u + (r >> 2u)][r & 3u] = x.z;
             tile_a[(4u * kq + 3u) * 8u + (r >> 2u)][r & 3u] = x.w;
+#endif
         }
         barrier();
         [[unroll]] for (uint k = 0u; k < 32u; ++k) {

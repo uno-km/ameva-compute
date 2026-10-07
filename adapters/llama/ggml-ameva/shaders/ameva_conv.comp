@@ -1,0 +1,234 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : require
+// AMEVA CONV: ggml CONV_2D / CONV_3D as one node, without a column matrix. The tile of ameva_qgemm (a workgroup of
+// 128 invocations computes 64 weight rows x 32 activation rows, K walked one 32-weight unit at a time) with the
+// staging step reading the source tensor in place of an activation matrix.
+//
+// As a product: an activation row is an output position, a weight row an output channel, and K = taps x CP with CP
+// the input channels rounded up to a multiple of 32. A K unit is 32 consecutive channels (a channel group) at one
+// tap; which tap and which group unit u is, the host says in the unit table, so the order of the units along K
+// belongs to the host (it must be the order of the weights). The 32 activation rows of a tile are 32 consecutive
+// output positions along w of one (h, t). For one channel of the unit, the tile's 32 values are one run along w of
+// the source (consecutive floats when the stride along w is 1) and exactly one row of the shared activation tile.
+// An invocation stages 8 of them: two vec4 of the tile from one line of the source. Taps outside the source and
+// channels past C stage zeros (padding; the weights of the padded channels are zero as well). Each output is the
+// f32 sum over k = 0..K-1 in order, plus the bias.
+//
+// Output: a tile writes 64 runs of 32 floats into 64 planes that are far apart in memory. On Mali-G68 that stage is
+// 44 of 242 ms (128x128x256 -> 256, 3x3, q8_0, staging loads removed; 198 ms with the row-major output of
+// ameva_qgemm), whichever invocation writes a run. Default: the 4 x 4 blocks of the invocations go through shared
+// memory (the weight tile, free after the last unit) and each invocation writes 16 consecutive floats of one plane.
+// OUT_DIRECT: each invocation writes its own block (4 floats in each of 4 planes). Measured 2026-10-07, default
+// against OUT_DIRECT: Mali-G68 q8_0 275 / 278 ms, f16 307 / 325 ms; Adreno 830 45.4 / 43.9 and 45.8 / 45.4 ms;
+// Adreno 650 (Turnip) 158.8 / 155.9 and 170.5 / 167.3 ms.
+//
+//   source  f32 [W, H, T, C], element w + W * (h + H * (t + T * c))               (2D: T = 1)
+//   weights N rows of K in the repacked layout (ameva_qdecode.glsl; TYPE_F16 is the exact mode)
+//   dst     f32 [OW, OH, OT, N], element ow + OW * (oh + OH * (ot + OT * n))
+//   units   one word per unit: tap offset in source elements along w, h, t (dilation applied) in bits 0..7, 8..15,
+//           16..23 and the channel group in bits 24..31
+//
+// Staging variants (compile time):
+//   default     8 scalar loads per invocation and unit; any stride
+//   STAGE_VEC4  3 aligned vec4 loads per invocation and unit, shifted by the position of the run inside a vec4; the
+//               stride along w must be 1 and the source binding a whole number of vec4 (the host selects the kernel)
+// ABLATE=<n> (kernel tuning; such a kernel gives wrong results): 1 no padding mask, 2 (STAGE_VEC4) two aligned loads
+// without the shift, 3 no loads from the source, 4 as 3 with the output stage of ameva_qgemm (position-major, no
+// bias).
+//
+//   bindings 0..2: repacked weights, binding 3: source, binding 4: dst, binding 5: bias (f32, one per weight row),
+//   binding 6: units
+//   push: N (weight rows of this dispatch), K, q_off, h_off, s_off as in ameva_qgemm; a_off, d_off, b_off (floats;
+//         d_off and b_off address weight row 0 of this dispatch); W, H, T, C; OW, OH, plane (OW * OH * OT), row0
+//         (first output row oh + OH * ot of this dispatch); stride and pad (low side) as w | h << 8 | t << 16;
+//         u_off (words)
+//   grid: (ceil(N / 64), y, z) with y * z = ceil(OW / 32) * output rows of this dispatch
+
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+#include "ameva_qdecode.glsl"
+
+#if defined(STAGE_VEC4)
+layout(std430, binding = 3) readonly buffer BufA { vec4 a4[]; };
+#else
+layout(std430, binding = 3) readonly buffer BufA { float src[]; };
+#endif
+layout(std430, binding = 4) writeonly buffer BufD { float dst[]; };
+layout(std430, binding = 5) readonly buffer BufB { float bias[]; };
+layout(std430, binding = 6) readonly buffer BufU { uint units[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint N, K, q_off, h_off;
+    uint s_off, a_off, d_off, b_off;
+    uint W, H, T, C;
+    uint OW, OH, plane, row0;
+    uint stride, pad, u_off;
+} pc;
+
+#define BN 64u // weight rows per tile
+#define BM 32u // activation rows (output positions along w) per tile
+
+// tile_w[k * 16 + n / 4][n % 4] = W[n0 + n][k0 + k], tile_a[k * 8 + m / 4][m % 4] = A[m0 + m][k0 + k];
+// after the last unit, tile_w[n * 8 + m / 4][m % 4] = output (n0 + n, m0 + m)
+shared vec4 tile_w[32 * (BN / 4u)];
+shared vec4 tile_a[32 * (BM / 4u)];
+
+ivec3 unpack3(uint p) { return ivec3(p & 0xFFu, (p >> 8u) & 0xFFu, (p >> 16u) & 0xFFu); }
+#if defined(STAGE_VEC4)
+// floats sh .. sh + 3 of the 8 in (a, b)
+vec4 shift4(vec4 a, vec4 b, int sh) {
+    return sh == 0 ? a : (sh == 1 ? vec4(a.yzw, b.x) : (sh == 2 ? vec4(a.zw, b.xy) : vec4(a.w, b.xyz)));
+}
+#endif
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    qdecode_init(tid);
+    const uint n0 = gl_WorkGroupID.x * BN;
+    // the tiles along w of the dispatch's output rows are numbered through y and z of the grid, row by row; how the
+    // host splits that number over the two dimensions does not matter
+    const uint tiles_w = (pc.OW + BM - 1u) / BM;
+    const uint tile = gl_WorkGroupID.z * gl_NumWorkGroups.y + gl_WorkGroupID.y;
+    const uint ow0 = (tile % tiles_w) * BM;
+    const uint row = pc.row0 + tile / tiles_w;
+    const uint ot = row / pc.OH, oh = row - ot * pc.OH;
+    const uint U = pc.K >> 5u;
+    const uint s_row = (pc.K / BLOCK_ELEMS) * SB;
+
+    // decoding: invocation t < 64 owns weight row n0 + t; rows past N decode the last row and are never stored
+    const uint drow = min(n0 + (tid & 63u), pc.N - 1u);
+    const uint dcol = (tid & 63u) >> 2u, dcomp = tid & 3u;
+    // staging: the invocation stages output positions ow0 + 8 wo .. + 7 of channel ci of the unit, two vec4 of the
+    // tile from one line of the source. org = source (w, h, t) of the first of them at tap offset (0, 0, 0);
+    // positions past OW are staged like any other and never stored
+    const uint wo = tid & 3u, ci = tid >> 2u;
+    const uint ta = ci * 8u + 2u * wo;
+    const ivec3 strd = unpack3(pc.stride);
+    const ivec3 org = ivec3(int(ow0 + 8u * wo), int(oh), int(ot)) * strd - unpack3(pc.pad);
+    // accumulation: rows 4 tn .. 4 tn + 3 of the tile, activation rows 4 tm .. 4 tm + 3
+    const uint tn = tid & 15u, tm = tid >> 4u;
+    vec4 acc0 = vec4(0.0), acc1 = vec4(0.0), acc2 = vec4(0.0), acc3 = vec4(0.0);
+
+    for (uint u = 0u; u < U; ++u) {
+        if (tid < 64u) {
+            const uint b = u / UPB;
+            vec4 w[8];
+            decode(pc.q_off + (drow * U + u) * QPER, pc.h_off + drow * U + u, pc.s_off + drow * s_row + b * SB,
+                   u - b * UPB, w);
+            [[unroll]] for (uint i = 0u; i < 8u; ++i) {
+                const uint k = 4u * (i & 3u) + 16u * (i >> 2u); // w[i] holds weights k .. k + 3 of the unit
+                tile_w[(k + 0u) * 16u + dcol][dcomp] = w[i].x;
+                tile_w[(k + 1u) * 16u + dcol][dcomp] = w[i].y;
+                tile_w[(k + 2u) * 16u + dcol][dcomp] = w[i].z;
+                tile_w[(k + 3u) * 16u + dcol][dcomp] = w[i].w;
+            }
+        }
+#if defined(ABLATE) && ABLATE >= 3
+        tile_a[ta] = vec4(1.0);
+        tile_a[ta + 1u] = vec4(1.0);
+#else
+        const uint unit = units[pc.u_off + u];
+        const ivec3 p = org + unpack3(unit);
+        const uint c = (unit >> 24u) * 32u + ci;
+        const bool in_src = uint(p.y) < pc.H && uint(p.z) < pc.T && c < pc.C;
+        // first float of the line (w = 0); a line outside the source reads the first line and is masked
+        const uint line = in_src ? pc.a_off + pc.W * (uint(p.y) + pc.H * (uint(p.z) + pc.T * c)) : pc.a_off;
+        const uint w_end = in_src ? pc.W : 0u; // positions with 0 <= w < w_end are read, the others are zero
+#if defined(STAGE_VEC4)
+        const int g = int(line) + p.x; // float index of the first of the 8 values (may lie before the binding)
+        const int last = int(a4.length()) - 1;
+        const vec4 v0 = a4[clamp(g >> 2, 0, last)];
+        const vec4 v1 = a4[clamp((g >> 2) + 1, 0, last)];
+#if defined(ABLATE) && ABLATE == 2
+        const vec4 x0 = v0, x1 = v1;
+#else
+        const vec4 v2 = a4[clamp((g >> 2) + 2, 0, last)];
+        const vec4 x0 = shift4(v0, v1, g & 3), x1 = shift4(v1, v2, g & 3);
+#endif
+#if defined(ABLATE) && ABLATE == 1
+        tile_a[ta] = x0;
+        tile_a[ta + 1u] = x1;
+#else
+        tile_a[ta] = mix(vec4(0.0), x0, lessThan(uvec4(p.x + ivec4(0, 1, 2, 3)), uvec4(w_end)));
+        tile_a[ta + 1u] = mix(vec4(0.0), x1, lessThan(uvec4(p.x + ivec4(4, 5, 6, 7)), uvec4(w_end)));
+#endif
+#else
+        [[unroll]] for (int e = 0; e < 2; ++e) {
+            vec4 x;
+            [[unroll]] for (int j = 0; j < 4; ++j) {
+                const int iw = p.x + (4 * e + j) * strd.x;
+                const float val = src[line + uint(clamp(iw, 0, int(pc.W) - 1))];
+#if defined(ABLATE) && ABLATE == 1
+                x[j] = val;
+#else
+                x[j] = uint(iw) < w_end ? val : 0.0;
+#endif
+            }
+            tile_a[ta + uint(e)] = x;
+        }
+#endif
+#endif
+        barrier();
+        [[unroll]] for (uint k = 0u; k < 32u; ++k) {
+            const vec4 wv = tile_w[k * 16u + tn];
+            const vec4 av = tile_a[k * 8u + tm];
+            acc0 = fma(wv, vec4(av.x), acc0);
+            acc1 = fma(wv, vec4(av.y), acc1);
+            acc2 = fma(wv, vec4(av.z), acc2);
+            acc3 = fma(wv, vec4(av.w), acc3);
+        }
+        barrier();
+    }
+
+    // (weight row n0 + 4 tn + i, position ow0 + 4 tm + j of this row) = acc_j[i]
+#if defined(ABLATE) && ABLATE == 4
+    // the output stage of ameva_qgemm: position-major, no bias (inside the range of this dispatch's planes)
+    [[unroll]] for (uint j = 0u; j < 4u; ++j) {
+        if (ow0 + 4u * tm + j < pc.OW) {
+            const vec4 a = j == 0u ? acc0 : (j == 1u ? acc1 : (j == 2u ? acc2 : acc3));
+            const uint nb = n0 + 4u * tn;
+            const uint o = pc.d_off + (pc.OW * row + ow0 + 4u * tm + j) * pc.N + nb;
+            if (nb + 0u < pc.N) dst[o + 0u] = a.x;
+            if (nb + 1u < pc.N) dst[o + 1u] = a.y;
+            if (nb + 2u < pc.N) dst[o + 2u] = a.z;
+            if (nb + 3u < pc.N) dst[o + 3u] = a.w;
+        }
+    }
+#elif defined(OUT_DIRECT)
+    const uint nb = n0 + 4u * tn;
+    const uint owb = ow0 + 4u * tm;
+    [[unroll]] for (uint i = 0u; i < 4u; ++i) {
+        const uint n = nb + i;
+        if (n < pc.N) {
+            const float b = bias[pc.b_off + n];
+            const uint o = pc.d_off + pc.plane * n + pc.OW * row + owb;
+            if (owb + 0u < pc.OW) dst[o + 0u] = acc0[i] + b;
+            if (owb + 1u < pc.OW) dst[o + 1u] = acc1[i] + b;
+            if (owb + 2u < pc.OW) dst[o + 2u] = acc2[i] + b;
+            if (owb + 3u < pc.OW) dst[o + 3u] = acc3[i] + b;
+        }
+    }
+#else
+    // through the weight tile (every invocation is past the barrier that ends the last unit); then invocation t
+    // writes positions 16 (t % 2) .. + 15 of the tile's weight row t / 2: one run of one plane
+    [[unroll]] for (uint i = 0u; i < 4u; ++i) {
+        tile_w[(4u * tn + i) * 8u + tm] = vec4(acc0[i], acc1[i], acc2[i], acc3[i]);
+    }
+    barrier();
+    const uint n = n0 + (tid >> 1u);
+    if (n < pc.N) {
+        const float b = bias[pc.b_off + n];
+        const uint m0 = ow0 + 16u * (tid & 1u);
+        const uint o = pc.d_off + pc.plane * n + pc.OW * row + m0;
+        [[unroll]] for (uint q = 0u; q < 4u; ++q) {
+            const vec4 r = tile_w[(tid >> 1u) * 8u + 4u * (tid & 1u) + q] + b;
+            if (m0 + 4u * q + 0u < pc.OW) dst[o + 4u * q + 0u] = r.x;
+            if (m0 + 4u * q + 1u < pc.OW) dst[o + 4u * q + 1u] = r.y;
+            if (m0 + 4u * q + 2u < pc.OW) dst[o + 4u * q + 2u] = r.z;
+            if (m0 + 4u * q + 3u < pc.OW) dst[o + 4u * q + 3u] = r.w;
+        }
+    }
+#endif
+}

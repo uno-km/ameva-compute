@@ -4,7 +4,8 @@
 - Sources read: local `dev/termux/termux-diffusion` only (sd.cpp `50d6405`, ggml `8e800cef` plus an uncommitted 60-line
   `ggml-vulkan.cpp` change). No remote fetch. The A35 device binary is the 2.7.9 bundle `sd-cli` (older sd.cpp layout),
   so line numbers of the local tree are approximate for it.
-- Status: measurements and design. No kernel is written yet. Section 5 lists what is predicted and not measured.
+- Status: measurements and design. Step 1 of section 6 (the kernel in isolation, `ameva_conv_bench`) is measured on
+  three devices: section 7. Nothing is in ggml-ameva yet. Section 5 lists what is predicted and not measured.
 
 ## 1. Measured: 2D VAE decode on the Galaxy A35 (Mali-G68, Vulkan)
 
@@ -122,11 +123,12 @@ devices where the VAE op census passes (`tests/ameva_graph_census.cpp` extended 
 
 ## 5. Predicted, not measured
 
-- That staging from the source tensor keeps the tile kernels' throughput. Three op-count predictions missed on
-  2026-10-05, so this is tested first, in isolation.
-- Exact mode with f16 weights is assumed to match the q8_0 / f32 timing (weights are small and cached per tile).
+- ~~That staging from the source tensor keeps the tile kernels' throughput.~~ Measured, section 7: it does on Adreno
+  (faster than the matrix); on Mali-G68 the staging is cheaper than the matrix's but the planar output costs 16 %.
+- ~~Exact mode with f16 weights is assumed to match the q8_0 / f32 timing.~~ Measured, section 7: 10-15 % slower on
+  Mali-G68 with the exact decoder, 1-5 % with the built-in conversion; equal on Adreno 830, 9-15 % slower on Adreno 650.
 - Image effect of int8 activations through about 36 stacked convolutions.
-- Adreno (S25, S20) and the other Mali devices: nothing in this document was measured there.
+- The other Mali devices (S21, A53), and everything of sections 1 and 2 on Adreno (no ggml-vulkan time there).
 - At 164-191 GFLOPS a 480x832 Wan latent frame would take about 75 s on the A35 (13.5 TFLOP), 81 frames about 26 min.
 
 ## 6. Order of work and gates
@@ -141,3 +143,66 @@ devices where the VAE op census passes (`tests/ameva_graph_census.cpp` extended 
 
 Usable today without new code (measured in section 1): 24-latent tiles keep the decode on the GPU on the A35,
 92.37 s against 432.74 s for a 256x256 image.
+
+## 7. Measured: `ameva_conv_bench` (step 1 of section 6, 2026-10-07)
+
+`tests/ameva_conv_bench.cpp` through `ac_runtime` directly (Vulkan), kernel `shaders/ameva_conv.comp`, f16 unit
+decoder in `ameva_qdecode.glsl` (`TYPE_F16`), script `scripts/termux/lab/conv_bench.sh`. Logs:
+`~/abi-lab/out-conv/run_final.log` on each device (A35 also `out-conv-unpack/`).
+
+- Paths per weight type: **matrix** = `ameva_qgemm` on a column matrix built on the CPU (dispatches sliced as
+  ggml-ameva does), **conv_s** / **conv_v** = `ameva_conv` with scalar / aligned-vec4 staging from the source tensor,
+  **conv_v_direct** = `conv_v` with each invocation writing its own output block.
+- Correctness: every destination is filled with NaN bytes, computed, and compared with an f32 CPU convolution that
+  uses the same dequantised weights and summation order, on the four shapes below and four small ones (4 -> 3
+  channels, 1x1, stride 2 with dilation 2, 33 -> 65 channels 3x3x3 causal). A35: equal bit for bit to the reference
+  built with fused multiply-add (largest difference 0 on all 60 checks). S25 and S20: 5.0e-7 to 2.9e-6 of the rms
+  from that reference, and equal bit for bit to a reference with a rounded product and a rounded sum per term
+  (`AMEVA_CONV_BENCH_REF=muladd`, 36 checks each): these two drivers do not fuse the kernels' `fma()`.
+- The kernel differs from section 4 K1 in two points: the order of the K units comes from a host table (tap offset
+  and channel group per unit), and the output goes through shared memory.
+
+Wall ms per convolution, mean of 4 rounds after one that is not counted, paths in turn.
+
+A35, Mali-G68, cores 0-2, GPU at 949 MHz in most samples:
+
+| source -> channels, kernel | GFLOP | q8_0 matrix | q8_0 conv_v | f16 matrix | f16 conv_v | f16 conv_v, built-in conversion |
+|---|---|---|---|---|---|---|
+| 128x128x256 -> 256, 3x3 | 19.33 | 242.2 | 274.9 | 250.4 | 307.0 | 277.1 |
+| 64x64x512 -> 512, 3x3 | 19.33 | 246.2 | 273.1 | 257.1 | 315.1 | 287.4 |
+| 256x256x128 -> 128, 3x3 | 19.33 | 238.4 | 274.4 | 247.9 | 309.4 | 277.5 |
+| 96x96x4x96 -> 96, 3x3x3 causal | 18.35 | 293.3 | 347.5 | 311.2 | 381.3 | 341.8 |
+
+S25, Adreno 830, cores 0-1,4-5, `max_gpuclk` 832 MHz, an idle `llama-server` of another session present; and S20,
+Turnip Adreno 650, cores 0-7, `max_gpuclk` 587 MHz. matrix / conv_s:
+
+| source -> channels, kernel | S25 q8_0 | S25 f16 | S20 q8_0 | S20 f16 |
+|---|---|---|---|---|
+| 128x128x256 -> 256, 3x3 | 57.3 / 45.2 | 56.3 / 45.5 | 176.3 / 153.2 | 200.0 / 170.2 |
+| 64x64x512 -> 512, 3x3 | 56.8 / 45.5 | 55.5 / 45.5 | 179.0 / 151.6 | 205.7 / 174.0 |
+| 256x256x128 -> 128, 3x3 | 56.5 / 45.0 | 55.6 / 45.6 | 171.7 / 170.9 | 196.3 / 189.7 |
+| 96x96x4x96 -> 96, 3x3x3 causal | 71.0 / 55.7 | 70.0 / 56.0 | 213.7 / 186.4 | 234.6 / 203.6 |
+
+- **Staging from the source tensor against the matrix.** Adreno 830: 1.22-1.28x faster (328-430 GFLOPS). Adreno 650:
+  1.15-1.18x faster on three shapes, 1.00-1.03x on 256x256x128. Mali-G68: 0.84-0.90x with q8_0 weights, 0.80-0.82x
+  with f16. On Adreno the scalar and vec4 staging and the two output forms are within 7 % of each other.
+- **Where the Mali-G68 time is** (ablation builds, 128x128x256 -> 256, q8_0, ms): `ameva_qgemm` 236 = 201 without
+  its activation loads + 35; `ameva_conv` 273 = 199 (no loads, row-major output) + 45 (planar output) + 29 (source
+  loads). The staging itself is cheaper from the source than from the matrix. The deficit is the planar output of
+  ggml's layout: a tile writes 64 runs into 64 planes. MUL_MAT does not write that layout (in the product graph the
+  CONT after the permute does, and the 1180 ms of section 2 do not contain it).
+- Against that cost: one plane run per invocation through shared memory gives q8_0 275 against 278 ms and f16 307
+  against 325. Also measured, each within 3 ms: a flat against a 3D grid (270 / 269), tap-major against group-major
+  unit order (275 / 272), tap counters in the kernel against the unit table. The padding mask costs 0-3 ms, the
+  third aligned load and the shift 0-5 ms.
+- **f16 decode** (Mali-G68, matrix path, the three 3x3 shapes): `ameva_h2f` per element 288-302 ms, branch-free
+  `h2f4` 248-257, the built-in `unpackHalf2x16` (`F16_UNPACK`) 219-239. With the built-in conversion the A35 output
+  is still equal bit for bit to the reference (the random weights contain f16 subnormals). No other driver was
+  checked for that.
+- **Gate of step 1** (A35, 4x ggml-vulkan MUL_MAT f16 = 1180 ms, exact mode): `conv_v` f16 with the exact decoder
+  3.74-3.84x: not met. With the built-in conversion 4.10-4.26x, with q8_0 weights 4.29-4.32x. The convolution node
+  also adds the bias and writes the planar layout, which MUL_MAT does not. S25 and S20 have no ggml-vulkan time.
+- Open: (1) which f16 decoder the product kernel uses (exact everywhere, or the built-in one after a check of
+  subnormals on the device at load); (2) a channels-last activation layout inside ggml-ameva would remove the planar
+  output and the shift, and the matrix columns above are what such a kernel reads and writes; (3) int8 activations
+  (`ameva_mmq` structure) are not in this bench; (4) a source or destination above one binding is refused by the bench.
