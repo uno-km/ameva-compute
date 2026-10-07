@@ -62,7 +62,15 @@ void api_append(size_t* n, const char* fmt, const char* a, const char* b) {
 }
 
 void api_load() {
-    /* AMEVA_OPENCL_LIBRARY names the driver explicitly; otherwise the vendor locations of Android come first. */
+    /* Where the driver comes from, in this order:
+       1. AMEVA_OPENCL_LIBRARY=<path>: that library and nothing else;
+       2. Android: the vendor's libOpenCL.so through libvndksupport's android_load_sphal_library, the way the system's
+          Vulkan loader opens the vendor Vulkan driver. The driver and its dependencies then live in the vendor ("sphal")
+          linker namespace and the process keeps its own libraries; no LD_LIBRARY_PATH is involved (putting
+          /system/lib64 there to make /vendor reachable replaces the libc++_shared.so of a Termux process: Galaxy A53,
+          2026-10-07, "cannot locate symbol ...filesystem..." in the llama bundle);
+       3. the dynamic linker's own search: vendor paths (reachable only when LD_LIBRARY_PATH names their directories)
+          and libOpenCL.so of a Linux system. */
     const char* forced = getenv("AMEVA_OPENCL_LIBRARY");
     const char* const candidates[] = { "/vendor/lib64/libOpenCL.so", "/vendor/lib64/egl/libGLES_mali.so",
                                        "/system/vendor/lib64/libOpenCL.so", "/vendor/lib64/libmali.so",
@@ -74,6 +82,21 @@ void api_load() {
         if (!lib) api_append(&n, " [%s: %s]", forced, dlerror());
         else snprintf(g_api.library, sizeof(g_api.library), "%s", forced);
     } else {
+        if (void* vndk = dlopen("libvndksupport.so", RTLD_NOW | RTLD_LOCAL)) {
+            typedef void* (*load_sphal_fn)(const char*, int);
+            load_sphal_fn load_sphal = nullptr;
+            void* sym = dlsym(vndk, "android_load_sphal_library");
+            if (sym) memcpy(&load_sphal, &sym, sizeof(sym));
+            if (load_sphal) {
+                lib = load_sphal("libOpenCL.so", RTLD_NOW | RTLD_LOCAL);
+                if (lib) {
+                    snprintf(g_api.library, sizeof(g_api.library), "libOpenCL.so (vendor namespace)");
+                } else {
+                    const char* e = dlerror();
+                    api_append(&n, " [%s: %.160s]", "android_load_sphal_library(libOpenCL.so)", e ? e : "?");
+                }
+            }
+        }
         for (int i = 0; candidates[i] && !lib; ++i) {
             lib = dlopen(candidates[i], RTLD_NOW | RTLD_LOCAL);
             if (!lib) {
@@ -115,10 +138,8 @@ AcResult api() {
     std::call_once(g_api_once, api_load);
     if (g_api_result == AC_ERR_DRIVER_NOT_FOUND) {
         fprintf(stderr,
-                "ac_runtime(opencl): no OpenCL driver could be opened:%s. On Android the linker namespace of an app "
-                "hides /vendor libraries unless LD_LIBRARY_PATH includes their directories, e.g. "
-                "LD_LIBRARY_PATH=/system/lib64:/vendor/lib64:/vendor/lib64/egl:...; AMEVA_OPENCL_LIBRARY=<path> selects "
-                "the driver library.\n",
+                "ac_runtime(opencl): no OpenCL driver could be opened:%s. AMEVA_OPENCL_LIBRARY=<path> selects the "
+                "driver library.\n",
                 g_api_error);
     } else if (g_api_result != AC_SUCCESS) {
         fprintf(stderr, "ac_runtime(opencl): the OpenCL driver %s lacks entry points this backend needs:%s\n",
@@ -192,6 +213,7 @@ struct AcClContext {
     size_t max_wg = 0, max_items[3] = { 0, 0, 0 };
     uint32_t subgroup_size = 0;
     uint32_t integer_dot = 0, integer_dot_accelerated = 0;
+    bool wait_spin = true; /* AMEVA_CL_WAIT, see ac_cl_event_wait */
     /* program binaries by sha256(device, driver, options, entry point, source) */
     std::mutex cache_mutex;
     std::unordered_map<std::string, std::vector<unsigned char>> binaries;
@@ -210,6 +232,8 @@ struct AcClKernel {
     AcDim3 local = { 1, 1, 1 };
     uint32_t binding_count = 0;
     size_t push_size = 0;
+    bool takes_ranges = false; /* one more argument: the byte size of every bound range (binding_count uints) */
+    std::string name;          /* metadata kernel_name, for messages and the dispatch trace */
     char identity[65] = { 0 };
     std::atomic<int> refs{ 1 }; /* the owner plus recorded, not yet enqueued dispatches */
 };
@@ -233,6 +257,7 @@ void kernel_release(AcClKernel* k) {
 struct PendingDispatch {
     AcClKernel* kernel;
     void* args[16];
+    uint32_t ranges[16];
     unsigned char push[128];
     size_t global[3];
     size_t local[3];
@@ -246,6 +271,7 @@ struct AcClBatch {
     enum State { RECORDING, SUBMITTED, ABORTED } state = RECORDING;
     std::vector<PendingDispatch> pending;
     std::vector<cl_event> kernel_events; /* every enqueued kernel, when the batch records timestamps */
+    std::vector<std::string> trace_names; /* kernel name and work-items per event, when AMEVA_CL_TRACE is set */
     cl_event marker = nullptr;
     uint32_t dispatches = 0, barriers = 0, flushes = 0;
 };
@@ -268,6 +294,15 @@ AcResult ac_cl_context_create(AcClContext** out_ctx) {
     std::vector<cl_platform_id> plats(np);
     g_api.clGetPlatformIDs(np, plats.data(), nullptr);
     AcClContext* c = new AcClContext();
+    if (const char* w = getenv("AMEVA_CL_WAIT")) {
+        if (!strcmp(w, "spin")) c->wait_spin = true;
+        else if (!strcmp(w, "sleep")) c->wait_spin = false;
+        else {
+            fprintf(stderr, "ac_runtime(opencl): AMEVA_CL_WAIT must be spin or sleep (got \"%s\")\n", w);
+            delete c;
+            return AC_ERR_INVALID_ARGUMENT;
+        }
+    }
     for (cl_platform_id p : plats) {
         cl_device_id d = nullptr;
         if (g_api.clGetDeviceIDs(p, CL_DEVICE_TYPE_GPU, 1, &d, nullptr) == CL_SUCCESS && d) {
@@ -284,7 +319,10 @@ AcResult ac_cl_context_create(AcClContext** out_ctx) {
     cl_device_svm_capabilities svm = 0;
     g_api.clGetDeviceInfo(c->device, CL_DEVICE_SVM_CAPABILITIES, sizeof(svm), &svm, nullptr);
     c->name = device_string(c->device, CL_DEVICE_NAME);
-    c->driver = device_string(c->device, CL_DRIVER_VERSION);
+    // What identifies the driver build differs by vendor: Mali reports CL_DRIVER_VERSION "3.0" for every DDK and the
+    // DDK build in CL_DEVICE_VERSION ("OpenCL 3.0 v1.r32p1-01bet2-...<hash>"); Adreno reports the compiler build in
+    // CL_DRIVER_VERSION. Both strings go into the identity the program cache and its users key on.
+    c->driver = device_string(c->device, CL_DRIVER_VERSION) + " / " + device_string(c->device, CL_DEVICE_VERSION);
     c->extensions = device_string(c->device, CL_DEVICE_EXTENSIONS);
     if (!(svm & CL_DEVICE_SVM_COARSE_GRAIN_BUFFER)) {
         fprintf(stderr, "ac_runtime(opencl): %s has no coarse-grained SVM buffers (OpenCL 2.0+ required)\n",
@@ -468,7 +506,7 @@ cl_int build(AcClContext* c, cl_program p, const char* options, const char* name
 } // namespace
 
 AcResult ac_cl_kernel_create(AcClContext* c, const char* source, size_t source_size, const char* options,
-                             const AcKernelRuntimeMetadata* m, AcClKernel** out_kernel) {
+                             const AcKernelRuntimeMetadata* m, bool takes_ranges, AcClKernel** out_kernel) {
     *out_kernel = nullptr;
     const std::string src(source, source_size ? source_size : strlen(source));
     const std::string opts = options ? options : "";
@@ -528,11 +566,12 @@ AcResult ac_cl_kernel_create(AcClContext* c, const char* source, size_t source_s
     }
     cl_uint nargs = 0;
     g_api.clGetKernelInfo(k, CL_KERNEL_NUM_ARGS, sizeof(nargs), &nargs, nullptr);
-    const cl_uint want = m->binding_count + (m->push_constant_size > 0 ? 1u : 0u);
+    const cl_uint want = m->binding_count + (m->push_constant_size > 0 ? 1u : 0u) + (takes_ranges ? 1u : 0u);
     if (nargs != want) {
-        fprintf(stderr, "ac_runtime(opencl): kernel '%s' takes %u arguments; its metadata asks for %u (%u bindings%s)\n",
+        fprintf(stderr, "ac_runtime(opencl): kernel '%s' takes %u arguments; its description asks for %u (%u bindings%s%s)\n",
                 m->kernel_name, (unsigned)nargs, (unsigned)want, (unsigned)m->binding_count,
-                m->push_constant_size > 0 ? " and the push-constant struct" : "");
+                m->push_constant_size > 0 ? ", the push-constant struct" : "",
+                takes_ranges ? ", the binding ranges" : "");
         g_api.clReleaseKernel(k);
         g_api.clReleaseProgram(prog);
         return AC_ERR_KERNEL_ARG_INVALID;
@@ -554,6 +593,8 @@ AcResult ac_cl_kernel_create(AcClContext* c, const char* source, size_t source_s
     ak->local = m->local_size;
     ak->binding_count = m->binding_count;
     ak->push_size = m->push_constant_size;
+    ak->takes_ranges = takes_ranges;
+    ak->name = m->kernel_name ? m->kernel_name : "?";
     memcpy(ak->identity, ident, sizeof(ident));
     *out_kernel = ak;
     return AC_SUCCESS;
@@ -578,6 +619,18 @@ bool batch_timestamps(const AcClBatch* b) {
     return (b->flags & (AC_BATCH_FLAG_TIMESTAMPS | AC_BATCH_FLAG_DISPATCH_TIMESTAMPS)) != 0;
 }
 
+/* AMEVA_CL_TRACE=<file>: every batch that records dispatch timestamps appends one line per dispatch when its times
+   are read: batch number, dispatch number, kernel, work-items, and the driver's four profiling counters in
+   microseconds from the first dispatch's QUEUED (queued, submitted, started, ended). The per-dispatch time of the
+   C ABI is end minus the previous end; the trace shows what of it the kernel ran and what the queue waited. */
+const char* trace_path() {
+    static const char* p = [] {
+        const char* e = getenv("AMEVA_CL_TRACE");
+        return (e && *e) ? e : (const char*)nullptr;
+    }();
+    return p;
+}
+
 void pending_drop(AcClBatch* b) {
     for (PendingDispatch& d : b->pending) kernel_release(d.kernel);
     b->pending.clear();
@@ -594,7 +647,10 @@ AcResult pending_enqueue(AcClBatch* b) {
         cl_int e = CL_SUCCESS;
         for (uint32_t a = 0; a < k->binding_count && e == CL_SUCCESS; ++a)
             e = g_api.clSetKernelArgSVMPointer(k->kernel, a, d.args[a]);
-        if (e == CL_SUCCESS && k->push_size > 0) e = g_api.clSetKernelArg(k->kernel, k->binding_count, k->push_size, d.push);
+        cl_uint next = k->binding_count;
+        if (e == CL_SUCCESS && k->push_size > 0) e = g_api.clSetKernelArg(k->kernel, next++, k->push_size, d.push);
+        if (e == CL_SUCCESS && k->takes_ranges)
+            e = g_api.clSetKernelArg(k->kernel, next, sizeof(uint32_t) * k->binding_count, d.ranges);
         cl_event ev = nullptr;
         if (e == CL_SUCCESS)
             e = g_api.clEnqueueNDRangeKernel(b->ctx->queue, k->kernel, 3, nullptr, d.global, d.local, 0, nullptr,
@@ -605,7 +661,11 @@ AcResult pending_enqueue(AcClBatch* b) {
             r = map_cl_error(e);
             break;
         }
-        if (ev) b->kernel_events.push_back(ev);
+        if (ev) {
+            b->kernel_events.push_back(ev);
+            if (trace_path())
+                b->trace_names.push_back(k->name + " " + std::to_string(d.global[0] * d.global[1] * d.global[2]));
+        }
         kernel_release(k);
     }
     /* on failure dispatch i and the rest are not enqueued, and the batch is aborted */
@@ -642,6 +702,7 @@ AcResult ac_cl_batch_dispatch(AcClBatch* b, AcClKernel* k, AcClBuffer* const* bu
         if (ranges[i] == 0 || offsets[i] > buf->size || ranges[i] > buf->size - offsets[i]) return AC_ERR_INVALID_BUFFER_SIZE;
         if (offsets[i] % 64 != 0) return AC_ERR_BUFFER_ALIGNMENT_INVALID;
         d.args[i] = (char*)buf->ptr + offsets[i];
+        d.ranges[i] = ranges[i] > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)ranges[i];
     }
     if (push_size) memcpy(d.push, push, push_size); /* the rest of the declared struct stays zero */
     const uint32_t lsz[3] = { k->local.x, k->local.y, k->local.z }, gsz[3] = { grid.x, grid.y, grid.z };
@@ -735,6 +796,27 @@ AcResult ac_cl_batch_get_dispatch_times(const AcClBatch* b, uint64_t* out_ns, ui
         prev_end = en;
     }
     if (out_count) *out_count = n;
+    if (trace_path() && n && b->trace_names.size() == n) {
+        static std::atomic<uint32_t> batch_seq{ 0 };
+        const uint32_t seq = batch_seq.fetch_add(1);
+        if (FILE* f = fopen(trace_path(), "a")) {
+            cl_ulong t0 = 0;
+            g_api.clGetEventProfilingInfo(b->kernel_events[0], CL_PROFILING_COMMAND_QUEUED, sizeof(t0), &t0, nullptr);
+            for (uint32_t i = 0; i < n; ++i) {
+                cl_ulong t[4] = { 0, 0, 0, 0 };
+                const cl_profiling_info what[4] = { CL_PROFILING_COMMAND_QUEUED, CL_PROFILING_COMMAND_SUBMIT,
+                                                    CL_PROFILING_COMMAND_START, CL_PROFILING_COMMAND_END };
+                for (int j = 0; j < 4; ++j)
+                    g_api.clGetEventProfilingInfo(b->kernel_events[i], what[j], sizeof(t[j]), &t[j], nullptr);
+                fprintf(f, "%u %u %s %.1f %.1f %.1f %.1f\n", (unsigned)seq, (unsigned)i, b->trace_names[i].c_str(),
+                        (double)(int64_t)(t[0] - t0) / 1e3, (double)(int64_t)(t[1] - t0) / 1e3,
+                        (double)(int64_t)(t[2] - t0) / 1e3, (double)(int64_t)(t[3] - t0) / 1e3);
+            }
+            fclose(f);
+        } else {
+            fprintf(stderr, "ac_runtime(opencl): AMEVA_CL_TRACE file %s could not be opened\n", trace_path());
+        }
+    }
     return AC_SUCCESS;
 }
 
@@ -751,10 +833,35 @@ void ac_cl_batch_get_stats(const AcClBatch* b, AcBatchStats* s) {
 /* Events                                                                                                             */
 /* ------------------------------------------------------------------------------------------------------------------ */
 
+/* How the waiting thread passes the time until its batch is done (AMEVA_CL_WAIT, read when the context is created):
+     spin (default)  it reads the batch's status in a loop without sleeping: one CPU core stays busy while the GPU works
+     sleep           it sleeps 50 us between reads, or blocks in clWaitForEvents when there is no timeout: no CPU use
+   Why spin: with every CPU core idle, the same kernels on the same data took up to twice as long on Galaxy A53
+   (Mali-G68, DDK r32p1; 2026-10-07, Qwen2.5-0.5B token generation, AMEVA_CL_TRACE): the one-row product q5_0
+   4864x896 520 us on average against 326 us, the output projection 26.9 ms against 12.4 ms. The slow stretches last
+   tens of milliseconds, there is no time between the kernels, and the GPU clock stays at its maximum. One busy
+   core of either cluster removes them (kernel time per token 75 ms -> 46 ms, 11.9 -> 19.2 tokens/s; the same
+   plugin on Vulkan 14.5 -> 15.0). What below the driver slows down is not visible from an application; holding a
+   core awake is the means an application has. The price is that core's power for the duration of every batch. */
 AcResult ac_cl_event_wait(AcClEvent* ev, uint64_t timeout_ns) {
     if (ev->done_ns) return AC_SUCCESS;
     cl_int st = CL_QUEUED;
-    if (timeout_ns == UINT64_MAX) {
+    if (ev->ctx->wait_spin) {
+        const uint64_t until = timeout_ns == UINT64_MAX ? UINT64_MAX : now_ns() + timeout_ns;
+        for (;;) {
+            if (g_api.clGetEventInfo(ev->marker, CL_EVENT_COMMAND_EXECUTION_STATUS, sizeof(st), &st, nullptr) != CL_SUCCESS)
+                return AC_ERR_DRIVER_CRASH_OR_LOST;
+            if (st == CL_COMPLETE) break;
+            if (st < 0) {
+                fprintf(stderr, "ac_runtime(opencl): batch failed on the device (status %d)\n", (int)st);
+                return AC_ERR_DRIVER_CRASH_OR_LOST;
+            }
+            /* about 20 us of clock reads (no system call) between two reads of the status */
+            const uint64_t t = now_ns();
+            if (t >= until) return AC_ERR_LAUNCH_TIMEOUT;
+            while (now_ns() - t < 20000) {}
+        }
+    } else if (timeout_ns == UINT64_MAX) {
         const cl_int e = g_api.clWaitForEvents(1, &ev->marker);
         g_api.clGetEventInfo(ev->marker, CL_EVENT_COMMAND_EXECUTION_STATUS, sizeof(st), &st, nullptr);
         if (e != CL_SUCCESS || st != CL_COMPLETE) {

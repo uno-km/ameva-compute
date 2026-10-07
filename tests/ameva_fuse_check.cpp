@@ -12,7 +12,7 @@
 // double-precision reference from ggml's dequantization to 1e-5 relative; the fused-pair counter moved by 5 when
 // fusion is on (AMEVA_FUSE unset or 1) and by 0 with AMEVA_FUSE=0. It prints FUSE_HASH, a hash of all result bits:
 // the same build must print the same hash with AMEVA_FUSE=0 and 1 (fusion uses the f32 operations of the unfused
-// nodes). Exit 0 only if every check passes.
+// nodes). The check sets AMEVA_MMVQ=0 (f32 token-generation kernels, see main). Exit 0 only if every check passes.
 #include "ggml.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
@@ -85,6 +85,15 @@ static void check(const char* name, ggml_tensor* t, const std::vector<double>& r
 }
 
 int main() {
+    // The reference is f32 arithmetic on ggml's dequantized weights. The measured int8 token-generation layouts
+    // (ameva_mmvq, chosen where they are faster) quantize the activations and differ from it by about 1e-3, so this
+    // check runs with them off; another setting is refused instead of being compared against the wrong tolerance.
+    const char* mv = getenv("AMEVA_MMVQ");
+    if (mv && strcmp(mv, "0") != 0) {
+        fprintf(stderr, "ameva_fuse_check compares the f32 kernels: AMEVA_MMVQ must be unset or 0 (got \"%s\")\n", mv);
+        return 2;
+    }
+    setenv("AMEVA_MMVQ", "0", 1);
     ggml_backend_t be = ggml_backend_ameva_init(0);
     if (!be) {
         fprintf(stderr, "ggml_backend_ameva_init failed\n");

@@ -9,7 +9,9 @@
  *     (the SVM pointer is not host-accessible without a map); ac_cl_buffer_address is for offset arithmetic only.
  *   - Kernels are OpenCL C sources. Argument i < binding_count is the global pointer of binding i (buffer address +
  *     binding offset); when the metadata declares push constants, the next argument is a struct of exactly that size
- *     passed by value (shorter push data is zero-padded). The kernel's argument count is checked at creation.
+ *     passed by value (shorter push data is zero-padded). A kernel created with takes_ranges has one more argument
+ *     after these: the struct of binding_count uint that receives the byte size of every bound range (clamped to
+ *     2^32 - 1). The kernel's argument count is checked at creation.
  *   - Batches keep Vulkan's semantics: nothing is enqueued before ac_cl_batch_flush / ac_cl_batch_submit, and the
  *     dispatches of a batch run in recording order on one in-order queue (barriers are implied by that order).
  */
@@ -43,7 +45,7 @@ AcResult ac_cl_buffer_read(AcClBuffer* buf, size_t offset, void* dst, size_t siz
 AcResult ac_cl_buffer_fill(AcClBuffer* buf, size_t offset, size_t size_bytes, uint8_t value);
 
 AcResult ac_cl_kernel_create(AcClContext* ctx, const char* source, size_t source_size, const char* build_options,
-                             const AcKernelRuntimeMetadata* metadata, AcClKernel** out_kernel);
+                             const AcKernelRuntimeMetadata* metadata, bool takes_ranges, AcClKernel** out_kernel);
 AcResult ac_cl_kernel_destroy(AcClKernel* kernel);
 AcDim3 ac_cl_kernel_local_size(const AcClKernel* kernel);
 size_t ac_cl_kernel_push_constant_size(const AcClKernel* kernel);

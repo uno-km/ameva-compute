@@ -960,8 +960,13 @@ AcResult ac_runtime_kernel_create_from_source(AcContext* ctx, const AcKernelSour
     if (m->specialization_schema_count != 0) {
         return AC_ERR_FEATURE_NOT_SUPPORTED; /* OpenCL C takes compile-time values as build options */
     }
+    if ((desc->flags & ~AC_KERNEL_SOURCE_BINDING_RANGES) != 0 ||
+        ((desc->flags & AC_KERNEL_SOURCE_BINDING_RANGES) && m->binding_count == 0)) {
+        return AC_ERR_INVALID_ARGUMENT;
+    }
     AcClKernel* cl_kernel = NULL;
-    AcResult res = ac_cl_kernel_create(ctx->cl_ctx, desc->source, desc->source_size, desc->build_options, m, &cl_kernel);
+    AcResult res = ac_cl_kernel_create(ctx->cl_ctx, desc->source, desc->source_size, desc->build_options, m,
+                                       (desc->flags & AC_KERNEL_SOURCE_BINDING_RANGES) != 0, &cl_kernel);
     if (res != AC_SUCCESS) {
         return res;
     }

@@ -608,8 +608,10 @@ AcResult ac_runtime_batch_get_stats(
  *     ac_runtime_buffer_get_mapped_ptr, _flush, _invalidate and _is_coherent return AC_ERR_BUFFER_NOT_MAPPED.
  *     ac_runtime_buffer_get_address gives a stable address for offset arithmetic, not for host access.
  *   - Kernels come from OpenCL C (ac_runtime_kernel_create_from_source). Argument i < binding_count is the pointer of
- *     binding i (the bound range starts there); with push_constant_size > 0 the last argument is a struct of exactly
- *     that size passed by value (shorter push data is zero-padded). The argument count is checked at creation.
+ *     binding i (the bound range starts there); with push_constant_size > 0 the next argument is a struct of exactly
+ *     that size passed by value (shorter push data is zero-padded). With AC_KERNEL_SOURCE_BINDING_RANGES the kernel
+ *     declares one more argument after these, a struct of binding_count uint: it receives the byte size of every
+ *     bound range (what a GLSL shader reads with buffer.length()). The argument count is checked at creation.
  *   - Batches: nothing runs before ac_runtime_batch_flush / _submit; the dispatches of a context run in recording
  *     order on one in-order queue, so every dispatch sees the writes of the earlier ones (barriers are implied).
  *   - Host access APIs are ordered after every dispatch already flushed or submitted on the context, and before the
@@ -620,6 +622,10 @@ AcResult ac_runtime_batch_get_stats(
  * @brief OpenCL C kernel creation descriptor (AC_BACKEND_OPENCL contexts).
  * metadata: as for SPIR-V kernels; entry_point is the __kernel function, expected_spirv_sha256 is not used.
  */
+/** The kernel takes, after the bindings and the push-constant struct, the struct of bound range sizes (needs
+ *  binding_count > 0). */
+#define AC_KERNEL_SOURCE_BINDING_RANGES (1u << 0)
+
 typedef struct {
     uint32_t abi_version;                    /* Must match AC_ABI_VERSION */
     uint32_t struct_size;                    /* Must match sizeof(AcKernelSourceDesc) */
@@ -627,6 +633,7 @@ typedef struct {
     size_t source_size;                      /* bytes of source; 0: NUL-terminated */
     const char* build_options;               /* NULL or options for the OpenCL C compiler */
     const AcKernelRuntimeMetadata* metadata;
+    uint32_t flags;                          /* AC_KERNEL_SOURCE_* (unknown bits rejected) */
 } AcKernelSourceDesc;
 
 /** @brief The backend the context was created for. */

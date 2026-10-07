@@ -4,6 +4,7 @@
 #include "ggml-backend-impl.h"
 #include "ac_runtime.h"
 #include "ggml_ameva_kernels_spv.h"
+#include "ggml_ameva_kernels_cl.h" // the same kernels as OpenCL C (scripts/glsl_to_opencl.py), table by table
 
 #include <algorithm>
 #include <atomic>
@@ -265,8 +266,21 @@ static AcBuffer* s_status = nullptr; // [0] out-of-range index count, [1] lowest
 // a graph is recorded (ameva_scratch_reserve) and reused by every node of the graph; the hazard tracker orders reuse.
 static AcBuffer* s_scratch = nullptr;
 static uint64_t s_scratch_bytes = 0;
-static uint32_t* s_status_map = nullptr;
 static std::mutex s_mutex;          // context, kernel and status-buffer creation, teardown
+
+// AMEVA_BACKEND selects the ac_runtime backend of this process: "vulkan" (default) or "opencl"
+// (docs/design/opencl-prompt-path.md, stage B: the same graph engine and the same kernels, translated to OpenCL C,
+// on AC_BACKEND_OPENCL; Mali exposes its int8 dot product there and not in Vulkan). Any other value aborts: a
+// request for a backend is never answered with another one.
+bool ameva_backend_is_opencl(void) {
+    static const bool cl = [] {
+        const char* e = getenv("AMEVA_BACKEND");
+        if (!e || !*e || strcmp(e, "vulkan") == 0) return false;
+        if (strcmp(e, "opencl") == 0) return true;
+        GGML_ABORT("ggml-ameva: AMEVA_BACKEND must be \"vulkan\" or \"opencl\" (got \"%s\")", e);
+    }();
+    return cl;
+}
 static std::mutex s_compute_mutex;  // graph_compute (the status buffer is shared)
 
 // Pipeline cache file: compiled pipelines of earlier runs, so that the first graph does not compile every kernel
@@ -286,7 +300,9 @@ static std::string ameva_pipeline_cache_path(void) {
         fprintf(stderr, "ggml-ameva: pipeline cache off: HOME is not set (set AMEVA_PIPELINE_CACHE=<file>)\n");
         return std::string();
     }
-    return std::string(home) + "/.cache/ameva/ggml-ameva-pipelines.bin";
+    // OpenCL program binaries are another format: a file of their own, so switching backends keeps both caches
+    return std::string(home) + (ameva_backend_is_opencl() ? "/.cache/ameva/ggml-ameva-programs-cl.bin"
+                                                          : "/.cache/ameva/ggml-ameva-pipelines.bin");
 }
 
 // called with s_mutex held, right after the context was created
@@ -349,6 +365,27 @@ static std::string ameva_device_key(AcContext* ctx) {
     if (ac_runtime_pipeline_cache_get_data(ctx, nullptr, &size) != AC_SUCCESS || size < 32) return std::string();
     std::vector<uint8_t> data(size);
     if (ac_runtime_pipeline_cache_get_data(ctx, data.data(), &size) != AC_SUCCESS || size < 32) return std::string();
+    if (ameva_backend_is_opencl()) {
+        // ac_runtime's OpenCL program cache: "ACCLBIN1", then length-prefixed device name and driver identity (the
+        // driver and device version strings; on Mali the second carries the DDK build). The key is "opencl:" and the
+        // 64-bit FNV-1a hash of both fields in hex: the strings are long and contain blanks, the tune file keeps the
+        // key in one blank-separated field of at most 127 characters. A key only selects cached measurements.
+        if (memcmp(data.data(), "ACCLBIN1", 8) != 0) return std::string();
+        uint64_t h = 1469598103934665603ull;
+        size_t at = 8;
+        for (int field = 0; field < 2; ++field) {
+            uint32_t len = 0;
+            if (at + 4 > size) return std::string();
+            memcpy(&len, data.data() + at, 4);
+            if (len > size - at - 4) return std::string();
+            // the length prefix is hashed too: ("ab", "c") and ("a", "bc") differ
+            for (size_t i = 0; i < 4 + (size_t)len; ++i) h = (h ^ data[at + i]) * 1099511628211ull;
+            at += 4 + (size_t)len;
+        }
+        char key[32];
+        snprintf(key, sizeof(key), "opencl:%016llx", (unsigned long long)h);
+        return std::string(key);
+    }
     uint32_t h[4];
     memcpy(h, data.data(), sizeof(h));
     if (h[0] < 32 || h[1] != 1u) return std::string();
@@ -392,13 +429,15 @@ static void ameva_pipeline_cache_checkpoint(void) {
 AcContext* ameva_get_ac_context() {
     std::lock_guard<std::mutex> lock(s_mutex);
     if (!s_ctx) {
-        AcContextDesc cdesc = { AC_ABI_VERSION, sizeof(AcContextDesc), AC_BACKEND_VULKAN, 0 };
+        const bool cl = ameva_backend_is_opencl();
+        AcContextDesc cdesc = { AC_ABI_VERSION, sizeof(AcContextDesc), cl ? AC_BACKEND_OPENCL : AC_BACKEND_VULKAN, 0 };
         AcResult res = ac_runtime_context_create(&cdesc, &s_ctx);
         if (res != AC_SUCCESS) {
-            fprintf(stderr, "ggml-ameva: failed to create Vulkan AcContext (code %d)\n", res);
+            fprintf(stderr, "ggml-ameva: failed to create the %s AcContext (code %d)\n", cl ? "OpenCL" : "Vulkan", res);
             s_ctx = nullptr;
             return nullptr;
         }
+        if (cl) fprintf(stderr, "ggml-ameva: AMEVA_BACKEND=opencl: kernels run as OpenCL C on ac_runtime's OpenCL backend\n");
         ameva_increment_context_create_count();
         s_limits.abi_version = AC_ABI_VERSION;
         s_limits.struct_size = sizeof(s_limits);
@@ -454,16 +493,36 @@ static const AcRuntimeBindingDesc kBindings[8] = {
     { 4, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE }, { 5, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE },
     { 6, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE }, { 7, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE }};
 
-// One compute pipeline with the workgroup size `local` of its module
+// One kernel with the workgroup size `local` of its module: the SPIR-V module on Vulkan, its OpenCL C translation
+// `cl_source` (the same entry of the same table of ggml_ameva_kernels_cl.h, after the common prelude) on OpenCL.
 static AcKernel* ameva_make_kernel_ex(const char* name, const uint32_t* spirv, size_t bytes, const char* sha,
-                                      uint32_t bindings, uint32_t push_bytes, AcDim3 local) {
-    AcKernelRuntimeMetadata meta = {
-        name, "main", bindings, kBindings, push_bytes, local, 0, sha, 0, nullptr
-    };
-    AcKernelDesc kdesc = { AC_ABI_VERSION, sizeof(AcKernelDesc), spirv, bytes, &meta, 0, nullptr };
+                                      uint32_t bindings, uint32_t push_bytes, AcDim3 local, const char* cl_source) {
     AcKernel* k = nullptr;
     const uint64_t t0 = ameva_now_ns();
-    AcResult res = ac_runtime_kernel_create(s_ctx, &kdesc, &k);
+    AcResult res;
+    if (ameva_backend_is_opencl()) {
+        AcKernelRuntimeMetadata meta = {
+            name, AMEVA_CL_ENTRY_POINT, bindings, kBindings, push_bytes, local, 0, sha, 0, nullptr
+        };
+        const std::string source = std::string(kAmevaClPrelude) + cl_source;
+        // AMEVA_CL_OPTIONS=<clBuildProgram options> (kernel tuning; default none: the OpenCL C defaults, i.e. IEEE
+        // arithmetic without contraction). The options are part of the program cache key.
+        static const char* options = [] {
+            const char* e = getenv("AMEVA_CL_OPTIONS");
+            if (e && *e) fprintf(stderr, "ggml-ameva: OpenCL kernels built with \"%s\" (AMEVA_CL_OPTIONS)\n", e);
+            return (e && *e) ? e : (const char*)nullptr;
+        }();
+        // every translated kernel takes the bound range sizes after its push constants (scripts/glsl_to_opencl.py)
+        AcKernelSourceDesc sdesc = { AC_ABI_VERSION, sizeof(AcKernelSourceDesc), source.c_str(), source.size(), options,
+                                     &meta, AC_KERNEL_SOURCE_BINDING_RANGES };
+        res = ac_runtime_kernel_create_from_source(s_ctx, &sdesc, &k);
+    } else {
+        AcKernelRuntimeMetadata meta = {
+            name, "main", bindings, kBindings, push_bytes, local, 0, sha, 0, nullptr
+        };
+        AcKernelDesc kdesc = { AC_ABI_VERSION, sizeof(AcKernelDesc), spirv, bytes, &meta, 0, nullptr };
+        res = ac_runtime_kernel_create(s_ctx, &kdesc, &k);
+    }
     g_prof_kcreate_ns.fetch_add(ameva_now_ns() - t0);
     g_prof_kcreate_n.fetch_add(1);
     if (res != AC_SUCCESS) {
@@ -475,9 +534,20 @@ static AcKernel* ameva_make_kernel_ex(const char* name, const uint32_t* spirv, s
 }
 
 static AcKernel* ameva_make_kernel(const char* name, const uint32_t* spirv, size_t bytes, const char* sha,
-                                   uint32_t bindings, uint32_t push_bytes, uint32_t local_x) {
-    return ameva_make_kernel_ex(name, spirv, bytes, sha, bindings, push_bytes, { local_x, 1, 1 });
+                                   uint32_t bindings, uint32_t push_bytes, uint32_t local_x, const char* cl_source) {
+    return ameva_make_kernel_ex(name, spirv, bytes, sha, bindings, push_bytes, { local_x, 1, 1 }, cl_source);
 }
+
+// the OpenCL C tables follow the SPIR-V tables entry by entry
+static_assert(sizeof(kAmevaClQmm) / sizeof(kAmevaClQmm[0]) == AMEVA_QMM_VARIANT_COUNT, "kAmevaClQmm");
+static_assert(sizeof(kAmevaClQmv) / sizeof(kAmevaClQmv[0]) == AMEVA_QMV_VARIANT_COUNT, "kAmevaClQmv");
+static_assert(sizeof(kAmevaClMaliQmv) / sizeof(kAmevaClMaliQmv[0]) == AMEVA_MALI_QMV_VARIANT_COUNT, "kAmevaClMaliQmv");
+static_assert(sizeof(kAmevaClQgemm) / sizeof(kAmevaClQgemm[0]) == AMEVA_QGEMM_VARIANT_COUNT, "kAmevaClQgemm");
+static_assert(sizeof(kAmevaClMmq) / sizeof(kAmevaClMmq[0]) == AMEVA_MMQ_VARIANT_COUNT, "kAmevaClMmq");
+static_assert(sizeof(kAmevaClMmvq) / sizeof(kAmevaClMmvq[0]) == AMEVA_MMVQ_VARIANT_COUNT, "kAmevaClMmvq");
+static_assert(sizeof(kAmevaClMmvqe) / sizeof(kAmevaClMmvqe[0]) == AMEVA_MMVQE_VARIANT_COUNT, "kAmevaClMmvqe");
+static_assert(sizeof(kAmevaClFa) / sizeof(kAmevaClFa[0]) == AMEVA_FA_VARIANT_COUNT, "kAmevaClFa");
+static_assert(sizeof(kAmevaClOps) / sizeof(kAmevaClOps[0]) == AMEVA_K_COUNT, "kAmevaClOps");
 
 static AcKernel* ameva_qmm_kernel(int idx) {
     static char names[AMEVA_QMM_VARIANT_COUNT][40];
@@ -486,7 +556,7 @@ static AcKernel* ameva_qmm_kernel(int idx) {
         const AmevaQmmVariant& v = kAmevaQmmVariants[idx];
         snprintf(names[idx], sizeof(names[idx]), "ameva_qmm_%s_n%u", v.type_name, v.ncols);
         s_qmm[idx] = ameva_make_kernel(names[idx], v.spirv, v.spirv_bytes, v.spirv_sha256, AMEVA_QMM_BINDINGS,
-                                       AMEVA_QMM_PUSH_CONSTANT_BYTES, AMEVA_QMM_LOCAL_SIZE_X);
+                                       AMEVA_QMM_PUSH_CONSTANT_BYTES, AMEVA_QMM_LOCAL_SIZE_X, kAmevaClQmm[idx]);
     }
     return s_qmm[idx];
 }
@@ -499,7 +569,7 @@ static AcKernel* ameva_qmv_kernel(int idx) {
         const AmevaQmvVariant& v = kAmevaQmvVariants[idx];
         snprintf(names[idx], sizeof(names[idx]), "ameva_qmv_%s_c%u_r%u", v.type_name, v.cols, v.rows);
         s_qmv[idx] = ameva_make_kernel(names[idx], v.spirv, v.spirv_bytes, v.spirv_sha256, AMEVA_QMV_BINDINGS,
-                                       AMEVA_QMV_PUSH_CONSTANT_BYTES, AMEVA_QMV_LOCAL_SIZE_X);
+                                       AMEVA_QMV_PUSH_CONSTANT_BYTES, AMEVA_QMV_LOCAL_SIZE_X, kAmevaClQmv[idx]);
     }
     return s_qmv[idx];
 }
@@ -512,7 +582,7 @@ static AcKernel* ameva_mali_qmv_kernel(int idx) {
         snprintf(names[idx], sizeof(names[idx]), "mali_qmv_%s", v.type_name);
         s_mali_qmv[idx] = ameva_make_kernel_ex(names[idx], v.spirv, v.spirv_bytes, v.spirv_sha256,
                                                AMEVA_MALI_QMV_BINDINGS, AMEVA_MALI_QMV_PUSH_CONSTANT_BYTES,
-                                               { AMEVA_MALI_QMV_LOCAL_SIZE_X, AMEVA_MALI_QMV_LOCAL_SIZE_Y, 1 });
+                                               { AMEVA_MALI_QMV_LOCAL_SIZE_X, AMEVA_MALI_QMV_LOCAL_SIZE_Y, 1 }, kAmevaClMaliQmv[idx]);
     }
     return s_mali_qmv[idx];
 }
@@ -524,7 +594,7 @@ static AcKernel* ameva_qgemm_kernel(int idx) {
         const AmevaQgemmVariant& v = kAmevaQgemmVariants[idx];
         snprintf(names[idx], sizeof(names[idx]), "ameva_qgemm_%s", v.type_name);
         s_qgemm[idx] = ameva_make_kernel(names[idx], v.spirv, v.spirv_bytes, v.spirv_sha256, AMEVA_QGEMM_BINDINGS,
-                                         AMEVA_QGEMM_PUSH_CONSTANT_BYTES, AMEVA_QGEMM_LOCAL_SIZE_X);
+                                         AMEVA_QGEMM_PUSH_CONSTANT_BYTES, AMEVA_QGEMM_LOCAL_SIZE_X, kAmevaClQgemm[idx]);
     }
     return s_qgemm[idx];
 }
@@ -536,7 +606,7 @@ static AcKernel* ameva_mmq_kernel(int idx) {
         const AmevaMmqVariant& v = kAmevaMmqVariants[idx];
         snprintf(names[idx], sizeof(names[idx]), "ameva_mmq_%s", v.type_name);
         s_mmq[idx] = ameva_make_kernel(names[idx], v.spirv, v.spirv_bytes, v.spirv_sha256, AMEVA_MMQ_BINDINGS,
-                                       AMEVA_MMQ_PUSH_CONSTANT_BYTES, AMEVA_MMQ_LOCAL_SIZE_X);
+                                       AMEVA_MMQ_PUSH_CONSTANT_BYTES, AMEVA_MMQ_LOCAL_SIZE_X, kAmevaClMmq[idx]);
     }
     return s_mmq[idx];
 }
@@ -609,7 +679,8 @@ static AcKernel* ameva_mmvq_kernel(int idx) {
         char* name = names[(fam.emulated ? AMEVA_MMVQ_VARIANT_COUNT : 0) + idx];
         snprintf(name, sizeof(names[0]), "ameva_mmvq%s_%s_r%u", fam.emulated ? "e" : "", v.type_name, v.rows);
         *slot = ameva_make_kernel(name, v.spirv, v.spirv_bytes, v.spirv_sha256, AMEVA_MMVQ_BINDINGS,
-                                  AMEVA_MMVQ_PUSH_CONSTANT_BYTES, AMEVA_MMVQ_LOCAL_SIZE_X);
+                                  AMEVA_MMVQ_PUSH_CONSTANT_BYTES, AMEVA_MMVQ_LOCAL_SIZE_X,
+                                  fam.emulated ? kAmevaClMmvqe[idx] : kAmevaClMmvq[idx]);
     }
     return *slot;
 }
@@ -621,7 +692,7 @@ static AcKernel* ameva_fa_kernel(int idx) {
         const AmevaFaVariant& v = kAmevaFaVariants[idx];
         snprintf(names[idx], sizeof(names[idx]), "ameva_flash_attn_d%u", v.dmax);
         s_fa[idx] = ameva_make_kernel(names[idx], v.spirv, v.spirv_bytes, v.spirv_sha256, AMEVA_FA_BINDINGS,
-                                      AMEVA_FA_PUSH_CONSTANT_BYTES, AMEVA_FA_LOCAL_SIZE_X);
+                                      AMEVA_FA_PUSH_CONSTANT_BYTES, AMEVA_FA_LOCAL_SIZE_X, kAmevaClFa[idx]);
     }
     return s_fa[idx];
 }
@@ -639,7 +710,7 @@ static AcKernel* ameva_op_kernel(AmevaOpKernelId id) {
     if (!s_ops[id] && s_ctx) {
         const AmevaOpKernel& k = kAmevaOpKernels[id];
         s_ops[id] = ameva_make_kernel(k.name, k.spirv, k.spirv_bytes, k.spirv_sha256, k.bindings,
-                                      k.push_constant_bytes, k.local_size_x);
+                                      k.push_constant_bytes, k.local_size_x, kAmevaClOps[id]);
     }
     return s_ops[id];
 }
@@ -655,15 +726,6 @@ static bool ameva_status_buffer(void) {
         return false;
     }
     ameva_increment_buffer_create_count();
-    void* map = nullptr;
-    if (ac_runtime_buffer_get_mapped_ptr(s_status, &map) != AC_SUCCESS || !map) {
-        ac_runtime_buffer_destroy(s_status);
-        ameva_increment_buffer_destroy_count();
-        s_status = nullptr;
-        fprintf(stderr, "ggml-ameva: status buffer is not host-mapped\n");
-        return false;
-    }
-    s_status_map = (uint32_t*)map;
     return true;
 }
 
@@ -711,7 +773,6 @@ void ggml_backend_ameva_teardown(void) {
         if (r != AC_SUCCESS) fprintf(stderr, "ggml-ameva: status buffer destroy failed (code %d)\n", r);
         ameva_increment_buffer_destroy_count();
         s_status = nullptr;
-        s_status_map = nullptr;
     }
     for (AcKernel*& k : s_qmm) {
         if (k) {
@@ -1339,19 +1400,20 @@ static bool ameva_mmq_enabled(void) {
             GGML_ABORT("ggml-ameva: AMEVA_MMQ must be 0 or 1 (got \"%s\")", e);
         }
         const bool supported = s_limits.integer_dot_product != 0;
+        // what offers the packed int8 dot product on this backend
+        const char* dot = ameva_backend_is_opencl() ? "OpenCL int8 dot product" : "VK_KHR_shader_integer_dot_product";
         if (e && strcmp(e, "0") == 0) {
             mode = 0;
             fprintf(stderr, "ggml-ameva: MMQ off (AMEVA_MMQ=0): prompt MUL_MAT runs the f32 tiled kernel\n");
         } else if (supported) {
             mode = 1;
-            fprintf(stderr, "ggml-ameva: MMQ on (VK_KHR_shader_integer_dot_product, 4x8 packed accelerated: %s)\n",
-                    s_limits.integer_dot_product_accelerated ? "yes" : "no");
+            fprintf(stderr, "ggml-ameva: MMQ on (%s, 4x8 packed accelerated: %s)\n", dot,
+                    s_limits.integer_dot_product_accelerated ? "yes" : ameva_backend_is_opencl() ? "not reported" : "no");
         } else if (e && strcmp(e, "1") == 0) {
-            GGML_ABORT("ggml-ameva: AMEVA_MMQ=1 but the device does not offer VK_KHR_shader_integer_dot_product");
+            GGML_ABORT("ggml-ameva: AMEVA_MMQ=1 but the device does not offer %s", dot);
         } else {
             mode = 0;
-            fprintf(stderr, "ggml-ameva: MMQ unavailable (no VK_KHR_shader_integer_dot_product): prompt MUL_MAT runs "
-                            "the f32 tiled kernel\n");
+            fprintf(stderr, "ggml-ameva: MMQ unavailable (no %s): prompt MUL_MAT runs the f32 tiled kernel\n", dot);
         }
     });
     return mode == 1;
@@ -1567,7 +1629,8 @@ static const AmevaMmvqPolicy& ameva_mmvq_policy(void) {
         } else if (p.mode == AMEVA_MMVQ_AUTO && fam.emulated) {
             fprintf(stderr, "ggml-ameva: MMVQ layouts use the integer dot product emulated with 32-bit multiplications "
                             "(%s)\n", s_limits.integer_dot_product ? "AMEVA_MMVQ_EMU=1"
-                                                                    : "no VK_KHR_shader_integer_dot_product");
+                                      : ameva_backend_is_opencl() ? "no OpenCL int8 dot product"
+                                                                  : "no VK_KHR_shader_integer_dot_product");
         }
         return p;
     }();
@@ -1718,8 +1781,9 @@ static uint32_t ameva_qmv_tpr(uint32_t units) {
 //                                    AMEVA_QMV_TPR also sets the prompt variant's lanes per row)
 //   AMEVA_MALI_QMV=1|on|0|off        earlier name of AMEVA_QMV_KERNEL=mali|qmv
 //   AMEVA_QMV_TUNE=0                 nothing measured: the default layout (ameva_qmv, 4 rows, 16 lanes)
-//   AMEVA_QMV_TUNE_FILE=<path>|0     where measurements are kept (default $HOME/.cache/ameva/ggml-ameva-qmv-tune.txt);
-//                                    0: measured in every process and not kept
+//   AMEVA_QMV_TUNE_FILE=<path>|0     where measurements are kept (default $HOME/.cache/ameva/ggml-ameva-qmv-tune.txt,
+//                                    ggml-ameva-qmv-tune-cl.txt with AMEVA_BACKEND=opencl); 0: measured in every
+//                                    process and not kept
 struct AmevaQmvConfig {
     uint8_t mali; // 1: mali_qmv; 0: ameva_qmv or ameva_mmvq with rows and tpr
     uint8_t rows; // weight rows per lane group (1, 2, 4)
@@ -1916,7 +1980,10 @@ static std::string ameva_qmv_tune_path(void) {
         fprintf(stderr, "ggml-ameva: GEMV measurements not kept: HOME is not set (set AMEVA_QMV_TUNE_FILE=<file>)\n");
         return std::string();
     }
-    return std::string(home) + "/.cache/ameva/ggml-ameva-qmv-tune.txt";
+    // one file per backend: the file holds one device key, and a process of the other backend would discard the
+    // measurements and write its own (2026-10-07: OpenCL check runs replaced the Vulkan measurements of two devices)
+    return std::string(home) + (ameva_backend_is_opencl() ? "/.cache/ameva/ggml-ameva-qmv-tune-cl.txt"
+                                                          : "/.cache/ameva/ggml-ameva-qmv-tune.txt");
 }
 
 // Tune file: line 1 "ggml-ameva-qmv-tune 2", line 2 "device <s_device_key> <device name>", then one line per shape:
@@ -2088,8 +2155,8 @@ static const char* ameva_qmv_tune_shape(const struct ggml_tensor* node, AmevaQmv
     }
     if (e) return e;
 
-    // one host-mapped buffer: the activation row, its int8 form (ameva_mmvq layouts), then one output range per
-    // layout (aligned binding offsets)
+    // one buffer: the activation row, its int8 form (ameva_mmvq layouts), then one output range per layout (aligned
+    // binding offsets); the host writes and reads it through ac_runtime_buffer_write / read
     struct Owned {
         AcBuffer* buf = nullptr;
         ~Owned() {
@@ -2112,22 +2179,24 @@ static const char* ameva_qmv_tune_shape(const struct ggml_tensor* node, AmevaQmv
         return "buffer for the GEMV measurement unavailable";
     }
     ameva_increment_buffer_create_count();
-    void* map = nullptr;
-    if (ac_runtime_buffer_get_mapped_ptr(owned.buf, &map) != AC_SUCCESS || !map) return "GEMV measurement buffer is not host-mapped";
-    float* act = (float*)map;
-    uint32_t seed = 0x2545f491u;
-    for (uint32_t i = 0; i < K; ++i) {
-        seed ^= seed << 13;
-        seed ^= seed >> 17;
-        seed ^= seed << 5;
-        act[i] = (float)(seed >> 8) * (2.0f / 16777216.0f) - 1.0f;
+    {
+        std::vector<float> act(K);
+        uint32_t seed = 0x2545f491u;
+        for (uint32_t i = 0; i < K; ++i) {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            act[i] = (float)(seed >> 8) * (2.0f / 16777216.0f) - 1.0f;
+        }
+        if (ac_runtime_buffer_write(owned.buf, 0, act.data(), (size_t)K * 4) != AC_SUCCESS)
+            return "GEMV measurement buffer write failed";
+        // outputs start as NaN: a layout that leaves rows unwritten fails the comparison
+        const std::vector<float> nan_rows(nt, NAN);
+        for (uint32_t c = 0; c < nc; ++c) {
+            if (ac_runtime_buffer_write(owned.buf, (size_t)(o_base + c * d_bytes), nan_rows.data(), (size_t)nt * 4) != AC_SUCCESS)
+                return "GEMV measurement buffer write failed";
+        }
     }
-    // outputs start as NaN: a layout that leaves rows unwritten fails the comparison
-    for (uint32_t c = 0; c < nc; ++c) {
-        float* d = (float*)((char*)map + o_base + c * d_bytes);
-        for (uint32_t i = 0; i < nt; ++i) d[i] = NAN;
-    }
-    if (ac_runtime_buffer_flush(owned.buf, 0, size) != AC_SUCCESS) return "GEMV measurement buffer flush failed";
 
     // Rounds of every layout in turn (a warm-up round first), one submission per round (bounded GPU time per
     // submission) and one barrier between dispatches so that each runs alone. A dispatch's time runs from the end of
@@ -2196,9 +2265,12 @@ static const char* ameva_qmv_tune_shape(const struct ggml_tensor* node, AmevaQmv
     ac_runtime_batch_destroy(batch);
     if (wr != AC_SUCCESS || er != AC_SUCCESS) return "GEMV measurement did not complete";
     if (tr != AC_SUCCESS || got != nd) return "per-dispatch GPU times of the GEMV measurement unavailable";
-    if (ac_runtime_buffer_invalidate(owned.buf, 0, size) != AC_SUCCESS) return "GEMV measurement buffer invalidate failed";
+    // every layout's output range, read back
+    std::vector<float> outs((size_t)(d_bytes * nc / 4));
+    if (ac_runtime_buffer_read(owned.buf, (size_t)o_base, outs.data(), (size_t)(d_bytes * nc)) != AC_SUCCESS)
+        return "GEMV measurement buffer read failed";
 
-    const float* ref = (const float*)((const char*)map + o_base);
+    const float* ref = outs.data();
     double ref_max = 0.0;
     for (uint32_t i = 0; i < nt; ++i) {
         if (!std::isfinite(ref[i])) return "the default GEMV layout produced a non-finite value";
@@ -2216,7 +2288,7 @@ static const char* ameva_qmv_tune_shape(const struct ggml_tensor* node, AmevaQmv
         std::sort(us.begin(), us.end());
         cands[c].median_us = us[kQmvTuneRounds / 2] + (cands[c].c.i8 ? quant_us : 0.0);
         if (c == 0) continue;
-        const float* y = (const float*)((const char*)map + o_base + c * d_bytes);
+        const float* y = outs.data() + (size_t)(c * d_bytes / 4);
         double diff = 0.0;
         bool finite = true;
         for (uint32_t i = 0; i < nt && finite; ++i) {
@@ -3062,10 +3134,10 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
         return GGML_STATUS_FAILED;
     }
 
-    s_status_map[0] = 0;
-    s_status_map[1] = 0xFFFFFFFFu;
-    if (ac_runtime_buffer_flush(s_status, 0, 256) != AC_SUCCESS) {
-        fprintf(stderr, "ggml-ameva: status buffer flush failed (FAIL-FAST)\n");
+    // [0] count of out-of-range row indices, [1] the first node that had one
+    const uint32_t status_init[2] = { 0u, 0xFFFFFFFFu };
+    if (ac_runtime_buffer_write(s_status, 0, status_init, sizeof(status_init)) != AC_SUCCESS) {
+        fprintf(stderr, "ggml-ameva: status buffer write failed (FAIL-FAST)\n");
         return GGML_STATUS_FAILED;
     }
 
@@ -3217,16 +3289,17 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
         fprintf(stderr, "ggml-ameva: event destroy failed with code %d (FAIL-FAST)\n", (int)er);
         return GGML_STATUS_FAILED;
     }
-    if (fi == AMEVA_FAIL_INVALIDATE_DST || ac_runtime_buffer_invalidate(s_status, 0, 256) != AC_SUCCESS) {
-        fprintf(stderr, "ggml-ameva: status buffer invalidate failed%s (FAIL-FAST)\n",
+    uint32_t status[2] = { 0u, 0u };
+    if (fi == AMEVA_FAIL_INVALIDATE_DST || ac_runtime_buffer_read(s_status, 0, status, sizeof(status)) != AC_SUCCESS) {
+        fprintf(stderr, "ggml-ameva: status buffer read failed%s (FAIL-FAST)\n",
                 fi == AMEVA_FAIL_INVALIDATE_DST ? " [FAILURE_INJECTION]" : "");
         return GGML_STATUS_FAILED;
     }
-    if (s_status_map[0] != 0) {
-        const uint32_t n = s_status_map[1];
+    if (status[0] != 0) {
+        const uint32_t n = status[1];
         struct ggml_tensor* bad = n < (uint32_t)n_nodes ? ggml_graph_node(cgraph, (int)n) : nullptr;
         fprintf(stderr, "ggml-ameva: %u row index(es) out of range, first in node %u (%s, op %s) (FAIL-FAST)\n",
-                s_status_map[0], n, bad ? bad->name : "?", bad ? ggml_op_desc(bad) : "?");
+                status[0], n, bad ? bad->name : "?", bad ? ggml_op_desc(bad) : "?");
         return GGML_STATUS_FAILED;
     }
 

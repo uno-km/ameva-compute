@@ -15,8 +15,8 @@
 //   6. lifetime: context destruction refused while children are alive
 //   7. Vulkan (when a Vulkan device exists): the same host access calls on a Vulkan buffer
 // Prints AC_CL_KAT=PASS (n checks) or AC_CL_KAT=FAIL with the first failing check. Exit status 0 only on PASS.
-// Build: clang -O2 -I include -o ac_cl_kat tests/ac_cl_kat.c -L<dir> -lac_runtime
-// Run on Android with the vendor directories visible: LD_LIBRARY_PATH=/system/lib64:/vendor/lib64:/vendor/lib64/egl:<dir>
+// Build: clang -O2 -I include -o ac_cl_kat tests/ac_cl_kat.c <dir>/libac_runtime.so.2 -Wl,-rpath,<dir>
+// Run: ./ac_cl_kat (ac_runtime opens the vendor OpenCL driver itself; no LD_LIBRARY_PATH for it)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -45,6 +45,16 @@ static const char* kAxpy =
     "    if (i < pc.n) y[i] = pc.a * x[i] + y[i] + pc.b;\n"
     "}\n";
 
+// the same with the binding ranges: y[i] += the number of floats bound to x plus the bytes bound to y
+static const char* kRanges =
+    "typedef struct { uint n; float a; float b; } P;\n"
+    "typedef struct { uint bytes[2]; } R;\n"
+    "__kernel __attribute__((reqd_work_group_size(64, 1, 1)))\n"
+    "void axpy(__global const float* x, __global float* y, P pc, R ranges) {\n"
+    "    const uint i = get_global_id(0);\n"
+    "    if (i < pc.n) y[i] = (float)(ranges.bytes[0] / 4u) + (float)ranges.bytes[1];\n"
+    "}\n";
+
 static const AcRuntimeBindingDesc kTwo[2] = { { 0, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE },
                                               { 1, AC_RUNTIME_BINDING_STORAGE_BUFFER, AC_STAGE_COMPUTE } };
 
@@ -62,9 +72,15 @@ static AcKernelRuntimeMetadata axpy_meta(uint32_t bindings, size_t push) {
     return m;
 }
 
-static AcResult make_kernel(AcContext* ctx, const char* src, const AcKernelRuntimeMetadata* m, AcKernel** k) {
-    AcKernelSourceDesc d = { AC_ABI_VERSION, (uint32_t)sizeof(AcKernelSourceDesc), src, 0, "-cl-fast-relaxed-math", m };
+static AcResult make_kernel_flags(AcContext* ctx, const char* src, const AcKernelRuntimeMetadata* m, uint32_t flags,
+                                  AcKernel** k) {
+    AcKernelSourceDesc d = { AC_ABI_VERSION, (uint32_t)sizeof(AcKernelSourceDesc), src, 0, "-cl-fast-relaxed-math", m,
+                             flags };
     return ac_runtime_kernel_create_from_source(ctx, &d, k);
+}
+
+static AcResult make_kernel(AcContext* ctx, const char* src, const AcKernelRuntimeMetadata* m, AcKernel** k) {
+    return make_kernel_flags(ctx, src, m, 0, k);
 }
 
 static AcBuffer* make_buffer(AcContext* ctx, size_t bytes) {
@@ -261,6 +277,37 @@ int main(void) {
               first, got[first]);
         ac_runtime_event_destroy(e2);
         ac_runtime_batch_destroy(b2);
+    }
+
+    // a kernel that takes the binding ranges receives the bytes of each bound range
+    {
+        AcKernel* kr = NULL;
+        CHECK(make_kernel(ctx, kRanges, &m2, &kr) == AC_ERR_KERNEL_ARG_INVALID && kr == NULL,
+              "a fourth argument without AC_KERNEL_SOURCE_BINDING_RANGES");
+        CHECK(make_kernel_flags(ctx, kAxpy, &m2, AC_KERNEL_SOURCE_BINDING_RANGES, &kr) == AC_ERR_KERNEL_ARG_INVALID,
+              "AC_KERNEL_SOURCE_BINDING_RANGES without the argument");
+        CHECK(make_kernel_flags(ctx, kAxpy, &m2, 1u << 7, &kr) == AC_ERR_INVALID_ARGUMENT, "unknown source flag");
+        CHECK(make_kernel_flags(ctx, kRanges, &m2, AC_KERNEL_SOURCE_BINDING_RANGES, &kr) == AC_SUCCESS && kr,
+              "kernel with a binding-range argument");
+        AcBatchDesc d1 = { AC_ABI_VERSION, (uint32_t)sizeof(AcBatchDesc), 2, 0 };
+        AcCommandBatch* b3 = NULL;
+        CHECK(ac_runtime_batch_begin_ex(ctx, &d1, &b3) == AC_SUCCESS, "batch 3");
+        const uint32_t part = 1024; // floats of y written; x bound from its offset, y for part floats only
+        AcBufferBinding br[2] = { { bx, xoff_elems * 4, (uint64_t)n * 4 }, { by, 0, (uint64_t)part * 4 } };
+        const struct { uint32_t n; float a; float b; } q = { part, 0.0f, 0.0f };
+        const AcDim3 g3 = { part / 64, 1, 1 };
+        CHECK(ac_runtime_batch_dispatch_bindings(b3, kr, br, 2, &q, sizeof(q), g3) == AC_SUCCESS, "record 3");
+        AcEvent* e3 = NULL;
+        CHECK(ac_runtime_batch_submit(b3, &e3) == AC_SUCCESS && ac_runtime_event_wait(e3, UINT64_MAX) == AC_SUCCESS,
+              "submit 3");
+        CHECK(ac_runtime_buffer_read(by, 0, got, part * 4) == AC_SUCCESS, "read 3");
+        const float want3 = (float)n + (float)(part * 4);
+        uint32_t wrong = 0;
+        for (uint32_t i = 0; i < part; ++i) wrong += got[i] != want3;
+        CHECK(wrong == 0, "binding ranges: %u values differ (first %g, want %g)", wrong, got[0], want3);
+        ac_runtime_event_destroy(e3);
+        ac_runtime_batch_destroy(b3);
+        CHECK(ac_runtime_kernel_destroy(kr) == AC_SUCCESS, "range kernel destroy");
     }
 
     // 6. lifetime

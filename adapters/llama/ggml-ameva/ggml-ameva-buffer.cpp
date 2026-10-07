@@ -436,10 +436,11 @@ static size_t ggml_backend_ameva_buffer_type_get_alloc_size(ggml_backend_buffer_
 }
 
 // The memory is host-visible (UMA) in either case; "host buffer" in ggml means that the CPU may read and write tensor
-// data in place, which holds only while no tensor is repacked.
+// data in place, which holds only while no tensor is repacked, and never on OpenCL (SVM memory is reached through
+// ac_runtime_buffer_write / read only).
 static bool ggml_backend_ameva_buffer_type_is_host(ggml_backend_buffer_type_t buft) {
     (void)buft;
-    return !ameva_repack_enabled();
+    return !ameva_repack_enabled() && !ameva_backend_is_opencl();
 }
 
 static const struct ggml_backend_buffer_type_i ggml_backend_ameva_buffer_type_i = {
