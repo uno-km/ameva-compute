@@ -1,12 +1,8 @@
 # Current Engineering Checkpoint
 
-**Timestamp**: 2026-10-07T16:18:00+09:00  
-**Branch**: `perf/opencl-mali`  
-**Current Goal**: Mali OpenCL Prompt Path Mathematical Optimization & Wan 2.1 5D Broadcast  
-
-### Target Devices
-- **Primary**: Galaxy S21 (Mali-G78), Galaxy A53 (Mali-G68)
-- **Secondary**: Galaxy S25 (Xclipse 950 / Adreno 830), Galaxy A35 (Mali-G68), Galaxy S20 (Adreno 650)
+**Timestamp**: 2026-10-07T16:28:00+09:00  
+**Branch**: `perf/opencl-mali` (pushed to origin; code at `29b5362`)  
+**Current Goal**: Mali OpenCL prompt path (primary S21 Mali-G78, A53 Mali-G68; secondary S25, A35, S20) & Wan 2.1 5D Broadcast  
 
 ### Verified (Ground Truth)
 - [PASS] Zero-Source Leakage Audit: `termux-bitnet` and `termux-vision` public repos stripped of all `.cpp`/`.comp` sources.
