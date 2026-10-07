@@ -1,0 +1,225 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_EXT_integer_dot_product : require
+// AMEVA MMQB: ggml MUL_MAT (dst = src0^T x src1) for many activation rows (prompt processing) with integer dot
+// products and integer accumulation over a 256-weight block: src0 a 256-weight super-block type stored in the AMEVA
+// repacked layout (ggml-ameva-repack.h), src1 quantized to int8 with one scale per 256-element block by
+// ameva_quant_a8b (d_a, q_a, sums of q_a per 16-element half).
+// The weight scales of these types are small integers per 32-weight unit (or 16-weight half) times one f16 per block,
+// so with one activation scale per block the scales leave the unit loop. Per block, weight row and activation row:
+//   q4_K, q5_K (weight k of unit u = d sc_u v_k - dmin m_u, v unsigned):
+//       d_a * (d * sum_u sc_u * dot(v, q_a)_u  -  dmin * sum_u m_u * sum(q_a)_u)
+//   q6_K (weight k of half h = d sc_h (v_k - 32), sc_h int8): d_a * d * sum_h sc_h * dot(v - 32, q_a)_h
+// with the sums over u and h exact in 32-bit integers (dotPacked4x8EXT, signed 8-bit x 8-bit; at most 8 * 63 * 32 * 31
+// * 127 < 2^26 for q5_K and 16 * 128 * 16 * 32 * 127 < 2^27 for q6_K). The difference from ameva_qgemm is the rounding
+// of the activations to int8 per block (|error| <= d_a / 2 per element); the weights are used at full precision.
+// Against ameva_mmq (one activation scale per 32 elements, a tile in shared memory): per unit and pair of rows the
+// unit loop loads the weights and the two halves of the activation unit and nothing else, and there is no shared
+// memory and no barrier. On Mali the loads are what limits these kernels (docs/design/opencl-mali-int8.md).
+//
+// An invocation owns DRW weight rows x DRA activation rows; rows past N and M are computed from the last row and not
+// stored.
+//   bindings 0..2: repacked weights (ameva_qdecode.glsl), binding 3: AQ (uvec4), binding 4: AB (uvec4),
+//   binding 5: dst F32
+//   push: M, K, N (weight rows of this dispatch), q_off, h_off (Q / H vector elements), s_off (bytes, even),
+//         aq_off, ab_off (uvec4), d_off, sd (floats)
+//   grid: (ceil(N / (DRW * LX)), ceil(M / (DRA * LY)))
+//   variants: -DTYPE_Q4_K, -DTYPE_Q5_K, -DTYPE_Q6_K; -DDRW=<n>u -DDRA=<n>u (rows per invocation), -DLX=<n> -DLY=<n>
+//   (local size)
+
+#if !defined(DRW) || !defined(DRA) || !defined(LX) || !defined(LY)
+#error "ameva_mmqb: DRW, DRA, LX and LY must be defined"
+#endif
+
+layout(local_size_x = LX, local_size_y = LY, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+#include "ameva_qdecode.glsl"
+
+layout(std430, binding = 3) readonly buffer BufAQ { uvec4 aq[]; };
+layout(std430, binding = 4) readonly buffer BufAB { uvec4 ab[]; };
+layout(std430, binding = 5) writeonly buffer BufD { float dst[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint M, K, N, q_off;
+    uint h_off, s_off, aq_off, ab_off;
+    uint d_off, sd;
+} pc;
+
+#if defined(TYPE_Q6_K)
+#define HALF_SCALES // an integer scale per 16-weight half; the weights are taken signed (v - 32), so no offset term
+#elif !defined(TYPE_Q4_K) && !defined(TYPE_Q5_K)
+#error "ameva_mmqb: TYPE_Q4_K, TYPE_Q5_K or TYPE_Q6_K"
+#endif
+
+// the four bytes of a word as integers
+ivec4 ub4(uint w) { return ivec4(uvec4(w, w >> 8u, w >> 16u, w >> 24u) & 0xFFu); }
+// the low and the high 16 bits of each component, sign-extended
+ivec4 lo16(ivec4 p) { return (p << 16) >> 16; }
+ivec4 hi16(ivec4 p) { return p >> 16; }
+
+// the 16 bytes at the even byte address a of S as four little-endian words
+void sld4(uint a, out uint w[4]) {
+    const uint wi = a >> 2u;
+    const uint x0 = sw_at(wi), x1 = sw_at(wi + 1u), x2 = sw_at(wi + 2u), x3 = sw_at(wi + 3u);
+    if ((a & 2u) == 0u) {
+        w[0] = x0;
+        w[1] = x1;
+        w[2] = x2;
+        w[3] = x3;
+    } else {
+        const uint x4 = sw_at(wi + 4u);
+        w[0] = (x0 >> 16u) | (x1 << 16u);
+        w[1] = (x1 >> 16u) | (x2 << 16u);
+        w[2] = (x2 >> 16u) | (x3 << 16u);
+        w[3] = (x3 >> 16u) | (x4 << 16u);
+    }
+}
+
+// ameva_qdecode.glsl's spread4 and spread2 on four words at once: bit k (k = 0..3) of each component -> bit 4 of its
+// byte k; 2-bit field k of each component -> bits 0..1 of its byte k
+uvec4 spread4v(uvec4 x) { return ((x & 1u) << 4u) | ((x & 2u) << 11u) | ((x & 4u) << 18u) | ((x & 8u) << 25u); }
+uvec4 spread2v(uvec4 x) { return (x & 3u) | ((x & 0xCu) << 6u) | ((x & 0x30u) << 12u) | ((x & 0xC0u) << 18u); }
+
+// The 32 weights of one unit as int8: byte k of component c of lo is the weight 4c + k, of hi the weight 16 + 4c + k.
+// q4_K, q5_K: v (0..15, 0..31) as ameva_qdecode.glsl's decode_i8 gives it; q6_K: v - 32 (-32..31).
+void unit_i8(uint qi, uint hi, out uvec4 lo_out, out uvec4 hi_out) {
+    const uvec4 q = qv[qi];
+    uvec4 l = q & 0x0F0F0F0Fu;
+    uvec4 h = (q >> 4u) & 0x0F0F0F0Fu;
+#if defined(TYPE_Q5_K)
+    const uvec4 b = uvec4(hv[hi]); // bit k: the fifth bit of weight k
+    l = l | spread4v(b >> uvec4(0u, 4u, 8u, 12u));
+    h = h | spread4v(b >> uvec4(16u, 20u, 24u, 28u));
+#elif defined(TYPE_Q6_K)
+    const uvec2 b = hv[hi]; // 2-bit field k of x: bits 4..5 of weight k, of y: of weight 16 + k
+    l = l | (spread2v(uvec4(b.x) >> uvec4(0u, 8u, 16u, 24u)) << 4u);
+    h = h | (spread2v(uvec4(b.y) >> uvec4(0u, 8u, 16u, 24u)) << 4u);
+    // v - 32 as a signed byte: v & 31 when bit 5 is set, otherwise v | 0xE0
+    l = (l & 0x1F1F1F1Fu) | (((~l >> 5u) & 0x01010101u) * 0xE0u);
+    h = (h & 0x1F1F1F1Fu) | (((~h >> 5u) & 0x01010101u) * 0xE0u);
+#endif
+    lo_out = l;
+    hi_out = h;
+}
+
+// sum of the sixteen products of one half of a unit
+int dot16(uvec4 w, uvec4 a) {
+    return dotPacked4x8EXT(int(w.x), int(a.x)) + dotPacked4x8EXT(int(w.y), int(a.y)) +
+           dotPacked4x8EXT(int(w.z), int(a.z)) + dotPacked4x8EXT(int(w.w), int(a.w));
+}
+
+void main() {
+    qdecode_init(gl_LocalInvocationID.x);
+    const uint n0 = gl_GlobalInvocationID.x * DRW;
+    const uint m0 = gl_GlobalInvocationID.y * DRA;
+    if (n0 >= pc.N || m0 >= pc.M) return;
+    const uint U = pc.K >> 5u;
+    const uint B = pc.K >> 8u;
+    const uint s_row = B * SB;
+    float acc[DRA * DRW]; // [j * DRW + i]: activation row m0 + j, weight row n0 + i
+    [[unroll]] for (uint x = 0u; x < DRA * DRW; ++x) {
+        acc[x] = 0.0;
+    }
+
+    for (uint b = 0u; b < B; ++b) {
+        // The first 16 bytes of the block's scales per weight row, as they are stored: q4_K, q5_K d and dmin (f16),
+        // then the 12 bytes of ggml's get_scale_min_k4; q6_K the sixteen int8 scales of the halves. They are decoded
+        // where they are used. What is decoded here stays in registers through the unit loop, and that loop has none
+        // to spare: with the minima of two weight rows as four ivec4 from here on, the kernel of two weight rows took
+        // 26.4 ms instead of 19.7 (Mali-G68, OpenCL, q4_K 352x2048x2048, 2026-10-07).
+        uint scw[4u * DRW];
+        [[unroll]] for (uint i = 0u; i < DRW; ++i) {
+            uint w[4];
+            sld4(pc.s_off + min(n0 + i, pc.N - 1u) * s_row + b * SB, w);
+            scw[4u * i] = w[0];
+            scw[4u * i + 1u] = w[1];
+            scw[4u * i + 2u] = w[2];
+            scw[4u * i + 3u] = w[3];
+        }
+
+        int isum[DRA * DRW];
+        [[unroll]] for (uint x = 0u; x < DRA * DRW; ++x) {
+            isum[x] = 0;
+        }
+        for (uint j8 = 0u; j8 < 8u; ++j8) {
+            const uint u = 8u * b + j8;
+            uvec4 wlo[DRW], whi[DRW];
+            int sc0[DRW];
+#if defined(HALF_SCALES)
+            int sc1[DRW];
+#endif
+            [[unroll]] for (uint i = 0u; i < DRW; ++i) {
+                const uint row = min(n0 + i, pc.N - 1u);
+                uvec4 l, h;
+                unit_i8(pc.q_off + (row * U + u) * QPER, pc.h_off + row * U + u, l, h);
+                wlo[i] = l;
+                whi[i] = h;
+#if defined(HALF_SCALES)
+                const int pr = int(scw[4u * i + (j8 >> 1u)] >> (16u * (j8 & 1u)));
+                sc0[i] = (pr << 24) >> 24;
+                sc1[i] = (pr << 16) >> 24;
+#else
+                const uint k = 8u * (j8 & 3u);
+                const uint b0 = (scw[4u * i + 1u] >> k) & 0xFFu, b2 = (scw[4u * i + 3u] >> k) & 0xFFu;
+                sc0[i] = int(j8 < 4u ? (b0 & 63u) : ((b2 & 0xFu) | ((b0 >> 6u) << 4u)));
+#endif
+            }
+            [[unroll]] for (uint j = 0u; j < DRA; ++j) {
+                const uint g = pc.aq_off + 2u * (min(m0 + j, pc.M - 1u) * U + u);
+                const uvec4 a0 = aq[g], a1 = aq[g + 1u];
+                [[unroll]] for (uint i = 0u; i < DRW; ++i) {
+#if defined(HALF_SCALES)
+                    isum[j * DRW + i] += sc0[i] * dot16(wlo[i], a0) + sc1[i] * dot16(whi[i], a1);
+#else
+                    isum[j * DRW + i] += sc0[i] * (dot16(wlo[i], a0) + dot16(whi[i], a1));
+#endif
+                }
+            }
+        }
+
+        // the block's contribution: the scales that are one per block and weight row, and for q4_K, q5_K the minima
+        float dw[DRW];
+#if defined(HALF_SCALES)
+        [[unroll]] for (uint i = 0u; i < DRW; ++i) {
+            dw[i] = sldh(pc.s_off + min(n0 + i, pc.N - 1u) * s_row + b * SB + 16u);
+        }
+#else
+        float dm[DRW];
+        ivec4 mn0[DRW], mn1[DRW]; // the minima of units 0..3 and 4..7
+        [[unroll]] for (uint i = 0u; i < DRW; ++i) {
+            dw[i] = ameva_h2f(scw[4u * i] & 0xFFFFu);
+            dm[i] = ameva_h2f(scw[4u * i] >> 16u);
+            mn0[i] = ub4(scw[4u * i + 2u]) & 63;
+            mn1[i] = (ub4(scw[4u * i + 3u]) >> 4) | ((ub4(scw[4u * i + 2u]) >> 6) << 4);
+        }
+#endif
+        [[unroll]] for (uint j = 0u; j < DRA; ++j) {
+            const uint gb = pc.ab_off + 4u * (min(m0 + j, pc.M - 1u) * B + b);
+            const float da = uintBitsToFloat(ab[gb].x);
+#if defined(HALF_SCALES)
+            [[unroll]] for (uint i = 0u; i < DRW; ++i) {
+                acc[j * DRW + i] += da * (dw[i] * float(isum[j * DRW + i]));
+            }
+#else
+            const ivec4 p0 = ivec4(ab[gb + 1u]), p1 = ivec4(ab[gb + 2u]);
+            const ivec4 su0 = lo16(p0) + hi16(p0), su1 = lo16(p1) + hi16(p1); // sums of q_a over units 0..3, 4..7
+            [[unroll]] for (uint i = 0u; i < DRW; ++i) {
+                const ivec4 t = mn0[i] * su0 + mn1[i] * su1;
+                acc[j * DRW + i] += da * (dw[i] * float(isum[j * DRW + i]) - dm[i] * float(t.x + t.y + t.z + t.w));
+            }
+#endif
+        }
+    }
+
+    [[unroll]] for (uint j = 0u; j < DRA; ++j) {
+        const uint m = m0 + j;
+        if (m < pc.M) {
+            const uint o = pc.d_off + m * pc.sd + n0;
+            [[unroll]] for (uint i = 0u; i < DRW; ++i) {
+                if (n0 + i < pc.N) dst[o + i] = acc[j * DRW + i];
+            }
+        }
+    }
+}

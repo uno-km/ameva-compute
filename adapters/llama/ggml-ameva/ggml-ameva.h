@@ -35,6 +35,8 @@ GGML_BACKEND_API int ggml_backend_score(void);
 //   qmv_mul_mat_count        MUL_MAT nodes completed on the GPU with repacked weights (ameva_qmv, ameva_qgemm or
 //                            ameva_mmq kernels)
 //   mmq_mul_mat_count        of those, the nodes that ran ameva_mmq (int8 activations, integer dot products)
+//   mmqb_mul_mat_count       of those, the nodes that ran ameva_mmqb (one activation scale per 256 elements,
+//                            integer accumulation over the block)
 GGML_API int64_t ggml_backend_ameva_get_supports_query_count(void);
 GGML_API int64_t ggml_backend_ameva_get_supported_op_count(void);
 GGML_API int64_t ggml_backend_ameva_get_gpu_op_count(void);
@@ -54,6 +56,7 @@ GGML_API int64_t ggml_backend_ameva_get_repacked_tensor_count(void);
 GGML_API int64_t ggml_backend_ameva_get_repacked_bytes(void);
 GGML_API int64_t ggml_backend_ameva_get_qmv_mul_mat_count(void);
 GGML_API int64_t ggml_backend_ameva_get_mmq_mul_mat_count(void);
+GGML_API int64_t ggml_backend_ameva_get_mmqb_mul_mat_count(void);
 // node pairs computed by one fused dispatch sequence (graph-engine fusion, AMEVA_FUSE); counted when recorded
 GGML_API int64_t ggml_backend_ameva_get_fused_pair_count(void);
 GGML_API const char* ggml_backend_ameva_get_build_commit(void);

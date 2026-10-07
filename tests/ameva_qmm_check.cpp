@@ -19,6 +19,9 @@
 // x / d lies within 1e-4 of a rounding boundary may round either way on the GPU (Vulkan division is not correctly
 // rounded), so its |w| d is added to the allowed error. Weight decoding errors stay orders of magnitude above that.
 // With AMEVA_MMQ=1 every repacked case with at least 8 activation rows must take ameva_mmq.
+// A case that ran ameva_mmqb (the mmqb counter moved as well) has one activation scale per 256 elements, and its
+// reference rounds that way. With AMEVA_MMQB set every such case of the weight types it selects (q4_K, q5_K and q6_K,
+// or the types a list of <type>=<w>x<a> names) must take ameva_mmqb, and no case of another type may.
 // Exit 0 only if every case passes and supports_op accepted every case.
 #include "ggml.h"
 #include "ggml-alloc.h"
@@ -29,6 +32,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 
 static uint32_t g_seed = 0x9e3779b9u;
@@ -47,29 +51,40 @@ static const char* placement_name(Placement p) {
 struct Result {
     bool supported;
     bool pass;
-    bool mmq;   // ran ameva_mmq
+    bool mmq;   // ran ameva_mmq or ameva_mmqb (int8 activations)
+    bool mmqb;  // ran ameva_mmqb (one activation scale per 256 elements)
     double max_rel;
     const char* why; // first failed check other than the numeric bound
 };
 
-// activation row x (K values) as ameva_quant_a8 rounds it: xq[k] = q_k * d of its 32-element unit; amb[k] = d when
-// x_k / d lies within 1e-4 of a rounding boundary (the GPU may round it the other way), else 0
-static void quant_a8_ref(const float* x, int K, std::vector<double>& xq, std::vector<double>& amb) {
+// activation row x (K values) as ameva_quant_a8 (blk = 32) or ameva_quant_a8b (blk = 256) rounds it: xq[k] = q_k * d
+// of its block of blk elements; amb[k] = d when x_k / d lies within 1e-4 of a rounding boundary (the GPU may round it
+// the other way), else 0
+static void quant_a8_ref(const float* x, int K, int blk, std::vector<double>& xq, std::vector<double>& amb) {
     xq.assign(K, 0.0);
     amb.assign(K, 0.0);
-    for (int u = 0; u < K / 32; ++u) {
+    for (int u = 0; u < K / blk; ++u) {
         float amax = 0.0f;
-        for (int k = 0; k < 32; ++k) amax = std::max(amax, std::fabs(x[32 * u + k]));
+        for (int k = 0; k < blk; ++k) amax = std::max(amax, std::fabs(x[blk * u + k]));
         const float d = amax / 127.0f;
         const float id = d != 0.0f ? 1.0f / d : 0.0f;
-        for (int k = 0; k < 32; ++k) {
-            const float v = x[32 * u + k] * id;
+        for (int k = 0; k < blk; ++k) {
+            const float v = x[blk * u + k] * id;
             const double q = std::max(-127.0, std::min(127.0, (double)std::nearbyint(v)));
-            xq[32 * u + k] = q * (double)d;
+            xq[blk * u + k] = q * (double)d;
             const double frac = (double)v - std::floor((double)v);
-            if (std::fabs(frac - 0.5) < 1e-4) amb[32 * u + k] = d;
+            if (std::fabs(frac - 0.5) < 1e-4) amb[blk * u + k] = d;
         }
     }
+}
+
+// whether AMEVA_MMQB selects ameva_mmqb for the weight type (the rule of ggml-ameva.cpp)
+static bool mmqb_selected(enum ggml_type type) {
+    const char* e = getenv("AMEVA_MMQB");
+    if (!e || !*e || strcmp(e, "0") == 0) return false;
+    if (type != GGML_TYPE_Q4_K && type != GGML_TYPE_Q5_K && type != GGML_TYPE_Q6_K) return false;
+    if (!strchr(e, '=')) return true;
+    return (std::string(",") + e).find(std::string(",") + ggml_type_name(type) + "=") != std::string::npos;
 }
 
 static bool repackable(enum ggml_type t) {
@@ -77,7 +92,7 @@ static bool repackable(enum ggml_type t) {
 }
 
 static Result run_case(ggml_backend_t be, enum ggml_type type, int M, int N, int K, Placement place, bool repack_on) {
-    Result res = {false, false, false, 0.0, nullptr};
+    Result res = {false, false, false, false, 0.0, nullptr};
     const int VIEW_ROW0 = 3, VIEW_EXTRA = 5; // the view takes rows [3, 3 + N) of a weight with N + 5 rows
     const int NW = place == VIEW ? N + VIEW_EXTRA : N;
     std::vector<float> wf((size_t)NW * K), af((size_t)M * K), wref((size_t)NW * K);
@@ -120,6 +135,7 @@ static Result run_case(ggml_backend_t be, enum ggml_type type, int M, int N, int
     const int64_t repacked0 = ggml_backend_ameva_get_repacked_tensor_count();
     const int64_t qmv0 = ggml_backend_ameva_get_qmv_mul_mat_count();
     const int64_t mmq0 = ggml_backend_ameva_get_mmq_mul_mat_count();
+    const int64_t mmqb0 = ggml_backend_ameva_get_mmqb_mul_mat_count();
     if (place == SPLIT) {
         // the first write ends inside a row and is not the whole tensor
         const size_t cut = wbytes / 3 + 1;
@@ -144,13 +160,20 @@ static Result run_case(ggml_backend_t be, enum ggml_type type, int M, int N, int
     const int64_t d_repacked = ggml_backend_ameva_get_repacked_tensor_count() - repacked0;
     const int64_t d_qmv = ggml_backend_ameva_get_qmv_mul_mat_count() - qmv0;
     const int64_t d_mmq = ggml_backend_ameva_get_mmq_mul_mat_count() - mmq0;
+    const int64_t d_mmqb = ggml_backend_ameva_get_mmqb_mul_mat_count() - mmqb0;
     res.mmq = d_mmq == 1;
+    res.mmqb = d_mmqb == 1;
     static const bool mmq_required = getenv("AMEVA_MMQ") && strcmp(getenv("AMEVA_MMQ"), "1") == 0;
+    const bool mmqb_want = mmqb_selected(type);
     if (d_repacked != (expect_repacked ? 1 : 0)) res.why = "repacked tensor count did not move as expected";
     else if (d_qmv != (expect_repacked ? 1 : 0)) res.why = "qmv MUL_MAT count did not move as expected";
     else if (d_mmq != 0 && d_mmq != 1) res.why = "mmq MUL_MAT count moved by more than one";
     else if (res.mmq && !expect_repacked) res.why = "ameva_mmq ran on weights that are not repacked";
     else if (mmq_required && expect_repacked && M >= 8 && !res.mmq) res.why = "AMEVA_MMQ=1 but ameva_mmq did not run";
+    else if (d_mmqb != 0 && d_mmqb != 1) res.why = "mmqb MUL_MAT count moved by more than one";
+    else if (res.mmqb && !res.mmq) res.why = "ameva_mmqb counted without the int8 MUL_MAT count";
+    else if (res.mmqb && !mmqb_want) res.why = "ameva_mmqb ran on a weight type AMEVA_MMQB does not select";
+    else if (mmqb_want && expect_repacked && M >= 8 && !res.mmqb) res.why = "AMEVA_MMQB selects the type but ameva_mmqb did not run";
     if (!res.why) {
         // the buffer interface returns the ggml bytes that were uploaded, whatever the stored layout
         std::vector<uint8_t> back(wbytes);
@@ -170,7 +193,7 @@ static Result run_case(ggml_backend_t be, enum ggml_type type, int M, int N, int
     const int r0 = place == VIEW ? VIEW_ROW0 : 0;
     std::vector<double> xq, amb;
     for (int m = 0; m < M; ++m) {
-        if (res.mmq) quant_a8_ref(af.data() + (size_t)m * K, K, xq, amb);
+        if (res.mmq) quant_a8_ref(af.data() + (size_t)m * K, K, res.mmqb ? 256 : 32, xq, amb);
         for (int n = 0; n < N; ++n) {
             double ref = 0.0, mag = 0.0, extra = 0.0;
             for (int k = 0; k < K; ++k) {
@@ -216,7 +239,7 @@ int main() {
     const Placement places[] = {RESIDENT, WEIGHTS, SPLIT, VIEW};
     printf("repacking %s\n", repack_on ? "on" : "off (AMEVA_REPACK=0)");
 
-    int total = 0, failed = 0, total_mmq = 0;
+    int total = 0, failed = 0, total_mmq = 0, total_mmqb = 0;
     for (enum ggml_type t : types) {
         double worst = 0.0;
         bool type_ok = true;
@@ -229,6 +252,7 @@ int main() {
                 const Result r = run_case(be, t, s.M, s.N, s.K, p, repack_on);
                 const bool ok = r.supported && r.pass;
                 mmq_cases += r.mmq ? 1 : 0;
+                total_mmqb += r.mmqb ? 1 : 0;
                 if (!ok) {
                     ++failed;
                     type_ok = false;
@@ -244,7 +268,7 @@ int main() {
                mmq_cases, worst, type_ok ? "PASS" : "FAIL");
     }
     ggml_backend_free(be);
-    printf("AMEVA_QMM_CHECK=%s (%d/%d cases, %d through ameva_mmq)\n", failed ? "FAIL" : "PASS", total - failed, total,
-           total_mmq);
+    printf("AMEVA_QMM_CHECK=%s (%d/%d cases, %d through ameva_mmq, %d of them ameva_mmqb)\n",
+           failed ? "FAIL" : "PASS", total - failed, total, total_mmq, total_mmqb);
     return failed ? 1 : 0;
 }
