@@ -1,3 +1,431 @@
+# TOKEN-EFFICIENT ENGINEERING HARNESS
+
+## Primary Objective
+
+Minimize token/context consumption while preserving engineering correctness.
+
+Do not optimize for verbose explanations.
+Do not repeatedly rediscover repository information already known.
+Use tools to reduce information before bringing it into the conversation.
+
+Correctness first, token efficiency second, verbosity last.
+
+---
+
+## 1. Context Budget
+
+Treat context as a scarce engineering resource.
+
+Before reading, searching, or executing anything:
+
+1. Decide exactly what information is needed.
+2. Retrieve the minimum evidence required.
+3. Stop investigating once sufficient evidence exists.
+4. Do not collect information "just in case."
+
+Never dump large files or command outputs into context when filtering can answer the question.
+
+Prefer:
+
+grep / rg
+head
+tail
+sed with narrow ranges
+find with specific filters
+git diff with specific paths
+
+over reading complete files.
+
+---
+
+## 2. Repository Exploration
+
+NEVER recursively inspect the entire repository unless explicitly required.
+
+Do not repeatedly inspect directories or files already examined in the current task.
+
+Start from the most likely implementation path.
+
+Preferred sequence:
+
+1. Search for exact symbols / filenames.
+2. Identify relevant files.
+3. Read only relevant regions.
+4. Modify only required files.
+5. Build/test the smallest affected scope.
+6. Expand investigation only after concrete evidence requires it.
+
+Avoid broad exploratory scans.
+
+BAD:
+
+find . -type f
+cat huge_file
+recursive repository analysis
+
+GOOD:
+
+rg "target_symbol" src/
+sed -n '120,200p' relevant_file.cpp
+git diff -- relevant_file.cpp
+
+---
+
+## 3. Large File Rule
+
+Do not read generated files, binaries, model files, dumps, build artifacts, lockfiles, or large logs unless absolutely necessary.
+
+For large text files:
+
+- search first
+- determine relevant line ranges
+- read only those ranges
+
+Never load a multi-thousand-line file merely to understand one function.
+
+---
+
+## 4. Command Output Filtering
+
+Command output MUST be filtered whenever practical.
+
+Do not return entire build or benchmark logs.
+
+Prefer patterns similar to:
+
+command 2>&1 | tail -n 50
+
+command 2>&1 | grep -E "ERROR|FAIL|WARN|diff|time|ms"
+
+If a command succeeds, retain only the evidence needed to establish success.
+
+If a command fails, retain:
+- error
+- relevant surrounding lines
+- exit status
+- minimum diagnostic context
+
+Do not repeatedly send identical output back into context.
+
+---
+
+## 5. Build/Test Strategy
+
+Always choose the cheapest test capable of falsifying the current hypothesis.
+
+Order:
+
+1. static inspection
+2. targeted unit test
+3. affected component build
+4. targeted device test
+5. integration test
+6. full build/test suite
+
+Do not run expensive full-system validation after every minor edit.
+
+Run full validation only when required for final verification.
+
+---
+
+## 6. Device Work
+
+For AMEVA device testing, send only required artifacts.
+
+Do not repeatedly collect full device logs.
+
+Filter adb/SSH output before returning it.
+
+Record only:
+
+- device
+- workload
+- backend
+- result
+- relevant timing
+- relevant numerical error
+- failure reason
+
+Do not repeat unchanged device information.
+
+---
+
+## 7. AMEVA Ground Truth Rules
+
+Current architecture assumptions:
+
+- AMEVA Compute is the shared low-level compute layer.
+- Vulkan GPU execution is preferred where implemented.
+- STT, TTS, LLM and Vision use shared compute infrastructure where applicable.
+- Model-specific behavior belongs in adapters/engines rather than contaminating the generic compute core.
+- Silent CPU fallback is unacceptable.
+- A successful process exit alone is not proof of GPU execution.
+- Claims require code, logs, tests, traces, timings, or other concrete evidence.
+
+Do not re-derive these principles unless evidence indicates they changed.
+
+---
+
+## 8. No Silent Fallback
+
+Never hide:
+
+- CPU fallback
+- unsupported operation
+- missing shader
+- failed dispatch
+- ignored error
+- forced PASS
+- hardcoded result
+- placeholder implementation
+
+Fail explicitly and report the exact boundary where execution failed.
+
+---
+
+## 9. Investigation Discipline
+
+Maintain a small internal working set:
+
+KNOWN:
+facts already established
+
+UNKNOWN:
+facts necessary for the current task
+
+HYPOTHESIS:
+current suspected cause
+
+NEXT:
+cheapest action capable of proving/disproving the hypothesis
+
+Do not repeatedly investigate KNOWN facts.
+
+When a hypothesis is disproved, discard it instead of repeatedly revisiting it without new evidence.
+
+---
+
+## 10. Subagents / Skills / Harnesses
+
+Do NOT invoke subagents, skills, MCP tools, or secondary analysis automatically.
+
+Use them only when they provide clear value.
+
+Before invoking one, ask internally:
+
+"Can the current agent solve this cheaply with existing context?"
+
+If yes:
+do not delegate.
+
+If delegation is necessary:
+
+- give the subagent a narrow objective
+- provide only relevant paths/context
+- prohibit broad repository exploration
+- request concise evidence/results
+- do not ask multiple agents to investigate the same question
+
+Never spawn agents speculatively.
+
+Never use parallel agents merely to obtain multiple opinions.
+
+---
+
+## 11. Avoid Duplicate Work
+
+Before any search/read:
+
+Check whether the required information already exists in:
+
+- current context
+- CLAUDE.md
+- previous tool output
+- git diff
+- known architecture notes
+
+If already available, reuse it.
+
+Do not reread a file simply because another reasoning step references it.
+
+---
+
+## 12. Git-Aware Investigation
+
+Prefer Git to rediscovering state.
+
+Use targeted commands such as:
+
+git status --short
+git diff --stat
+git diff -- <path>
+git log -n 5 --oneline -- <path>
+
+Do not inspect every repository file to determine what changed.
+
+---
+
+## 13. Generated Artifact Exclusion
+
+Unless directly relevant, ignore:
+
+build/
+dist/
+.cache/
+.gradle/
+node_modules/
+generated/
+models/
+fixtures containing large tensors
+binary blobs
+shader dumps
+benchmark dumps
+temporary files
+
+Do not place generated artifact contents into conversation context.
+
+---
+
+## 14. Response Compression
+
+Engineering responses should default to:
+
+RESULT
+EVIDENCE
+CHANGED
+TEST
+NEXT
+
+Keep each section concise.
+
+Do not repeat the prompt.
+Do not repeat previously established architecture.
+Do not explain elementary concepts unless requested.
+Do not narrate every tool call.
+
+When successful:
+
+RESULT: PASS
+EVIDENCE: <minimal proof>
+
+When unsuccessful:
+
+RESULT: FAIL
+CAUSE: <specific cause>
+EVIDENCE: <minimal proof>
+NEXT: <single best next action>
+
+---
+
+## 15. Context Checkpoint
+
+After completing a meaningful milestone, compress the current state into a short checkpoint.
+
+Format:
+
+CHECKPOINT
+Goal:
+Completed:
+Verified:
+Remaining:
+Relevant files:
+Relevant commands:
+Known failures:
+
+Future work should rely on this checkpoint instead of replaying the full investigation history.
+
+Keep checkpoints factual and compact.
+
+---
+
+## 16. New Session Optimization
+
+Assume a new conversation should be able to resume work using:
+
+1. CLAUDE.md
+2. git status
+3. git diff
+4. latest CHECKPOINT
+
+Do not require previous conversation history if repository state can provide the answer.
+
+Prefer durable repository state over conversational memory.
+
+---
+
+## 17. Stop Conditions
+
+STOP investigating when:
+
+- the requested change is implemented
+- targeted validation passes
+- sufficient evidence supports the conclusion
+
+Do not continue exploring for additional confirmation without a concrete reason.
+
+If blocked, report the blocker immediately instead of consuming context searching indefinitely.
+
+---
+
+## 18. Escalation Policy
+
+Start cheap.
+
+Escalate reasoning/model/tool cost only when needed.
+
+Routine:
+- simple search
+- editing
+- formatting
+- mechanical refactor
+- straightforward build fixes
+
+Use normal reasoning.
+
+Escalate for:
+- architecture decisions
+- difficult Vulkan correctness issues
+- concurrency/race conditions
+- numerical parity failures
+- unidentified GPU faults
+- final release audit
+
+Do not use maximum reasoning effort for routine operations.
+
+---
+
+## 19. User Communication
+
+The user prefers direct engineering results.
+
+Do not produce long progress narration.
+
+During execution, communicate only when:
+
+- a major decision is required
+- an unexpected architectural issue is discovered
+- execution is blocked
+- validation fails materially
+
+Otherwise work silently and report the result.
+
+---
+
+## 20. Absolute Rule
+
+Every token introduced into context should justify its cost.
+
+SEARCH narrowly.
+READ selectively.
+FILTER outputs.
+TEST incrementally.
+REUSE known facts.
+DELEGATE sparingly.
+REPORT concisely.
+STOP when proven.
+
+---
+
 # AMEVA-COMPUTE & AMUDA Master Engineering Specification (CLAUDE.md)
 
 > 본 문서는 Claude Code CLI 및 모든 에이전트가 본 프로젝트에서 반드시 100% 준수해야 하는 절대적 엔지니어링 행동 강령, 철학, 어조 규약, 실기기 테스팅 하네스 가이드라인입니다.
