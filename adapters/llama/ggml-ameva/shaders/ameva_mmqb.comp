@@ -47,68 +47,7 @@ layout(push_constant) uniform PushConstants {
     uint d_off, sd;
 } pc;
 
-#if defined(TYPE_Q6_K)
-#define HALF_SCALES // an integer scale per 16-weight half; the weights are taken signed (v - 32), so no offset term
-#elif !defined(TYPE_Q4_K) && !defined(TYPE_Q5_K)
-#error "ameva_mmqb: TYPE_Q4_K, TYPE_Q5_K or TYPE_Q6_K"
-#endif
-
-// the four bytes of a word as integers
-ivec4 ub4(uint w) { return ivec4(uvec4(w, w >> 8u, w >> 16u, w >> 24u) & 0xFFu); }
-// the low and the high 16 bits of each component, sign-extended
-ivec4 lo16(ivec4 p) { return (p << 16) >> 16; }
-ivec4 hi16(ivec4 p) { return p >> 16; }
-
-// the 16 bytes at the even byte address a of S as four little-endian words
-void sld4(uint a, out uint w[4]) {
-    const uint wi = a >> 2u;
-    const uint x0 = sw_at(wi), x1 = sw_at(wi + 1u), x2 = sw_at(wi + 2u), x3 = sw_at(wi + 3u);
-    if ((a & 2u) == 0u) {
-        w[0] = x0;
-        w[1] = x1;
-        w[2] = x2;
-        w[3] = x3;
-    } else {
-        const uint x4 = sw_at(wi + 4u);
-        w[0] = (x0 >> 16u) | (x1 << 16u);
-        w[1] = (x1 >> 16u) | (x2 << 16u);
-        w[2] = (x2 >> 16u) | (x3 << 16u);
-        w[3] = (x3 >> 16u) | (x4 << 16u);
-    }
-}
-
-// ameva_qdecode.glsl's spread4 and spread2 on four words at once: bit k (k = 0..3) of each component -> bit 4 of its
-// byte k; 2-bit field k of each component -> bits 0..1 of its byte k
-uvec4 spread4v(uvec4 x) { return ((x & 1u) << 4u) | ((x & 2u) << 11u) | ((x & 4u) << 18u) | ((x & 8u) << 25u); }
-uvec4 spread2v(uvec4 x) { return (x & 3u) | ((x & 0xCu) << 6u) | ((x & 0x30u) << 12u) | ((x & 0xC0u) << 18u); }
-
-// The 32 weights of one unit as int8: byte k of component c of lo is the weight 4c + k, of hi the weight 16 + 4c + k.
-// q4_K, q5_K: v (0..15, 0..31) as ameva_qdecode.glsl's decode_i8 gives it; q6_K: v - 32 (-32..31).
-void unit_i8(uint qi, uint hi, out uvec4 lo_out, out uvec4 hi_out) {
-    const uvec4 q = qv[qi];
-    uvec4 l = q & 0x0F0F0F0Fu;
-    uvec4 h = (q >> 4u) & 0x0F0F0F0Fu;
-#if defined(TYPE_Q5_K)
-    const uvec4 b = uvec4(hv[hi]); // bit k: the fifth bit of weight k
-    l = l | spread4v(b >> uvec4(0u, 4u, 8u, 12u));
-    h = h | spread4v(b >> uvec4(16u, 20u, 24u, 28u));
-#elif defined(TYPE_Q6_K)
-    const uvec2 b = hv[hi]; // 2-bit field k of x: bits 4..5 of weight k, of y: of weight 16 + k
-    l = l | (spread2v(uvec4(b.x) >> uvec4(0u, 8u, 16u, 24u)) << 4u);
-    h = h | (spread2v(uvec4(b.y) >> uvec4(0u, 8u, 16u, 24u)) << 4u);
-    // v - 32 as a signed byte: v & 31 when bit 5 is set, otherwise v | 0xE0
-    l = (l & 0x1F1F1F1Fu) | (((~l >> 5u) & 0x01010101u) * 0xE0u);
-    h = (h & 0x1F1F1F1Fu) | (((~h >> 5u) & 0x01010101u) * 0xE0u);
-#endif
-    lo_out = l;
-    hi_out = h;
-}
-
-// sum of the sixteen products of one half of a unit
-int dot16(uvec4 w, uvec4 a) {
-    return dotPacked4x8EXT(int(w.x), int(a.x)) + dotPacked4x8EXT(int(w.y), int(a.y)) +
-           dotPacked4x8EXT(int(w.z), int(a.z)) + dotPacked4x8EXT(int(w.w), int(a.w));
-}
+#include "ameva_blk.glsl"
 
 void main() {
     qdecode_init(gl_LocalInvocationID.x);
@@ -150,22 +89,9 @@ void main() {
 #if defined(HALF_SCALES)
             int sc1[DRW];
 #endif
-            [[unroll]] for (uint i = 0u; i < DRW; ++i) {
-                const uint row = min(n0 + i, pc.N - 1u);
-                uvec4 l, h;
-                unit_i8(pc.q_off + (row * U + u) * QPER, pc.h_off + row * U + u, l, h);
-                wlo[i] = l;
-                whi[i] = h;
-#if defined(HALF_SCALES)
-                const int pr = int(scw[4u * i + (j8 >> 1u)] >> (16u * (j8 & 1u)));
-                sc0[i] = (pr << 24) >> 24;
-                sc1[i] = (pr << 16) >> 24;
-#else
-                const uint k = 8u * (j8 & 3u);
-                const uint b0 = (scw[4u * i + 1u] >> k) & 0xFFu, b2 = (scw[4u * i + 3u] >> k) & 0xFFu;
-                sc0[i] = int(j8 < 4u ? (b0 & 63u) : ((b2 & 0xFu) | ((b0 >> 6u) << 4u)));
-#endif
-            }
+            // the weight rows written out, not looped over: see UNIT_ROW (ameva_blk.glsl)
+            UNIT_ROW(0u)
+            if (DRW > 1u) UNIT_ROW(DRW - 1u)
             [[unroll]] for (uint j = 0u; j < DRA; ++j) {
                 const uint g = pc.aq_off + 2u * (min(m0 + j, pc.M - 1u) * U + u);
                 const uvec4 a0 = aq[g], a1 = aq[g + 1u];

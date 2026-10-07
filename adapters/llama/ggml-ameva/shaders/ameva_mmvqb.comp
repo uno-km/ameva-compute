@@ -1,0 +1,171 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_EXT_integer_dot_product : require
+// AMEVA MMVQB: token-generation MUL_MAT (one activation row) with integer dot products and integer accumulation over
+// a 256-weight block: the weight a 256-weight super-block type stored in the AMEVA repacked layout
+// (ggml-ameva-repack.h), the activation row quantized to int8 with one scale per 256-element block by ameva_quant_a8b
+// (d_a, q_a, sums of q_a per 16-element half), as for ameva_mmqb. Per block and weight row, as in ameva_mmqb:
+//   q4_K, q5_K: d_a * (d * sum_u sc_u * dot(v, q_a)_u  -  dmin * sum_u m_u * sum(q_a)_u)
+//   q6_K:       d_a * d * sum_h sc_h * dot(v - 32, q_a)_h
+// with the sums over the units u and halves h exact in 32-bit integers. The difference from ameva_qmv is the rounding
+// of the activations to int8 per block (|error| <= d_a / 2 per element); the weights are used at full precision.
+// Against ameva_mmvq (one activation scale per 32 elements): per unit a lane loads the weights of its rows and the two
+// halves of the activation unit and nothing else; the scales of the weights and of the activations are loaded once
+// per block. The OpenCL prototype is gemv_q4k_i8_blk (opencl/ameva_cl_q4k.cl).
+//
+// Work split as ameva_mmvq, with whole blocks per lane: the LX invocations form LX / tpr groups of tpr lanes; a group
+// owns DRW consecutive weight rows; its lanes stride over the 256-weight blocks. Partial sums are reduced in shared
+// memory. tpr = 1 is the split of the prototype (an invocation owns whole rows). Rows past N are computed from the
+// last row and not stored.
+//   bindings 0..2: repacked weights (ameva_qdecode.glsl), binding 3: AQ (uvec4), binding 4: AB (uvec4),
+//   binding 5: dst F32, binding 6: epilogue operand F32, binding 7: epilogue output F32
+//   push (the block of ameva_mmvq): K, N (weight rows of this dispatch), q_off, h_off (Q / H vector elements),
+//         s_off (bytes, even), aq_off, ab_off (uvec4), d_off (floats), tpr (a power of two, at most LX and K / 256),
+//         ep_mode, e_off, eo_off (floats)
+// Epilogue as ameva_qmv: eout[n] = v + e[n] (1), silu(v) * e[n] (2) or silu(e[n]) * v (3); ep_mode 0: none.
+//   grid: ceil(N / (DRW * LX / tpr))
+//   variants: -DTYPE_Q4_K, -DTYPE_Q5_K, -DTYPE_Q6_K; -DDRW=<1u|2u> (weight rows per group), -DLX=<n> (local size)
+//
+// Not built into the plugin (scripts/build_ameva_kernels.py does not list it). Measured in the product on Mali-G68
+// r32p1 (Galaxy A53, OpenCL, 2026-10-07) with its text in place of ameva_mmvq's (AMEVA_CL_SOURCE_DIR), kernel ms,
+// the layout the backend measures and chooses -> this kernel's best (rows x lanes): q4_K 8192x2048 0.97 -> 0.91
+// (1x2), q4_K 2048x8192 1.01 -> 1.11 (2x16), q6_K 32064x2048 5.10 -> 11.4 (1x8), q5_K 8192x2048 1.50 -> 1.80 (1x1).
+// The chosen layouts already read the weights at the rate of memory that is not cache-resident (9.4 MB in 0.97 ms,
+// 53.9 MB in 5.1 ms), and what the block form saves is loads of activations and scales, which are cache-resident.
+// Its results were compared with the f32 product only (largest difference over the RMS of the outputs 1.3e-2 to
+// 1.9e-2, ameva_mmvq 1.2e-2 to 1.7e-2), not with a reference rounded per block.
+
+#if !defined(DRW) || !defined(LX)
+#error "ameva_mmvqb: DRW and LX must be defined"
+#endif
+
+layout(local_size_x = LX, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+#include "ameva_qdecode.glsl"
+
+layout(std430, binding = 3) readonly buffer BufAQ { uvec4 aq[]; };
+layout(std430, binding = 4) readonly buffer BufAB { uvec4 ab[]; };
+layout(std430, binding = 5) writeonly buffer BufD { float dst[]; };
+layout(std430, binding = 6) readonly buffer BufE { float epi[]; };
+layout(std430, binding = 7) writeonly buffer BufEO { float eout[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint K, N, q_off, h_off;
+    uint s_off, aq_off, ab_off, d_off;
+    uint tpr, ep_mode, e_off, eo_off;
+} pc;
+
+#include "ameva_blk.glsl"
+
+shared float red[DRW * LX];
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    qdecode_init(tid);
+    const uint tpr = pc.tpr;
+    const uint g = tid / tpr;
+    const uint lane = tid - g * tpr;
+    const uint n0 = (gl_WorkGroupID.x * (LX / tpr) + g) * DRW;
+    const uint U = pc.K >> 5u;
+    const uint B = pc.K >> 8u;
+    const uint s_row = B * SB;
+    float acc[DRW];
+    [[unroll]] for (uint i = 0u; i < DRW; ++i) {
+        acc[i] = 0.0;
+    }
+
+    for (uint b = lane; b < B; b += tpr) {
+        // the first 16 bytes of the block's scales per weight row, as they are stored; decoded where they are used
+        // (see ameva_mmqb.comp)
+        uint scw[4u * DRW];
+        [[unroll]] for (uint i = 0u; i < DRW; ++i) {
+            uint w[4];
+            sld4(pc.s_off + min(n0 + i, pc.N - 1u) * s_row + b * SB, w);
+            scw[4u * i] = w[0];
+            scw[4u * i + 1u] = w[1];
+            scw[4u * i + 2u] = w[2];
+            scw[4u * i + 3u] = w[3];
+        }
+
+        int isum[DRW];
+        [[unroll]] for (uint i = 0u; i < DRW; ++i) {
+            isum[i] = 0;
+        }
+        for (uint j8 = 0u; j8 < 8u; ++j8) {
+            const uint u = 8u * b + j8;
+            uvec4 wlo[DRW], whi[DRW];
+            int sc0[DRW];
+#if defined(HALF_SCALES)
+            int sc1[DRW];
+#endif
+            // the weight rows written out, not looped over: see UNIT_ROW (ameva_blk.glsl)
+            UNIT_ROW(0u)
+            if (DRW > 1u) UNIT_ROW(DRW - 1u)
+            const uint g = pc.aq_off + 2u * u;
+            const uvec4 a0 = aq[g], a1 = aq[g + 1u];
+            [[unroll]] for (uint i = 0u; i < DRW; ++i) {
+#if defined(HALF_SCALES)
+                isum[i] += sc0[i] * dot16(wlo[i], a0) + sc1[i] * dot16(whi[i], a1);
+#else
+                isum[i] += sc0[i] * (dot16(wlo[i], a0) + dot16(whi[i], a1));
+#endif
+            }
+        }
+
+        // the block's contribution: the scales that are one per block and weight row, and for q4_K, q5_K the minima
+        const uint gb = pc.ab_off + 4u * b;
+        const float da = uintBitsToFloat(ab[gb].x);
+#if defined(HALF_SCALES)
+        [[unroll]] for (uint i = 0u; i < DRW; ++i) {
+            const float dw = sldh(pc.s_off + min(n0 + i, pc.N - 1u) * s_row + b * SB + 16u);
+            acc[i] += da * (dw * float(isum[i]));
+        }
+#else
+        const ivec4 p0 = ivec4(ab[gb + 1u]), p1 = ivec4(ab[gb + 2u]);
+        const ivec4 su0 = lo16(p0) + hi16(p0), su1 = lo16(p1) + hi16(p1); // sums of q_a over units 0..3, 4..7
+        [[unroll]] for (uint i = 0u; i < DRW; ++i) {
+            const float dw = ameva_h2f(scw[4u * i] & 0xFFFFu);
+            const float dm = ameva_h2f(scw[4u * i] >> 16u);
+            const ivec4 mn0 = ub4(scw[4u * i + 2u]) & 63; // the minima of units 0..3
+            const ivec4 mn1 = (ub4(scw[4u * i + 3u]) >> 4) | ((ub4(scw[4u * i + 2u]) >> 6) << 4); // of units 4..7
+            const ivec4 t = mn0 * su0 + mn1 * su1;
+            acc[i] += da * (dw * float(isum[i]) - dm * float(t.x + t.y + t.z + t.w));
+        }
+#endif
+    }
+
+    [[unroll]] for (uint i = 0u; i < DRW; ++i) {
+        red[i * LX + tid] = acc[i];
+    }
+    barrier();
+    for (uint st = tpr >> 1u; st > 0u; st >>= 1u) {
+        if (lane < st) {
+            [[unroll]] for (uint i = 0u; i < DRW; ++i) {
+                red[i * LX + tid] += red[i * LX + tid + st];
+            }
+        }
+        barrier();
+    }
+    if (lane != 0u) return;
+    [[unroll]] for (uint i = 0u; i < DRW; ++i) {
+        const uint n = n0 + i;
+        if (n < pc.N) {
+            const float val = red[i * LX + tid];
+            dst[pc.d_off + n] = val;
+            if (pc.ep_mode != 0u) {
+                const float e = epi[pc.e_off + n];
+                float o;
+                if (pc.ep_mode == 1u) {
+                    o = val + e;
+                } else if (pc.ep_mode == 2u) {
+                    o = (val / (1.0 + exp(-val))) * e;
+                } else {
+                    o = (e / (1.0 + exp(-e))) * val;
+                }
+                eout[pc.eo_off + n] = o;
+            }
+        }
+    }
+}
