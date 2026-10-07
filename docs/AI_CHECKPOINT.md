@@ -34,5 +34,5 @@
 ### Next Actions
 1. S21 (GPU held by another session's Z-Image sweep, 3 workflows of about 3.6 h, second started 19:39): queued `mmqb_wait2.sh` (pid 22747) runs when no GPU workload was seen for 3 min. Read `~/abi-lab/results/mmqb_s21_wait.txt` (`MMQB_WAIT_DONE`), `mmqb_s21.txt` (checks and layout scan with the fix) and `kg_s21.txt` (block GEMV against chosen layouts). Cancel: `touch ~/abi-lab/mmqb_wait.stop`. Then decide defaults; wire `ameva_mmvqb` into the plugin only if S21 shows a gain.
 2. Defaults, evidence so far: A53 OpenCL `AMEVA_MMQB=2x8` (prompt 1.25x the tile, 1.23x the CPU); A35 stays on Vulkan; S25, S20 off. ameva-runtime lab scripts (`cl_model.sh` modes `cl_mmqb1`, `cl_mmqb2`; `mmqb_*.sh`, `kq.sh`, `kg.sh`) are uncommitted there.
-3. The working tree holds other sessions' edits (licence header lines, also in the two generated kernel headers): stage by path.
+3. Another session's whole-tree commit `2f4125c` (licence headers, 210 files, 2026-10-07 21:04) also committed the kernel-tuning hunk `AMEVA_CL_SOURCE_DIR` in `ggml-ameva.cpp` (was uncommitted; review whether it stays) and put 4 licence lines in front of `ggml_ameva_kernels_{spv,cl}.h`, which `build_ameva_kernels.py` does not emit: a regeneration removes them.
 4. Maintain single-file state in this checkpoint; do not reread historical logs.
