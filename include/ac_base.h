@@ -85,7 +85,8 @@ typedef enum {
     AC_ERR_FEATURE_NOT_SUPPORTED        = -108,
     AC_ERR_INVALID_SHAPE                = -109,
     AC_ERR_ABI_MISMATCH                 = -110,
-    
+    AC_ERR_BACKEND_UNAVAILABLE          = -111, /* context creation refused for this host process (ac_security_guard) */
+
     /* Memory Management Errors (200-299) */
     AC_ERR_OUT_OF_HOST_MEMORY           = -201,
     AC_ERR_OUT_OF_DEVICE_MEMORY         = -202,

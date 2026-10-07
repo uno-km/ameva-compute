@@ -40,13 +40,19 @@ mkdir -p "$OUT"
 echo "[build_ggml_ameva] ggml headers: $GGML_DIR"
 echo "[build_ggml_ameva] link: $BASE_LIB $REG_LIB"
 
+# The host-environment guard is C; it is compiled as C and linked in. --no-undefined: a source missing from this list
+# fails here, not when llama.cpp loads the library (2026-10-07: "cannot locate symbol
+# ac_security_verify_host_environment" at load, because the guard was called but not built).
+clang -O2 -fPIC -c -I "$ROOT/include" -I "$ROOT/src/runtime" "$ROOT"/src/runtime/ac_security_guard.c \
+    -o "$OUT/ac_security_guard.o"
 clang++ -O2 -fPIC -shared -std=c++17 -I "$ROOT/include" -I "$ROOT/src" \
     "$ROOT"/src/backend/vulkan/ac_vk_buffer.cpp "$ROOT"/src/backend/vulkan/ac_vk_context.cpp \
     "$ROOT"/src/backend/vulkan/ac_vk_dispatch.cpp "$ROOT"/src/backend/vulkan/ac_vk_event.cpp \
     "$ROOT"/src/backend/vulkan/ac_vk_loader.cpp "$ROOT"/src/backend/vulkan/ac_vk_pipeline.cpp \
     "$ROOT"/src/backend/opencl/ac_cl_backend.cpp \
-    "$ROOT"/src/runtime/ac_runtime.cpp "$ROOT"/src/runtime/ac_error.cpp \
-    -lvulkan -ldl -lm -Wl,-soname,libac_runtime.so.2 -o "$OUT/libac_runtime.so.2"
+    "$ROOT"/src/runtime/ac_runtime.cpp "$ROOT"/src/runtime/ac_error.cpp "$OUT/ac_security_guard.o" \
+    -lvulkan -ldl -lm -Wl,-soname,libac_runtime.so.2 -Wl,--no-undefined -o "$OUT/libac_runtime.so.2"
+rm -f "$OUT/ac_security_guard.o"
 
 A="$ROOT/adapters/llama/ggml-ameva"
 clang++ -O2 -fPIC -shared -std=c++20 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers \
