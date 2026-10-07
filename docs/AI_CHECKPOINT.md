@@ -1,7 +1,7 @@
 # Current Engineering Checkpoint
 
 **Timestamp**: 2026-10-08T02:25:00+09:00  
-**Branch**: `perf/opencl-mali`, not pushed: `ea0a336` (conv kernel and bench), then the commit that carries this file (CONV_2D in ggml-ameva)  
+**Branch**: `perf/opencl-mali` (pushed: `109ba54` CONV_2D in ggml-ameva, `ea0a336` conv kernel and bench)  
 **Current Goal**: 5-Modality Pipeline Optimization (1. Diffusion -> 2. STT -> 3. BitNet -> 4. Vision -> 5. TTS); STRICTLY LOCAL under `dev/` (no remote branch fetch).
 
 ### Verified (Ground Truth)
