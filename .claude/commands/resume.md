@@ -5,6 +5,8 @@ Current branch: perf/opencl-mali.
 
 Proceed immediately to Next Action #1 in docs/AI_CHECKPOINT.md.
 
+Strict Language Rule: Think, plan, narrate tools, and respond in concise English ONLY to prevent token inflation.
+
 Respond only in the compressed format:
 RESULT:
 EVIDENCE:

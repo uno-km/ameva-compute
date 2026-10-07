@@ -426,6 +426,15 @@ STOP when proven.
 
 ---
 
+## 21. Language Policy: English-Only Internal Reasoning & Output
+
+To eliminate UTF-8 Korean subword/byte token inflation (~2.5x token multiplier):
+- ALL internal thinking, extended reasoning, tool call narration, and internal monologue MUST be conducted strictly in concise technical English.
+- NEVER think, monologue, or narrate in Korean.
+- Respond strictly in concise technical English following the compressed format.
+
+---
+
 # AMEVA-COMPUTE & AMUDA Master Engineering Specification (CLAUDE.md)
 
 > 본 문서는 Claude Code CLI 및 모든 에이전트가 본 프로젝트에서 반드시 100% 준수해야 하는 절대적 엔지니어링 행동 강령, 철학, 어조 규약, 실기기 테스팅 하네스 가이드라인입니다.
