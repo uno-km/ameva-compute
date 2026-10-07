@@ -1,8 +1,8 @@
 # Current Engineering Checkpoint
 
-**Timestamp**: 2026-10-07T21:06:00+09:00  
-**Branch**: `perf/opencl-mali` (code at `e3a3af8`; pushed to origin 2026-10-07 21:05 with the checkpoint commits after it)  
-**Current Goal**: Mali OpenCL prompt path (primary S21 Mali-G78, A53 Mali-G68; secondary S25, A35, S20) & Wan 2.1 5D Broadcast  
+**Timestamp**: 2026-10-07T21:18:00+09:00  
+**Branch**: `perf/opencl-mali` (clean working tree synced with origin)  
+**Current Goal**: 5-Modality Pipeline Optimization (1. Diffusion -> 2. STT -> 3. BitNet -> 4. Vision -> 5. TTS); STRICTLY LOCAL under `dev/` (no remote branch fetch).
 
 ### Verified (Ground Truth)
 - [PASS] Zero-Source Leakage Audit: `termux-bitnet` and `termux-vision` public repos stripped of all `.cpp`/`.comp` sources.
@@ -22,17 +22,15 @@
 - Known, not examined: 64-token generation text of Llama-3.2-1B departs from the CPU's at byte 70 on A53 OpenCL and on A35 Vulkan and OpenCL (same place, coherent text, block kernels on or off); S25 OpenCL `ameva_qmm_check` 510/516 (q2_K M=1, `ameva_qmv_q2_K_c1_r4` build -6); S20 OpenCL `ameva_qmm_check` exits 139 and its f32 tile takes 8.6-16.3 s per kernel.
 
 ### Current Problem & Focus
-- Per-device defaults of `ameva_mmqb` (opt-in today). Evidence so far: it wins only on Mali OpenCL (A53, A35); S21 is not measured.
-- Wan 2.1 5D tensor broadcast.
+- Stage 1 [Diffusion]: VAE decoder GPU optimization & Wan 2.1 5D tensor broadcast (B, C, T, H, W).
+- Fleet Defaults: A53 OpenCL MMQB 2x8, A35 Vulkan tile, S25/S20 off. S21 queued unattended overnight (pid 22747).
 
 ### Relevant Files
-- `adapters/llama/ggml-ameva/shaders/ameva_mmqb.comp`, `ameva_blk.glsl`, `ameva_mmvqb.comp`; `ggml_ameva_kernels_{spv,cl}.h` (generated)
-- `scripts/glsl_to_opencl.py`, `scripts/build_ameva_kernels.py`; `docs/design/opencl-prompt-path.md` (stage B, order 4 and its supplement)
-- ameva-runtime `tools/fleet/lab/mmqb_dev.sh`, `mmqb_wait.sh` (untracked); on A53 `~/abi-lab`: `kq.sh`, `kg.sh`, `kq/` (kernel-text variants), `out-x2` (override build), `out-m2` (fix build), `regen/` (generator tree)
-- `src/runtime/ac_runtime.cpp`, `src/runtime/ac_security_guard.c`, `adapters/bitnet/`, `adapters/vision/`
+- `dev/termux/termux-diffusion/`, `dev/termux/termux-stt/`, `dev/termux/termux-bitnet/`, `dev/termux/termux-vision/`, `dev/termux/termux-tts/`
+- `adapters/llama/ggml-ameva/`, `src/runtime/ac_runtime.cpp`, `include/ac_base.h`
 
 ### Next Actions
-1. S21 (GPU held by another session's Z-Image sweep, 3 workflows of about 3.6 h, second started 19:39): queued `mmqb_wait2.sh` (pid 22747) runs when no GPU workload was seen for 3 min. Read `~/abi-lab/results/mmqb_s21_wait.txt` (`MMQB_WAIT_DONE`), `mmqb_s21.txt` (checks and layout scan with the fix) and `kg_s21.txt` (block GEMV against chosen layouts). Cancel: `touch ~/abi-lab/mmqb_wait.stop`. Then decide defaults; wire `ameva_mmvqb` into the plugin only if S21 shows a gain.
-2. Defaults, evidence so far: A53 OpenCL `AMEVA_MMQB=2x8` (prompt 1.25x the tile, 1.23x the CPU); A35 stays on Vulkan; S25, S20 off. ameva-runtime lab scripts (`cl_model.sh` modes `cl_mmqb1`, `cl_mmqb2`; `mmqb_*.sh`, `kq.sh`, `kg.sh`) are uncommitted there.
-3. Another session's whole-tree commit `2f4125c` (licence headers, 210 files, 2026-10-07 21:04) also committed the kernel-tuning hunk `AMEVA_CL_SOURCE_DIR` in `ggml-ameva.cpp` (was uncommitted; review whether it stays) and put 4 licence lines in front of `ggml_ameva_kernels_{spv,cl}.h`, which `build_ameva_kernels.py` does not emit: a regeneration removes them.
-4. Maintain single-file state in this checkpoint; do not reread historical logs.
+1. Stage 1 (Diffusion): Inspect LOCAL `dev/termux/termux-diffusion/` (do NOT fetch remote branches), isolate VAE decode bottleneck, and design Wan 2.1 5D tensor broadcast kernel.
+2. S21: Unattended watcher (pid 22747) will read `mmqb_s21.txt` when diffusion sweep ends.
+3. Follow 5-Modality Master Order: Diffusion -> STT -> BitNet -> Vision -> TTS.
+4. Maintain single-file state in this checkpoint (<40 lines); do not reread historical logs.
