@@ -1,7 +1,7 @@
 # Current Engineering Checkpoint
 
-**Timestamp**: 2026-10-07T21:10:00+09:00  
-**Branch**: `perf/opencl-mali` (code at `e3a3af8`; local commits `1b58ea8`, `e3a3af8` and the checkpoint commits after it are not pushed: origin was at `29b5362` at the last fetch)  
+**Timestamp**: 2026-10-07T21:06:00+09:00  
+**Branch**: `perf/opencl-mali` (code at `e3a3af8`; pushed to origin 2026-10-07 21:05 with the checkpoint commits after it)  
 **Current Goal**: Mali OpenCL prompt path (primary S21 Mali-G78, A53 Mali-G68; secondary S25, A35, S20) & Wan 2.1 5D Broadcast  
 
 ### Verified (Ground Truth)
@@ -17,8 +17,9 @@
 - Kernel time 352x2048x2048 after the fix (ms, tile `ameva_mmq` -> `ameva_mmqb` 2x8): A53 OpenCL q4_K 27.7-28.0 -> 18.7-18.9, q5_K 31.2-32.1 -> 23.8-24.0 (before 72-76), q6_K 32.3-32.8 -> 27.8-28.9 (before 59-71). A35 OpenCL 2x8 before -> after: q4_K 19.6-21.5 -> 15.5, q5_K 89 -> 22.9, q6_K 80-90 -> 40.2 (best stays 1x8 24.5). A35 Vulkan 2-row layouts are unchanged and slow (60-120; cause not isolated).
 - `ameva_mmqb` loses to the tile on every Vulkan driver and on Adreno OpenCL: A35 Vulkan; S25 (Vulkan 2.44 -> 2.93, OpenCL 3.83 -> 6.12 for q4_K); S20 Vulkan (14.6 -> 52.7; its OpenCL has no int8 dot product). `ameva_qmm_check` Vulkan 516/516 9/9 on S25 and S20. **Keep it off on S25 and S20.**
 - A53 Llama-3.2-1B Q4_K_M prompt t/s at `e3a3af8` (OpenCL, 349 tokens, 3 alternating rounds, cores 0-7): CPU 47.1-47.5, tile 45.8-46.7, `AMEVA_MMQB=q4_K=2x8` 57.3-58.2, `AMEVA_MMQB=2x8` (q4_K, q5_K, q6_K) 57.8-58.8; prompt text equal to the CPU's in 9/9 GPU runs. Generation unchanged (10.9-11.1 vs CPU 13.5-13.8). Batch KLD before the fix 3.13e-3 (gate 0.01; same arithmetic, not measured again).
+- A35 the same benchmark (ssh cores 0-2, plugin `7f8501322218`): prompt CPU 16.8-17.0, **Vulkan tile 82.2-82.5**, OpenCL tile 39.6-40.4, `q4_K=2x8` 55.1-61.1, `2x8` 59.1-67.3; text equal to the CPU's in 12/12 GPU runs. Generation CPU 4.5-4.6, Vulkan 11.8-12.0, OpenCL 13.9-14.0. **On A35 OpenCL with block kernels stays slower than the Vulkan tile for prompts.**
 - Token-generation block kernel written: `shaders/ameva_mmvqb.comp` (GLSL `gemv_q4k_i8_blk`; q4_K, q5_K, q6_K; interface and lane split of `ameva_mmvq`). **Not built into the plugin.** A53, text swapped in for `ameva_mmvq` (`AMEVA_CL_SOURCE_DIR`), kernel ms, chosen layout -> block: q4_K 2048x2048 0.25 -> 0.25, 8192x2048 0.97 -> 0.91, 2048x8192 1.01 -> 1.11, q5_K 8192x2048 1.50 -> 1.80, q6_K 32064x2048 5.10 -> 11.4. No gain: the chosen layouts already read weights at the uncached-memory rate (9.7-10.6 GB/s). Compared with the f32 product only, not with a block-rounded reference.
-- Known, not examined: A53 OpenCL 64-token generation text of Llama-3.2-1B differs from the CPU's from byte 70 (default configuration); S25 OpenCL `ameva_qmm_check` 510/516 (q2_K M=1, `ameva_qmv_q2_K_c1_r4` build -6); S20 OpenCL `ameva_qmm_check` exits 139 and its f32 tile takes 8.6-16.3 s per kernel.
+- Known, not examined: 64-token generation text of Llama-3.2-1B departs from the CPU's at byte 70 on A53 OpenCL and on A35 Vulkan and OpenCL (same place, coherent text, block kernels on or off); S25 OpenCL `ameva_qmm_check` 510/516 (q2_K M=1, `ameva_qmv_q2_K_c1_r4` build -6); S20 OpenCL `ameva_qmm_check` exits 139 and its f32 tile takes 8.6-16.3 s per kernel.
 
 ### Current Problem & Focus
 - Per-device defaults of `ameva_mmqb` (opt-in today). Evidence so far: it wins only on Mali OpenCL (A53, A35); S21 is not measured.
@@ -32,6 +33,6 @@
 
 ### Next Actions
 1. S21 (GPU held by another session's Z-Image sweep, 3 workflows of about 3.6 h, second started 19:39): queued `mmqb_wait2.sh` (pid 22747) runs when no GPU workload was seen for 3 min. Read `~/abi-lab/results/mmqb_s21_wait.txt` (`MMQB_WAIT_DONE`), `mmqb_s21.txt` (checks and layout scan with the fix) and `kg_s21.txt` (block GEMV against chosen layouts). Cancel: `touch ~/abi-lab/mmqb_wait.stop`. Then decide defaults; wire `ameva_mmvqb` into the plugin only if S21 shows a gain.
-2. Push `e3a3af8` and the checkpoint commit after it when wanted (only a commit was requested). The working tree holds other sessions' edits (licence header lines, also in the two generated kernel headers): stage by path.
-3. Model-level prompt t/s and text with `AMEVA_MMQB=2x8` on A35 OpenCL (ameva-runtime `tools/fleet/lab/cl_model.sh`, modes `cl_mmqb1`, `cl_mmqb2`; uncommitted there with the other lab scripts).
+2. Defaults, evidence so far: A53 OpenCL `AMEVA_MMQB=2x8` (prompt 1.25x the tile, 1.23x the CPU); A35 stays on Vulkan; S25, S20 off. ameva-runtime lab scripts (`cl_model.sh` modes `cl_mmqb1`, `cl_mmqb2`; `mmqb_*.sh`, `kq.sh`, `kg.sh`) are uncommitted there.
+3. The working tree holds other sessions' edits (licence header lines, also in the two generated kernel headers): stage by path.
 4. Maintain single-file state in this checkpoint; do not reread historical logs.
