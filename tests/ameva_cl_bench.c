@@ -192,6 +192,8 @@ int main(int argc, char** argv) {
     const char* only = getenv("AMEVA_CL_ONLY") ? getenv("AMEVA_CL_ONLY") : "";
     // AMEVA_CL_ATRANS=1: the int8 activations unit-major (build option ATRANS)
     const int atrans = getenv("AMEVA_CL_ATRANS") ? atoi(getenv("AMEVA_CL_ATRANS")) != 0 : 0;
+    // AMEVA_CL_CHECK_ALL=1: the reference for every output instead of a sample
+    const int check_all = getenv("AMEVA_CL_CHECK_ALL") ? atoi(getenv("AMEVA_CL_CHECK_ALL")) != 0 : 0;
     size_t dlocal[2] = { 0, 0 };
     if (getenv("AMEVA_CL_DLOCAL") && sscanf(getenv("AMEVA_CL_DLOCAL"), "%zu,%zu", &dlocal[0], &dlocal[1]) != 2) {
         fprintf(stderr, "AMEVA_CL_DLOCAL must be x,y\n");
@@ -400,10 +402,13 @@ int main(int argc, char** argv) {
         }
         CHECK(clEnqueueReadBuffer(q, bd, CL_TRUE, 0, sizeof(float) * (size_t)M * N, out, 0, NULL, NULL));
 
-        // reference on a sample: rows m spread over M, every 7th weight row
+        // reference on a sample: rows m spread over M, every 7th weight row. The step over m is odd: with an even one
+        // (M / 8 = 44 for M = 352) the sample sees only some of the activation rows of a work-item that owns 4 or 8
+        // of them (rows 0 and 4 of 8), and an error in the others passes. AMEVA_CL_CHECK_ALL=1: every output.
+        const int m_step = check_all ? 1 : ((M > 8 ? M / 8 : 1) | 1), n_step = check_all ? 1 : 7;
         double max_rel = 0.0, max_rel_unq = 0.0;
-        for (int m = 0; m < M; m += (M > 8 ? M / 8 : 1)) {
-            for (int n = 0; n < N; n += 7) {
+        for (int m = 0; m < M; m += m_step) {
+            for (int n = 0; n < N; n += n_step) {
                 double ref = 0.0, unq = 0.0, mag = 0.0;
                 for (int u = 0; u < U; ++u) {
                     const uint8_t* s = ws + ((size_t)n * B + u / 8) * 16;
@@ -433,6 +438,7 @@ int main(int argc, char** argv) {
             }
         }
         const double mac = (double)M * N * K;
+        if (check_all) printf("check: every output of %s (%d x %d)\n", names[kk], M, N);
         printf("kernel=%s median_ms=%.4f gmac_per_s=%.2f weights_gb_per_s=%.2f max_rel_err=%.2e (vs unquantized %.2e) %s\n",
                names[kk], med, mac / (med * 1e-3) / 1e9, (double)N * U * 16 / (med * 1e-3) / 1e9, max_rel, max_rel_unq,
                max_rel < 1e-4 ? "PASS" : "FAIL");
