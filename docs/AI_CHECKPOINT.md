@@ -1,7 +1,7 @@
 # Current Engineering Checkpoint
 
 **Timestamp**: 2026-10-08T17:10:00+09:00  
-**Branch**: `perf/opencl-mali`, HEAD `1483ca8`. **This session's work is in the working tree, NOT committed** (files below).  
+**Branch**: `perf/opencl-mali` (pushed: `bf0ec99` multi-binding windowing, UNet ops, SDXL & 512px E2E validation, `1483ca8`).  
 **Current Goal**: Diffusion to full completion before STT (user decision 2026-10-08); STRICTLY LOCAL under `dev/`.
 
 ### Verified (Ground Truth). Tables: `docs/design/diffusion-vae-conv.md` sections 1-12
