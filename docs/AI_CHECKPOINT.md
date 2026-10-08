@@ -1,7 +1,7 @@
 # Current Engineering Checkpoint
 
 **Timestamp**: 2026-10-08T23:40:00+09:00  
-**Branch**: `perf/opencl-mali` (HEAD `284f420`; Stage 2 work below is uncommitted).  
+**Branch**: `perf/opencl-mali` (pushed: `aed3e39` Whisper-Turbo GPU offload & diarization, `284f420`, `177193d`).  
 **Current Goal**: Stage 2, STT (Whisper on ggml-ameva). Stage 1 (Diffusion) closed by user decision 2026-10-08.  
 **User order 2026-10-08**: no model downloads on the S25, no new model downloads on the A35 / S21 (data cost).
 
