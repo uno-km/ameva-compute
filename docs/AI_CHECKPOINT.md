@@ -1,7 +1,7 @@
 # Current Engineering Checkpoint
 
 **Timestamp**: 2026-10-08T21:10:00+09:00  
-**Branch**: `perf/opencl-mali` (pushed: `bf0ec99`, `d10fb5d`). **Working tree uncommitted** (MMDiT census, f16 LoRA merge).  
+**Branch**: `perf/opencl-mali` (pushed: `177193d` MMDiT Z-Image-Turbo, binary_f16, GPU LoRA merge, `d10fb5d`).  
 **Current Goal**: Diffusion to full completion before STT (user decision 2026-10-08); STRICTLY LOCAL under `dev/`.  
 **User order 2026-10-08**: no model downloads on the S25, no new model downloads on the A35 / S21 (data cost).
 
