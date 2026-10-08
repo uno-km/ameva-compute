@@ -1,0 +1,55 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// AMEVA IM2COL: ggml IM2COL of f32 data into f16 or f32 columns, 1-D and 2-D (ggml_compute_forward_im2col_f16 and
+// ggml_compute_forward_im2col_f32; ggml_conv_1d and ggml_conv_2d multiply the columns by the kernel with MUL_MAT).
+// Column c = (ib * OH + ioh) * OW + iow holds CK = IC * KH * KW values. Value (iic * KH + ikh) * KW + ikw of it is the
+// data element (iow * s0 + ikw * d0 - p0, ioh * s1 + ikh * d1 - p1) of channel iic and batch entry ib, or 0 where that
+// position lies outside the data. The 1-D op is the 2-D one with KH = OH = IH = 1, s1 = d1 = 1 and p1 = 0. The f16
+// result is rounded to nearest even, as the CPU conversion does.
+//   bindings: 0 data (f32 words), 1 columns (f16 halves in words, or f32 words; contiguous)
+//   push constants: offsets and strides of the data in floats, d_off in elements of the result type
+//   grid: one invocation per result element, workgroups of 256
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+
+layout(std430, binding = 0) readonly buffer A { uint a[]; };
+layout(std430, binding = 1) buffer D { uint d[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elem, ck, kw, kh;
+    uint ow, oh, iw, ih;
+    uint s0, s1, p0, p1;
+    uint d0, d1, a_off, a_s0;
+    uint a_s1, a_sc, a_sn, d_off;
+    uint dst_f16;
+} pc;
+
+void main() {
+    const uint k = ameva_linear_id();
+    if (k >= pc.n_elem) return;
+    const uint e = k % pc.ck;
+    uint c = k / pc.ck;
+    const uint iow = c % pc.ow;
+    c /= pc.ow;
+    const uint ioh = c % pc.oh;
+    const uint ib = c / pc.oh;
+    const uint ikw = e % pc.kw;
+    uint t = e / pc.kw;
+    const uint ikh = t % pc.kh;
+    const uint iic = t / pc.kh;
+    // unsigned: a position left of or above the data wraps to a value above every size and fails the range test
+    const uint x = iow * pc.s0 + ikw * pc.d0 - pc.p0;
+    const uint y = ioh * pc.s1 + ikh * pc.d1 - pc.p1;
+    float v = 0.0;
+    if (x < pc.iw && y < pc.ih) {
+        v = uintBitsToFloat(a[pc.a_off + x * pc.a_s0 + y * pc.a_s1 + iic * pc.a_sc + ib * pc.a_sn]);
+    }
+    if (pc.dst_f16 != 0u) {
+        AMEVA_STORE_F16(d, pc.d_off + k, v);
+    } else {
+        d[pc.d_off + k] = floatBitsToUint(v);
+    }
+}

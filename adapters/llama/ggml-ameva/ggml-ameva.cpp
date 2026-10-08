@@ -1252,11 +1252,29 @@ static const char* mul_mat_dense_reason(const struct ggml_tensor* op) {
     return nullptr;
 }
 
-// MUL_MAT: the shapes of ameva_qmv / ameva_qmm (mul_mat_qmm_reason) or, for f32 x f32, any shape (ameva_mm).
+// MUL_MAT of two f16 matrices into f32: shaders/ameva_mm.comp -DF16. It is the product inside ggml_conv_1d and
+// ggml_conv_2d, whose src0 is the f16 result of IM2COL and whose src1 is the f16 kernel (the encoder stem of
+// whisper.cpp). One matrix, every tensor inside one binding.
+static const char* mul_mat_dense_f16_reason(const struct ggml_tensor* op) {
+    const struct ggml_tensor *a = op->src[0], *b = op->src[1];
+    if (!a || !b) return "missing source";
+    if (!is_f16(a) || !is_f16(b) || !is_f32(op)) return "f16 MUL_MAT on types other than f16 x f16 -> f32";
+    if (a->ne[0] == 0) return "MUL_MAT with an empty source";
+    if (a->ne[2] != 1 || a->ne[3] != 1 || b->ne[2] != 1 || b->ne[3] != 1) return "batched (ne2/ne3 > 1)";
+    if (a->ne[0] != b->ne[0] || op->ne[0] != a->ne[1] || op->ne[1] != b->ne[1]) return "shape mismatch";
+    if (!rows_contiguous(a) || !rows_contiguous(b) || !rows_contiguous(op)) return "rows not contiguous";
+    if (!fits_kernel_indexing(a) || !fits_kernel_indexing(b) || !fits_kernel_indexing(op)) return "exceeds 32-bit indexing";
+    if (!fits_binding(a) || !fits_binding(b) || !fits_binding(op)) return "tensor exceeds a buffer binding";
+    return nullptr;
+}
+
+// MUL_MAT: the shapes of ameva_qmv / ameva_qmm (mul_mat_qmm_reason) or, for f32 x f32, any shape (ameva_mm), or
+// f16 x f16 (ameva_mm -DF16).
 static const char* mul_mat_reason(const struct ggml_tensor* op) {
     const char* why = mul_mat_qmm_reason(op);
     if (!why) return nullptr;
     const struct ggml_tensor* src0 = op->src[0];
+    if (src0 && is_f16(src0) && is_f16(op->src[1]) && !ameva_repacked_base(src0)) return mul_mat_dense_f16_reason(op);
     if (!src0 || !is_f32(src0) || ameva_repacked_base(src0)) return why;
     return mul_mat_dense_reason(op);
 }
@@ -1693,6 +1711,34 @@ const char* ameva_op_unsupported_reason(const struct ggml_tensor* op) {
             }
             if (!fits_binding(a) || !fits_binding(op)) return "tensor exceeds a buffer binding";
             if (!fits_kernel_indexing(a) || !fits_kernel_indexing(op)) return "exceeds 32-bit indexing";
+            return nullptr;
+        }
+        case GGML_OP_IM2COL: {
+            // op params: s0, s1, p0, p1, d0, d1, is_2D (ggml_im2col). src0 is the kernel, read for its shape only;
+            // src1 the data [IW, IH, IC, N] (2-D) or [IW, IC, N] (1-D); the result [IC * KH * KW, OW, OH, N] or
+            // [IC * KW, OW, N], f16 or f32. shaders/ameva_im2col.comp.
+            const struct ggml_tensor *w = op->src[0], *a = op->src[1];
+            if (!w || !a) return "missing source";
+            if (!is_f32(a) || !(is_f16(op) || is_f32(op))) return "im2col on types other than f32 -> f16 or f32";
+            const int32_t* prm = (const int32_t*)op->op_params;
+            const bool two_d = prm[6] != 0;
+            if (prm[0] <= 0 || prm[4] <= 0 || prm[2] < 0 || (two_d && (prm[1] <= 0 || prm[5] <= 0 || prm[3] < 0)))
+                return "im2col stride, padding or dilation out of range";
+            const int64_t KW = w->ne[0], KH = two_d ? w->ne[1] : 1, IC = two_d ? a->ne[2] : a->ne[1];
+            const int64_t N = two_d ? a->ne[3] : a->ne[2], OW = op->ne[1], OH = two_d ? op->ne[2] : 1;
+            if (IC != (two_d ? w->ne[2] : w->ne[1]) || op->ne[0] != IC * KH * KW ||
+                (two_d ? op->ne[3] : op->ne[2]) != N || (!two_d && (a->ne[3] != 1 || op->ne[3] != 1)))
+                return "im2col shape does not match its kernel and data";
+            if (ggml_nelements(op) == 0 || ggml_nelements(a) == 0) return "im2col of an empty tensor";
+            // the CPU addresses one plane of the data as IH rows of IW floats
+            if (!rows_contiguous(a) || (two_d && a->nb[1] != (size_t)a->ne[0] * a->nb[0])) return "im2col data rows not contiguous";
+            if (!ggml_is_contiguous(op)) return "im2col result not contiguous";
+            if (!fits_binding(a) || !fits_binding(op)) return "tensor exceeds a buffer binding";
+            if (!fits_kernel_indexing(a) || !fits_kernel_indexing(op)) return "exceeds 32-bit indexing";
+            // the kernel computes data positions in unsigned 32-bit and tells padding by the wrap-around
+            if ((uint64_t)(OW - 1) * (uint64_t)prm[0] + (uint64_t)(KW - 1) * (uint64_t)prm[4] > (uint64_t)INT32_MAX ||
+                (two_d && (uint64_t)(OH - 1) * (uint64_t)prm[1] + (uint64_t)(KH - 1) * (uint64_t)prm[5] > (uint64_t)INT32_MAX))
+                return "exceeds 32-bit indexing";
             return nullptr;
         }
         case GGML_OP_REPEAT: {
@@ -3062,19 +3108,31 @@ static void ameva_qmv_layout_report(void) {
 // dispatch per matrix of dimensions 2 and 3 and per chunk of result rows of at most kDispatchMac multiply-accumulates.
 static const char* enc_mul_mat_dense(AmevaRecorder& rec, const struct ggml_tensor* node) {
     const struct ggml_tensor *a = node->src[0], *b = node->src[1];
-    AcKernel* kernel = ameva_op_kernel(AMEVA_K_MM);
-    if (!kernel) return "no ameva_mm kernel";
+    // f16 x f16 -> f32 (mul_mat_dense_f16_reason): one matrix, every tensor inside one binding.
+    const bool f16 = is_f16(a);
+    const uint32_t es = f16 ? 2 : 4;
     // a tensor above one binding is bound per matrix (mul_mat_dense_reason)
     const bool wa = fits_binding(a), wb = fits_binding(b), wd = fits_binding(node);
+    if (f16 && (!wa || !wb || !wd)) return "f16 MUL_MAT above one buffer binding";
     AmevaBind ba = {}, bb = {}, bd = {};
-    const char* e = wa ? ameva_bind(a, 4, &ba) : nullptr;
-    if (!e && wb) e = ameva_bind(b, 4, &bb);
+    const char* e = wa ? ameva_bind(a, es, &ba) : nullptr;
+    if (!e && wb) e = ameva_bind(b, es, &bb);
     if (!e && wd) e = ameva_bind(node, 4, &bd);
     if (e) return e;
     const uint32_t K = (uint32_t)a->ne[0], N = (uint32_t)a->ne[1], M = (uint32_t)b->ne[1];
     const uint32_t sa = st(a, 1), sb = st(b, 1), sd = st(node, 1);
+    // The f16 builds: when every row of both sources starts on a 32-bit word, two values per load, through the
+    // built-in conversion on a device whose conversion has been checked (ameva_conv_f16_prepare) and through the exact
+    // decoder otherwise; rows at odd f16 offsets one value at a time through the exact decoder. The exact decoder
+    // costs many multiply-accumulates per value (Adreno 830: 1.5e9 products per second, and a dispatch of 1e9 of
+    // them did not come back), so the work estimate that sizes dispatches and submissions counts it as 32.
+    const bool words = f16 && ba.elem % 2 == 0 && bb.elem % 2 == 0 && (N == 1 || sa % 2 == 0) && (M == 1 || sb % 2 == 0);
+    const bool builtin = words && ggml_backend_ameva_get_conv_f16_decoder() == 1;
+    const double cost = !f16 || builtin ? 1.0 : 32.0;
+    AcKernel* kernel = ameva_op_kernel(!f16 ? AMEVA_K_MM : builtin ? AMEVA_K_MM_F16WU : words ? AMEVA_K_MM_F16W : AMEVA_K_MM_F16);
+    if (!kernel) return f16 ? "no ameva_mm_f16 kernel" : "no ameva_mm kernel";
     const uint32_t mc_max =
-        (uint32_t)std::max<double>(1.0, std::min<double>((double)M, kDispatchMac / ((double)N * (double)K)));
+        (uint32_t)std::max<double>(1.0, std::min<double>((double)M, kDispatchMac / ((double)N * (double)K * cost)));
     // the rows a dispatch writes, for the hazard tracking: exact when the result's rows lie at one stride, else the
     // whole tensor (a barrier between the dispatches)
     const bool linear = rows_linear(node);
@@ -3116,7 +3174,7 @@ static const char* enc_mul_mat_dense(AmevaRecorder& rec, const struct ggml_tenso
                 }
                 const uint32_t pc[9] = { mc, K, N, ao, sa, bo + m0 * sb, sb, d0 + m0 * sd, sd };
                 e = ameva_record(rec, kernel, reads, 2, &w, 1, bind, 3, pc, sizeof(pc),
-                                 ameva_grid_1d((uint64_t)N * mc, 64), (double)mc * N * K);
+                                 ameva_grid_1d((uint64_t)N * mc, 64), (double)mc * N * K * cost);
                 if (e) return e;
             }
         }
@@ -4346,6 +4404,31 @@ static const char* enc_pad(AmevaRecorder& rec, const struct ggml_tensor* node) {
                         (double)ggml_nelements(node));
 }
 
+// IM2COL (ggml_im2col inside ggml_conv_1d and ggml_conv_2d): the columns of f32 data, as f16 or f32, in the CPU's
+// element order (ggml_compute_forward_im2col_f16). The kernel tensor src0 gives the kernel size and is not read.
+static const char* enc_im2col(AmevaRecorder& rec, const struct ggml_tensor* node) {
+    const struct ggml_tensor *w = node->src[0], *a = node->src[1];
+    AcKernel* kernel = ameva_op_kernel(AMEVA_K_IM2COL);
+    if (!kernel) return "no ameva_im2col kernel";
+    const int32_t* prm = (const int32_t*)node->op_params; // s0, s1, p0, p1, d0, d1, is_2D
+    const bool two_d = prm[6] != 0;
+    const bool f16 = is_f16(node);
+    AmevaBind ba, bd;
+    const char* e = ameva_bind(a, 4, &ba);
+    if (!e) e = ameva_bind(node, f16 ? 2 : 4, &bd);
+    if (e) return e;
+    const uint64_t n = (uint64_t)ggml_nelements(node);
+    const uint32_t pc[21] = { (uint32_t)n, (uint32_t)node->ne[0], (uint32_t)w->ne[0], two_d ? (uint32_t)w->ne[1] : 1u,
+                              (uint32_t)node->ne[1], two_d ? (uint32_t)node->ne[2] : 1u,
+                              (uint32_t)a->ne[0], two_d ? (uint32_t)a->ne[1] : 1u,
+                              (uint32_t)prm[0], two_d ? (uint32_t)prm[1] : 1u, (uint32_t)prm[2], two_d ? (uint32_t)prm[3] : 0u,
+                              (uint32_t)prm[4], two_d ? (uint32_t)prm[5] : 1u, ba.elem, st(a, 0),
+                              two_d ? st(a, 1) : 0u, st(a, two_d ? 2 : 1), st(a, two_d ? 3 : 2), bd.elem,
+                              f16 ? 1u : 0u };
+    const AcBufferBinding bind[2] = { ba.b, bd.b };
+    return ameva_record(rec, kernel, &ba, 1, &bd, 1, bind, 2, pc, sizeof(pc), ameva_grid_1d(n, 256), (double)n);
+}
+
 // REPEAT: the source repeated over the result. shaders/ameva_pad.comp with no padding before the source and circular
 // padding after it reads source index (i mod source shape), which is the op; words are copied, so the result equals
 // the CPU's in every bit.
@@ -4521,6 +4604,7 @@ static const char* ameva_encode(AmevaRecorder& rec, const struct ggml_tensor* no
         case GGML_OP_SOFT_MAX: return enc_soft_max(rec, node);
         case GGML_OP_NORM: return enc_norm(rec, node);
         case GGML_OP_REPEAT: return enc_repeat(rec, node);
+        case GGML_OP_IM2COL: return enc_im2col(rec, node);
         case GGML_OP_TIMESTEP_EMBEDDING: return enc_timestep_embd(rec, node);
         default: return "op has no ameva encoder";
     }
@@ -4609,6 +4693,14 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
             if (ameva_mmq_plan(node, &rows, &bytes)) scratch_need = std::max<uint64_t>(scratch_need, bytes);
             else scratch_need = std::max<uint64_t>(scratch_need, ameva_mmvq_scratch_bytes(node));
             scratch_need = std::max<uint64_t>(scratch_need, ameva_act_fq_bytes(node));
+            if (is_f16(node->src[0]) && is_f16(node->src[1])) {
+                // ameva_mm -DF16 reads f16 through the built-in conversion only on a device whose conversion has
+                // been checked; decided before anything is recorded, as for the convolution
+                if (const char* e = ameva_conv_f16_prepare()) {
+                    fprintf(stderr, "ggml-ameva: f16 conversion check for an f16 x f16 MUL_MAT failed: %s (FAIL-FAST)\n", e);
+                    return GGML_STATUS_FAILED;
+                }
+            }
         } else if (node->op == GGML_OP_CONV_2D) {
             // the weights in the kernel's K order; the f16 decoder is decided before anything is recorded
             AmevaConv2d g;

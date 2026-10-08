@@ -44,7 +44,7 @@ else
     grep -E "\[build_ggml_ameva\]|error|warning" "$OUT/build.log" | grep -v "^WARNING: linker" | head -30
     [ -f "$OUT/libggml-ameva.so" ] || { echo BUILD_FAIL; exit 1; }
 fi
-for t in ameva_conv_check ameva_cnorm_check ameva_window_check ameva_unet_ops_check ameva_qmm_check; do
+for t in ameva_conv_check ameva_cnorm_check ameva_window_check ameva_unet_ops_check ameva_stt_ops_check ameva_qmm_check; do
     clang++ -O2 -std=c++17 -I "$GH/include" -I "$SRC/adapters/llama/ggml-ameva" \
         "$SRC/tests/$t.cpp" "$OUT/libggml-ameva.so" "$GLIB/libggml-base.so.0" "$GLIB/libggml.so.0" \
         -Wl,-rpath,"$OUT" -o "$OUT/$t" || { echo "TEST_BUILD_FAIL $t"; exit 1; }
@@ -124,6 +124,17 @@ grep -E "FAIL|UNET_OPS_CHECK [0-9]+/" "$OUT/unet_ops_check.log" | grep -v "^WARN
 grep -o -E "(err_over_bound|max_abs_diff)=[0-9.e+-]+" "$OUT/unet_ops_check.log" | awk -F= '$2 + 0 > m[$1] { m[$1] = $2 + 0 } END { for (k in m) printf "largest %s=%g  ", k, m[k]; print "" }'
 echo "rc=$r"
 [ $r -eq 0 ] || rc=1
+# IM2COL and the f16 x f16 MUL_MAT of ggml_conv_1d / ggml_conv_2d, the encoder stem of whisper.cpp
+# (tests/ameva_stt_ops_check.cpp): with the f16 conversion the device check picks, and with the exact decoder
+for sel in "" "AMEVA_CONV_F16=exact"; do
+    echo "== ameva_stt_ops_check $sel"
+    env $sel LD_LIBRARY_PATH="$RT" timeout 900 "$OUT/ameva_stt_ops_check" > "$OUT/stt_ops_check.log" 2>&1
+    r=$?
+    grep -E "FAIL|STT_OPS_CHECK [0-9]+/|ggml-ameva: f16" "$OUT/stt_ops_check.log" | grep -v "^WARNING: linker" | cut -c1-160
+    grep -o -E "(err_over_bound)=[0-9.e+-]+" "$OUT/stt_ops_check.log" | awk -F= '$2 + 0 > m[$1] { m[$1] = $2 + 0 } END { for (k in m) printf "largest %s=%g  ", k, m[k]; print "" }'
+    echo "rc=$r"
+    [ $r -eq 0 ] || rc=1
+done
 echo "== ameva_qmm_check"
 LD_LIBRARY_PATH="$RT" timeout 1800 "$OUT/ameva_qmm_check" 2>&1 | tail -1
 [ "${PIPESTATUS[0]}" -eq 0 ] || rc=1

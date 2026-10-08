@@ -7,6 +7,11 @@
 // sums; the sum order differs from the CPU's, so the result differs from it by rounding.
 //   push constants: M, K, N, then offset and row stride (in floats) of a, of b and of dst
 //   grid: N * M invocations in workgroups of 64
+// -DF16: a and b are f16 (their offsets and row strides in f16 elements, decoded exactly), dst stays f32. It is the
+// product inside ggml_conv_1d / ggml_conv_2d: the f16 columns of IM2COL times the f16 kernel.
+// -DF16 -DF16_WORDS: every row of a and of b starts on a 32-bit word (the host checks), two values per load.
+// -DF16 -DF16_WORDS -DF16_UNPACK: the same through the built-in conversion, which the language allows to round f16
+// subnormals to zero: the host takes this build only on a device whose conversion it has checked.
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 #include "ameva_common.glsl"
@@ -22,6 +27,19 @@ layout(push_constant) uniform PushConstants {
     uint d_off, d_s1;
 } pc;
 
+#ifdef F16
+#define LD_A(i) AMEVA_LOAD_F16(a, i)
+#define LD_B(i) AMEVA_LOAD_F16(b, i)
+#ifdef F16_UNPACK
+#define LD_H2(arr, w) unpackHalf2x16((arr)[w])
+#else
+#define LD_H2(arr, w) vec2(ameva_h2f((arr)[w] & 0xFFFFu), ameva_h2f((arr)[w] >> 16u))
+#endif
+#else
+#define LD_A(i) uintBitsToFloat(a[i])
+#define LD_B(i) uintBitsToFloat(b[i])
+#endif
+
 void main() {
     const uint id = ameva_linear_id();
     if (id >= pc.N * pc.M) return;
@@ -31,13 +49,19 @@ void main() {
     const uint bb = pc.b_off + m * pc.b_s1;
     vec4 acc = vec4(0.0);
     uint k = 0u;
+#ifdef F16_WORDS
+    const uint aw = ab >> 1u, bw = bb >> 1u;
     for (; k + 4u <= pc.K; k += 4u) {
-        acc += vec4(uintBitsToFloat(a[ab + k]), uintBitsToFloat(a[ab + k + 1u]), uintBitsToFloat(a[ab + k + 2u]),
-                    uintBitsToFloat(a[ab + k + 3u])) *
-               vec4(uintBitsToFloat(b[bb + k]), uintBitsToFloat(b[bb + k + 1u]), uintBitsToFloat(b[bb + k + 2u]),
-                    uintBitsToFloat(b[bb + k + 3u]));
+        const uint i = k >> 1u;
+        acc += vec4(LD_H2(a, aw + i), LD_H2(a, aw + i + 1u)) * vec4(LD_H2(b, bw + i), LD_H2(b, bw + i + 1u));
     }
+#else
+    for (; k + 4u <= pc.K; k += 4u) {
+        acc += vec4(LD_A(ab + k), LD_A(ab + k + 1u), LD_A(ab + k + 2u), LD_A(ab + k + 3u)) *
+               vec4(LD_B(bb + k), LD_B(bb + k + 1u), LD_B(bb + k + 2u), LD_B(bb + k + 3u));
+    }
+#endif
     float s = (acc.x + acc.y) + (acc.z + acc.w);
-    for (; k < pc.K; ++k) s += uintBitsToFloat(a[ab + k]) * uintBitsToFloat(b[bb + k]);
+    for (; k < pc.K; ++k) s += LD_A(ab + k) * LD_B(bb + k);
     d[pc.d_off + m * pc.d_s1 + n] = floatBitsToUint(s);
 }

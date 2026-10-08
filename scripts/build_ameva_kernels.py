@@ -121,7 +121,8 @@ OPS = ["binary", "unary", "glu", "rms_norm", "rope", "set_rows", "get_rows", "cp
 # op kernels compiled from one source with defines, appended to enum AmevaOpKernelId: (kernel name, source, defines)
 OPS_DEFINED = [("set_rows_q8_0", "set_rows_q", ["QTYPE_Q8_0"]), ("set_rows_q4_0", "set_rows_q", ["QTYPE_Q4_0"]),
                ("quant_a8u", "quant_a8", ["EMU"]), ("rope_f16", "rope", ["F16"]),
-               ("binary_f16", "binary", ["F16"])]
+               ("binary_f16", "binary", ["F16"]), ("im2col", "im2col", []), ("mm_f16", "mm", ["F16"]),
+               ("mm_f16w", "mm", ["F16", "F16_WORDS"]), ("mm_f16wu", "mm", ["F16", "F16_WORDS", "F16_UNPACK"])]
 
 # Kernels built as SPIR-V only, in the order of enum AmevaVkKernelId: (kernel name, source, defines).
 # ameva_conv: weights f16 through the exact decoder, f16 through the built-in conversion (f16u; the engine selects it
