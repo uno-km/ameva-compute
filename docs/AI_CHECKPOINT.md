@@ -23,15 +23,14 @@
 - Declined by design so far: bilinear/bicubic UPSCALE, SOFT_MAX with ALiBi bias or sinks, tensors above one binding, CONV_3D, Wan RMS norm.
 
 ### Current Problem & Focus
-- The decoder runs end to end on four devices; open: the Vulkan reference, 512 px and tiled decodes (binding limit), int8 mode behind a switch after a PSNR check, the wrapper selecting the AMEVA VAE plan.
-- Earlier decisions stand: default tile size 24 on 256 MiB devices and fail-fast on CPU split; exact mode first; full Wan VAE on S25-class only, `taew2_1` elsewhere.
+- User Decision (2026-10-08): Full CUDA-Level Diffusion completion required before moving to STT. Must handle 512px, multi-binding (>256MB), VAE tiling (tile size 24), and UNet graph validation across models/quantizations (SD 1.x, SDXL, Z-Image-Turbo).
+- Earlier decisions stand: Fail-fast on CPU splits; CPU image accepted as official reference; exact FP16 mode default.
 
 ### Relevant Files
-- `scripts/termux/lab/sd_vae_e2e.sh` (`build|run|all`, `SD_VULKAN`, `RUNS`, `PAIRS`, `STEPS`, `THREADS`, `PSNR_MIN`), `scripts/termux/lab/img_psnr.py`, `scripts/termux/build_ggml_ameva.sh`, `adapters/llama/ggml-ameva/ggml-ameva-device.cpp` (`ameva_abi_check`)
-- `adapters/llama/ggml-ameva/ggml-ameva.cpp`, `tests/ameva_k3_check.cpp`, `tests/ameva_vae_graph_check.cpp`, `scripts/termux/lab/k3_check.sh`, `conv_check.sh`
-- Devices (S25, S21, A35, A53): `~/abi-lab/sd-build/bin`, `out-sd/` (plugin, `e2e/*.png`, `*.log`, `pair_*.txt`), `sd_e2e_run.log`; S25 also `sd-src`, `src-sd`, `sd_e2e_vk*.log`, `vk_o1.sh`, `out-sd-neg`
+- `adapters/llama/ggml-ameva/ggml-ameva.cpp`, `ggml-ameva-device.cpp`, `shaders/ameva_conv.comp`, `scripts/termux/lab/sd_vae_e2e.sh`
+- Devices (S25, S21, A35, A53): `~/abi-lab/sd-build/bin`, `out-sd/`
 
 ### Next Actions
-1. Commit the working tree once the user says so; stage by path (device probe, build script, two lab scripts, design doc, this file).
-2. Decide the reference: find the op ggml-vulkan stops in (debug build, or the bundle's `sd-cli-vulkan` with a shared latent), or accept the CPU image as the gate's reference (user decision). Then 512 px and tiled decodes, decode time alternated with the GPU clock recorded.
-3. `k3_check.sh` and `conv_check.sh` on the S25, S20 and A35. Then STT -> BitNet -> Vision -> TTS. Keep this file under 40 lines.
+1. Multi-binding buffer split & 512x512 VAE tiling: ensure tensors exceeding 256 MiB maxStorageBufferRange never split to CPU; verify 512x512 decode on A35/S25.
+2. UNet & MMDiT op census & quantisation verification (Q4_K, Q8_0) across SD 1.x, SDXL, and Turbo models.
+3. LoRA merge compatibility & 4-device full E2E 512px image benchmark with PSNR check. Only then proceed to STT.
