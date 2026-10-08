@@ -437,7 +437,9 @@ const char* ameva_abi_check(void) {
             {GGML_OP_SCALE, "SCALE"}, {GGML_OP_CPY, "CPY"}, {GGML_OP_CONT, "CONT"}, {GGML_OP_RESHAPE, "RESHAPE"},
             {GGML_OP_VIEW, "VIEW"}, {GGML_OP_PERMUTE, "PERMUTE"}, {GGML_OP_TRANSPOSE, "TRANSPOSE"},
             {GGML_OP_GET_ROWS, "GET_ROWS"}, {GGML_OP_SET_ROWS, "SET_ROWS"}, {GGML_OP_ROPE, "ROPE"},
-            {GGML_OP_FLASH_ATTN_EXT, "FLASH_ATTN_EXT"}, {GGML_OP_UNARY, "UNARY"}, {GGML_OP_GLU, "GLU"}};
+            {GGML_OP_FLASH_ATTN_EXT, "FLASH_ATTN_EXT"}, {GGML_OP_UNARY, "UNARY"}, {GGML_OP_GLU, "GLU"},
+            {GGML_OP_CONV_2D, "CONV_2D"}, {GGML_OP_GROUP_NORM, "GROUP_NORM"}, {GGML_OP_UPSCALE, "UPSCALE"},
+            {GGML_OP_PAD, "PAD"}, {GGML_OP_CONCAT, "CONCAT"}, {GGML_OP_SOFT_MAX, "SOFT_MAX"}};
         static const struct { enum ggml_type type; const char* name; } kTypes[] = {
             {GGML_TYPE_F32, "f32"}, {GGML_TYPE_F16, "f16"}, {GGML_TYPE_I32, "i32"}, {GGML_TYPE_I64, "i64"},
             {GGML_TYPE_Q5_0, "q5_0"}, {GGML_TYPE_Q4_K, "q4_K"}};
@@ -460,6 +462,13 @@ const char* ameva_abi_check(void) {
                 if (!c || c->op != GGML_OP_MUL_MAT || c->src[0] != a || c->src[1] != b || c->type != GGML_TYPE_F32 ||
                     c->ne[0] != 3 || c->ne[1] != 2 || a->nb[1] != 32 || ggml_nbytes(c) != 24)
                     what = "struct ggml_tensor";
+                // extra lies behind name[GGML_MAX_NAME], and the host chooses that size (stable-diffusion.cpp
+                // compiles ggml with 160). libggml-base cuts a name to its own size, which shows what it was built with.
+                char probe_name[512];
+                memset(probe_name, 'n', sizeof(probe_name) - 1);
+                probe_name[sizeof(probe_name) - 1] = 0;
+                if (!what && strlen(ggml_get_name(ggml_set_name(c, probe_name))) != sizeof(c->name) - 1)
+                    what = "struct ggml_tensor (GGML_MAX_NAME)";
                 ggml_free(tctx);
             }
         }
@@ -467,7 +476,7 @@ const char* ameva_abi_check(void) {
             snprintf(msg, sizeof(msg),
                      "ABI mismatch with the loaded libggml-base: %s differs from the ggml headers libggml-ameva.so "
                      "was compiled with (offsetof(ggml_backend, device)=%zu). Rebuild it against the ggml of the "
-                     "llama.cpp build that loads it.", what, offsetof(struct ggml_backend, device));
+                     "program that loads it, with its GGML_MAX_NAME.", what, offsetof(struct ggml_backend, device));
             result = msg;
         }
     });

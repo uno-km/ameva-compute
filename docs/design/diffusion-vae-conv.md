@@ -5,8 +5,9 @@
   `ggml-vulkan.cpp` change). No remote fetch. The A35 device binary is the 2.7.9 bundle `sd-cli` (older sd.cpp layout),
   so line numbers of the local tree are approximate for it.
 - Status: measurements and design. Step 1 of section 6 (the kernel in isolation, `ameva_conv_bench`) is measured on
-  three devices: section 7. CONV_2D is in ggml-ameva and checked on devices: section 8. The other decoder ops and
-  sd.cpp on ggml-ameva are not done. Section 5 lists what is predicted and not measured.
+  three devices: section 7. CONV_2D is in ggml-ameva and checked on devices: section 8. Group norm and the other
+  decoder ops: sections 9-10. sd.cpp on ggml-ameva with a decoded image compared against the CPU's: section 11.
+  Section 5 lists what is predicted and not measured.
 
 ## 1. Measured: 2D VAE decode on the Galaxy A35 (Mali-G68, Vulkan)
 
@@ -401,3 +402,64 @@ another program and was not alternated with the figure above.
   UPSCALE; an OpenCL translation of the convolution and group norm kernels. Nothing of this section ran on Adreno:
   the S25 and the A35 did not answer (connection timed out) and the S20 was running another session's benchmark.
   `ameva_fuse_check`, `ameva_kvq_check` and `ameva_chunk_check` were not rerun.
+
+## 11. sd.cpp on ggml-ameva: a decoded image (step 3 of section 6, 2026-10-08)
+
+- **Build** (`scripts/termux/lab/sd_vae_e2e.sh build`). stable-diffusion.cpp `50d6405` with its ggml `8e800cef`, ggml
+  as shared libraries with dynamic backends, `sd-cli` only; the plugin against that ggml's headers and libraries.
+  sd.cpp is not changed: it takes backends by registry name (`--backend "cpu,vae=AMEVA0" --vae-conv-direct`) and the
+  plugin comes in through `GGML_BACKEND_PATH`. Built on the S25; the S21, A35 and A53 ran the same binaries.
+- **ABI.** sd.cpp compiles ggml with `GGML_MAX_NAME=160` (llama.cpp: 64). `ggml_tensor.extra`, which the buffer code
+  reads, lies behind `name`, so a plugin compiled with the other size reads it from inside the name.
+  `ameva_abi_check` now also compares the name size (a 511-character name set and read back through libggml-base)
+  and the names of CONV_2D, GROUP_NORM, UPSCALE, PAD, CONCAT and SOFT_MAX. Negative control on the S25: the plugin
+  built without the definition is refused at load ("struct ggml_tensor (GGML_MAX_NAME) differs") and AMEVA0 is not
+  registered. `build_ggml_ameva.sh` takes the definition (`--cxxflags`) and the host's device listing
+  (`--list-devices-cmd`) for its registration check.
+- **Two failures of the first build on the S25, both before any graph ran.** `sd-cli` bound the ggml of `$PREFIX/lib`
+  (the Termux clang driver writes that directory first into the RUNPATH): "cannot locate symbol
+  gguf_write_to_file_ptr"; the runs put a directory with this build's ggml libraries alone in front. With OpenMP,
+  `libggml-base.so` needs `__kmpc_dispatch_deinit`, which `$PREFIX/lib/libomp.so` of that device does not export; the
+  build uses `GGML_OPENMP=OFF`.
+- **Method** (`sd_vae_e2e.sh run`, `img_psnr.py`). Text encoder and UNet on the CPU in every run with one seed, so
+  every run decodes the same latent; two CPU decodes have to give the same file before anything is compared. SD 1.x
+  `anime.gguf` with the VAE as stored (decoder parameters 94.47 MB), 256x256 image (32x32 latent), `--cfg-scale 1`,
+  euler. PSNR over the 8-bit RGB samples of the PNG files. A run on AMEVA0 counts only without a scheduler split
+  (sd.cpp creates the scheduler, with a CPU backend behind it, only when the VAE backend declines a node) and with
+  dispatches in `AMEVA_PROFILE`. The 40 dB floor is the script's choice.
+
+| | S25 (Adreno 830) | S21 (Mali-G78) | A35 (Mali-G68) | A53 (Mali-G68) |
+|---|---|---|---|---|
+| cores of the session, threads, sampling steps | 0-1,4-5, 4, 8 | 0-2,4-7, 4, 4 | 0-2, 3, 2 | 0-2, 3, 2 |
+| CPU decodes give the same file | yes (3 runs) | yes (2 runs) | yes (2 runs) | yes (2 runs) |
+| AMEVA decodes give the same file | yes (2 runs) | yes (2 runs) | yes (2 runs) | yes (2 runs) |
+| AMEVA image against the CPU image: PSNR | 60.47 dB | 61.11 dB | 63.08 dB | 63.08 dB |
+| largest difference, differing samples of 196608 | 1 level, 11482 | 1 level, 9906 | 1 level, 6288 | 1 level, 6289 |
+| VAE graph on AMEVA0: nodes, dispatches, scheduler splits | 226, 249, 0 | 226, 249, 0 | 226, 249, 0 | 226, 249, 0 |
+| decode time, CPU (`latent 1 decoded`) | 15.09, 15.02, 14.05 s | 22.44, 22.58 s | 72.97, 77.00 s | 106.49, 103.00 s |
+| decode time, AMEVA0 (Vulkan) | 1.97, 1.98 s | 11.31, 11.26 s | 10.57, 10.27 s | 18.71, 18.86 s |
+
+Every device ran the binaries built on the S25. The latent differs between the columns (sampling steps), so PSNR is
+comparable within a column only. Decode times are one process per figure in the order CPU, CPU, AMEVA, AMEVA (S25:
+CPU, CPU, AMEVA, CPU, AMEVA), not alternated within a minute, and the GPU clock was not recorded (the S21's governor
+moves its figure 2-3x); the AMEVA figure includes creating the pipelines of that process. The S25 image shows the
+prompt's subject (a lighthouse on a coast at sunset) and was looked at; the others are compared only. The S20 was
+held by another session and did not run.
+
+- The third CPU run and the second AMEVA run on the S25 carried `--tensor-type-rules "^first_stage_model\.=f32"` to
+  obtain f32 kernels. It had no effect on this GGUF model (parameter buffer 94.47 MB and the image file unchanged,
+  also with unanchored patterns), so they are repeats of the same decode and not an f32 comparison. The f32
+  comparison of the decoder remains `ameva_vae_graph_check` (section 10; not run on Adreno).
+- **The f16 Vulkan reference of the gate was not obtained: ggml-vulkan stops in this decoder.** The same `sd-cli` with
+  `libggml-vulkan.so` of ggml `8e800cef` and `--backend "cpu,vae=Vulkan0"` ends with a segmentation fault (exit 139)
+  after "vae compute buffer size" and before any decode time, on the S25 (Adreno 830) and the S21 (Mali-G78), with
+  and without `--vae-conv-direct`, and with the committed `ggml-vulkan.cpp` as with the local 60-line change. Text
+  encoder and UNet on `Vulkan0` with the VAE on the CPU run in that build (S25, one step, image written). The op it
+  stops in is not identified (no debugger on the devices). The backend and its log are kept in
+  `~/abi-lab/out-sd/vk-crash` on both devices; `sd_vae_e2e.sh run` adds the `Vulkan0` run when
+  `sd-build/bin/libggml-vulkan.so` is present.
+- Build note: `ggml-vulkan.cpp` at the build's `-O3` had not finished on the S25 after 67 min (31 min CPU) and was
+  stopped; that one file compiled at `-O1` in 1.6 to 3 min. The arithmetic is in the SPIR-V shaders, so the host
+  optimisation level does not enter the image.
+- Not done: the Vulkan reference above; an f32-kernel image; 512 px and tiled decodes (binding limit); int8 mode;
+  decode times alternated with the GPU clock recorded; the S20; the wrapper's selection of the AMEVA VAE plan.

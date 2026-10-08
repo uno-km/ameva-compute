@@ -3,26 +3,33 @@
 #
 # Build libggml-ameva.so (llama.cpp AMEVA backend) against the ggml of the llama.cpp build that will load it.
 #
-#   bash scripts/termux/build_ggml_ameva.sh --ggml-dir DIR --ggml-lib LIBDIR [--out DIR]
+#   bash scripts/termux/build_ggml_ameva.sh --ggml-dir DIR --ggml-lib LIBDIR [--out DIR] [--cxxflags FLAGS]
+#                                           [--list-devices-cmd CMD]
 #
 #   --ggml-dir DIR   ggml tree of exactly that llama.cpp version: DIR/include/*.h and DIR/src/ggml-backend-impl.h,
 #                    ggml-impl.h (e.g. <llama.cpp checkout>/ggml, or the headers of tag bNNNN)
 #   --ggml-lib LIB   directory holding that version's libggml-base.so* and libggml.so* to link against
 #   --out DIR        output directory (default build-ggml-ameva); gets libggml-ameva.so and libac_runtime.so.2
+#   --cxxflags FLAGS added to the plugin's compile line: definitions the host compiles ggml with and that change a
+#                    layout (stable-diffusion.cpp: -DGGML_MAX_NAME=160, the size of ggml_tensor.name)
+#   --list-devices-cmd CMD  program of the host that loads GGML_BACKEND_PATH and prints the registered devices
+#                    (default "llama-completion --list-devices"; stable-diffusion.cpp: "<dir>/sd-cli --list-devices")
 #
 # ggml-backend-impl.h is not ABI-versioned (GGML_BACKEND_API_VERSION stayed 2 while ggml_backend_i and
 # ggml_backend_buffer_i gained members). Headers from another ggml shift every field behind those vtables;
 # Galaxy S25 stopped in GGML_ASSERT(device) that way. The plugin checks the layout at load and refuses a
-# mismatch; this script additionally loads the result through llama.cpp and requires AMEVA0 to register.
+# mismatch; this script additionally loads the result through the host program and requires AMEVA0 to register.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-GGML_DIR="" GGML_LIB="" OUT="$ROOT/build-ggml-ameva"
+GGML_DIR="" GGML_LIB="" OUT="$ROOT/build-ggml-ameva" EXTRA_CXXFLAGS="" LIST_CMD="llama-completion --list-devices"
 while [ $# -gt 0 ]; do
     case "$1" in
         --ggml-dir) GGML_DIR="$2"; shift 2 ;;
         --ggml-lib) GGML_LIB="$2"; shift 2 ;;
         --out) OUT="$2"; shift 2 ;;
+        --cxxflags) EXTRA_CXXFLAGS="$2"; shift 2 ;;
+        --list-devices-cmd) LIST_CMD="$2"; shift 2 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -56,7 +63,7 @@ rm -f "$OUT/ac_security_guard.o"
 
 A="$ROOT/adapters/llama/ggml-ameva"
 clang++ -O2 -fPIC -shared -std=c++20 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers \
-    -Wno-unused-function -I "$GGML_DIR/include" -I "$GGML_DIR/src" -I "$ROOT/include" -I "$A" \
+    -Wno-unused-function $EXTRA_CXXFLAGS -I "$GGML_DIR/include" -I "$GGML_DIR/src" -I "$ROOT/include" -I "$A" \
     "$A/ggml-ameva.cpp" "$A/ggml-ameva-device.cpp" "$A/ggml-ameva-buffer.cpp" "$A/ggml-ameva-repack.cpp" \
     "$OUT/libac_runtime.so.2" "$BASE_LIB" "$REG_LIB" -lvulkan -ldl -lm \
     -Wl,-soname,libggml-ameva.so -Wl,-rpath,'$ORIGIN' -Wl,--no-undefined -o "$OUT/libggml-ameva.so"
@@ -82,8 +89,9 @@ case "$runpath" in
         ;;
 esac
 
-# Load it the way llama.cpp will: the ABI check runs in ggml_backend_init, so a mismatch removes AMEVA0.
-if command -v llama-completion >/dev/null 2>&1; then
+# Load it the way the host will: the ABI check runs in ggml_backend_init, so a mismatch removes AMEVA0.
+LIST_BIN="${LIST_CMD%% *}"
+if command -v "$LIST_BIN" >/dev/null 2>&1; then
     # The check must run against the given ggml, not whichever libggml-base.so.0 is active. Only the ggml
     # libraries are exposed (symlinked into one directory): putting a whole lib dir such as $PREFIX/lib on
     # LD_LIBRARY_PATH lets it shadow libraries of /system (Galaxy S25: libunwindstack.so bound Termux liblzma,
@@ -94,14 +102,14 @@ if command -v llama-completion >/dev/null 2>&1; then
         if [ -e "$GGML_LIB/$n.so.0" ]; then ln -s "$(readlink -f "$GGML_LIB/$n.so.0")" "$RT/$n.so.0"; fi
     done
     devs="$(LD_LIBRARY_PATH="$RT:$OUT" GGML_BACKEND_PATH="$OUT/libggml-ameva.so" \
-            llama-completion --list-devices 2>&1 || true)"
+            $LIST_CMD 2>&1 || true)"
     # here-strings, not "printf | grep -q": grep -q exits at the first match and printf would fail with SIGPIPE
     if grep -q "AMEVA0" <<< "$devs"; then
-        echo "[build_ggml_ameva] llama.cpp registered AMEVA0 from the new library"
+        echo "[build_ggml_ameva] $LIST_BIN registered AMEVA0 from the new library"
     else
         grep -E "ggml-ameva|load_backend" <<< "$devs" >&2 || true
-        die "the installed llama.cpp did not register AMEVA0 from $OUT/libggml-ameva.so (ggml version mismatch?)"
+        die "$LIST_BIN did not register AMEVA0 from $OUT/libggml-ameva.so (ggml version or GGML_MAX_NAME mismatch?)"
     fi
 else
-    echo "[build_ggml_ameva] llama-completion not on PATH: registration not checked"
+    echo "[build_ggml_ameva] $LIST_BIN not found: registration not checked"
 fi
