@@ -4704,11 +4704,24 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
 
     // Lazy repack: frameworks that mark a buffer WEIGHTS after upload (e.g. whisper.cpp) have their eligible
     // MUL_MAT src0 tensors repacked here, once, before recording begins.
-    for (int i = 0; i < n_nodes; i++) {
-        struct ggml_tensor* node = ggml_graph_node(cgraph, i);
-        if (!node || node->op != GGML_OP_MUL_MAT || !node->src[0]) continue;
-        struct ggml_tensor* w = node->src[0]->view_src ? node->src[0]->view_src : node->src[0];
-        if (w->buffer) ameva_ensure_weight_repacked(w->buffer, w);
+    // First pass: collect tensors accessed by GET_ROWS — these share storage with embedding tables and must stay
+    // in the ggml layout so GET_ROWS can read them; repacking them would corrupt the lookup.
+    {
+        std::vector<const struct ggml_tensor*> get_rows_srcs;
+        for (int i = 0; i < n_nodes; i++) {
+            const struct ggml_tensor* node = ggml_graph_node(cgraph, i);
+            if (!node || node->op != GGML_OP_GET_ROWS || !node->src[0]) continue;
+            const struct ggml_tensor* base = node->src[0]->view_src ? node->src[0]->view_src : node->src[0];
+            if (std::find(get_rows_srcs.begin(), get_rows_srcs.end(), base) == get_rows_srcs.end())
+                get_rows_srcs.push_back(base);
+        }
+        for (int i = 0; i < n_nodes; i++) {
+            struct ggml_tensor* node = ggml_graph_node(cgraph, i);
+            if (!node || node->op != GGML_OP_MUL_MAT || !node->src[0]) continue;
+            struct ggml_tensor* w = node->src[0]->view_src ? node->src[0]->view_src : node->src[0];
+            if (w->buffer && std::find(get_rows_srcs.begin(), get_rows_srcs.end(), w) == get_rows_srcs.end())
+                ameva_ensure_weight_repacked(w->buffer, w);
+        }
     }
 
     // token-generation GEMV layouts of weight shapes this device has not measured yet (once per shape)
