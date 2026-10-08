@@ -1,7 +1,7 @@
 # Current Engineering Checkpoint
 
 **Timestamp**: 2026-10-08T09:50:00+09:00  
-**Branch**: `perf/opencl-mali` (pushed: `10d1ec9`). K2 group norm and the convolution bias are in the working tree, NOT committed.  
+**Branch**: `perf/opencl-mali` (pushed: `c93f05b` K2 GroupNorm and conv bias fusion, `10d1ec9` checkpoint, `109ba54` CONV_2D).  
 **Current Goal**: 5-Modality Pipeline Optimization (1. Diffusion -> 2. STT -> 3. BitNet -> 4. Vision -> 5. TTS); STRICTLY LOCAL under `dev/` (no remote branch fetch).
 
 ### Verified (Ground Truth)
