@@ -233,6 +233,37 @@ static const ggml_tensor* resolve_for_write(ggml_backend_buffer_t buffer, ggml_t
     return tensor;
 }
 
+// Called by graph_compute for each MUL_MAT src0: repack a tensor that was uploaded before its buffer was marked
+// GGML_BACKEND_BUFFER_USAGE_WEIGHTS (e.g. whisper.cpp sets usage after the model upload). Safe to call repeatedly:
+// returns immediately if already repacked or not eligible.
+bool ameva_ensure_weight_repacked(ggml_backend_buffer_t buffer, struct ggml_tensor* tensor) {
+    if (!buffer || !buffer->context || !tensor) return false;
+    if (ameva_repacked_base(tensor)) return true;
+    if (!ameva_repack_enabled() || tensor->view_src || tensor->extra) return false;
+    if (ggml_backend_buffer_get_usage(buffer) != GGML_BACKEND_BUFFER_USAGE_WEIGHTS) return false;
+    AmevaRepackLayout L;
+    if (!ameva_repack_layout(tensor->type, &L) || !ameva_qmv_has_type(tensor->type)) return false;
+    const size_t nbytes = ggml_nbytes(tensor);
+    if (!ggml_is_contiguous(tensor) || tensor->ne[0] <= 0 || tensor->ne[0] % L.block_elems != 0 || nbytes == 0)
+        return false;
+    auto* ctx = (ggml_backend_ameva_buffer_context*)buffer->context;
+    const size_t t0 = base_offset(ctx, tensor->data, nbytes, "ensure_weight_repacked");
+    const int64_t K = tensor->ne[0], rows = ggml_nrows(tensor);
+    // Read ggml-layout bytes from GPU into staging memory
+    std::vector<uint8_t> img(nbytes);
+    host_read(ctx, t0, img.data(), nbytes, "ensure_weight_repacked");
+    // Mark as repacked before write_rows (write_rows calls base_offset which needs the tag set)
+    tensor->extra = &s_repacked_tag;
+    {
+        std::lock_guard<std::mutex> lock(ctx->mu);
+        ctx->repacked.push_back({ t0, nbytes, tensor->type, K, rows });
+    }
+    ameva_count_repacked_tensor(nbytes);
+    // Write back in repacked layout
+    write_rows(ctx, tensor, 0, rows, img.data(), "ensure_weight_repacked");
+    return true;
+}
+
 // =============================================================================
 // Buffer interface
 // =============================================================================

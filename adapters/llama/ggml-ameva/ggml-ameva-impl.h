@@ -45,6 +45,9 @@ bool ameva_repack_all_enabled(void);
 // The repacked tensor holding t's bytes: t itself, or the tensor t is a view of. nullptr: t's bytes are in the ggml
 // layout.
 const struct ggml_tensor* ameva_repacked_base(const struct ggml_tensor* t);
+// Called by graph_compute for each MUL_MAT src0: repack a weight-buffer tensor uploaded before the buffer was marked
+// GGML_BACKEND_BUFFER_USAGE_WEIGHTS. Idempotent; returns true if the tensor is (now) repacked.
+bool ameva_ensure_weight_repacked(ggml_backend_buffer_t buffer, struct ggml_tensor* tensor);
 
 // ---- graph engine (ggml-ameva.cpp) ----
 // An ameva_qmv kernel exists for every work shape of this weight type.

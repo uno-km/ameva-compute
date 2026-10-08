@@ -1,0 +1,92 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// AMEVA GET_ROWS for quantized weight types (q4_0, q5_0) with i32 indices and f32 result.
+// Variant: -DQ4_0 or -DQ5_0.
+//
+//   dst[c, i10, i11, i12] = dequant(src0[c, idx[i10, i11, i12]])
+//
+// src0 is in the ggml block layout (NOT the AMEVA repacked layout). Each invocation produces one f32 element.
+// Block sizes: q4_0 = 18 bytes / 32 elements; q5_0 = 22 bytes / 32 elements.
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+
+// src0: quantized rows, byte-addressed via uint reads
+layout(std430, binding = 0) readonly buffer A { uint a[]; };
+layout(std430, binding = 1) readonly buffer I { int idx[]; };
+layout(std430, binding = 2) buffer S { uint status[]; };
+layout(std430, binding = 3) writeonly buffer D { uint d[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint nc;         // ne[0] of src0 (columns, multiple of 32)
+    uint ne10;       // ne[0] of idx (lookup count per batch)
+    uint ne11, ne12; // batch dims
+    uint a_off;      // byte offset of src0 from binding start (= ameva_bind(a, 2).elem * 2)
+    uint a_nb1;      // row stride in bytes (a->nb[1])
+    uint i_off;      // idx i32 element offset from binding start
+    uint i_s0;       // idx i32 stride for dim 0
+    uint i_s1;       // idx i32 stride for dim 1
+    uint i_s2;       // idx i32 stride for dim 2
+    uint d_off;      // dst f32 element offset
+    uint d_s1;       // dst f32 stride for dim 1
+    uint d_s2;       // dst f32 stride for dim 2
+    uint d_s3;       // dst f32 stride for dim 3
+    uint src_rows;   // src0 row count (for bounds check)
+    uint node;       // node id for status
+} pc;
+
+// Byte read helpers (little-endian, a[] is a uint array from binding start)
+uint a_read_byte(uint baddr) {
+    return (a[baddr >> 2u] >> ((baddr & 3u) * 8u)) & 0xFFu;
+}
+uint a_read_u16(uint baddr) { // baddr must be even
+    return (a[baddr >> 2u] >> ((baddr & 2u) * 8u)) & 0xFFFFu;
+}
+
+void main() {
+    const uint i = ameva_linear_id();
+    if (i >= pc.nc * pc.ne10 * pc.ne11 * pc.ne12) return;
+
+    uint t = i;
+    const uint c   = t % pc.nc;   t /= pc.nc;
+    const uint i10 = t % pc.ne10; t /= pc.ne10;
+    const uint i11 = t % pc.ne11;
+    const uint i12 = t / pc.ne11;
+
+    const int row = idx[pc.i_off + i10 * pc.i_s0 + i11 * pc.i_s1 + i12 * pc.i_s2];
+    if (row < 0 || uint(row) >= pc.src_rows) {
+        if (c == 0u) {
+            atomicAdd(status[0], 1u);
+            atomicMin(status[1], pc.node);
+        }
+        return;
+    }
+
+    const uint row_base = pc.a_off + uint(row) * pc.a_nb1;
+    const uint block    = c / 32u;
+    const uint e        = c & 31u;
+    float val;
+
+#if defined(Q4_0)
+    // q4_0 block: [d:f16(2), qs[16]:4-bit-pairs(16)] = 18 bytes/block
+    const uint boff = row_base + block * 18u;
+    const float d   = ameva_h2f(a_read_u16(boff));
+    const uint qs   = a_read_byte(boff + 2u + (e >> 1u));
+    const uint q4   = (e & 1u) == 0u ? (qs & 0xFu) : (qs >> 4u);
+    val = d * (float(q4) - 8.0);
+
+#elif defined(Q5_0)
+    // q5_0 block: [d:f16(2), qh[4]:high-bits(4), qs[16]:low-4-bits(16)] = 22 bytes/block
+    const uint boff = row_base + block * 22u;
+    const float d   = ameva_h2f(a_read_u16(boff));
+    const uint qh   = (a_read_byte(boff + 2u + (e >> 3u)) >> (e & 7u)) & 1u;
+    const uint qs   = a_read_byte(boff + 6u + (e >> 1u));
+    const uint ql   = (e & 1u) == 0u ? (qs & 0xFu) : (qs >> 4u);
+    val = d * (float(ql | (qh << 4u)) - 16.0);
+
+#else
+#error "define Q4_0 or Q5_0"
+#endif
+
+    d[pc.d_off + c + i10 * pc.d_s1 + i11 * pc.d_s2 + i12 * pc.d_s3] = floatBitsToUint(val);
+}

@@ -1605,8 +1605,10 @@ const char* ameva_op_unsupported_reason(const struct ggml_tensor* op) {
         }
         case GGML_OP_GET_ROWS: {
             const struct ggml_tensor *a = op->src[0], *idx = op->src[1];
-            if (!(is_f32(a) || is_f16(a)) || !is_f32(op)) return "get_rows type pair";
+            const bool q_src = a && (a->type == GGML_TYPE_Q4_0 || a->type == GGML_TYPE_Q5_0);
+            if (!(is_f32(a) || is_f16(a) || q_src) || !is_f32(op)) return "get_rows type pair";
             if (!idx || idx->type != GGML_TYPE_I32) return "get_rows index type";
+            if (q_src && (op->ne[0] % 32 != 0)) return "get_rows quantized src ne[0] not multiple of 32";
             if (!rows_contiguous(a) || !rows_contiguous(op) || !rows_contiguous(idx)) return "rows not contiguous";
             if (!fits_binding(a) || !fits_binding(op) || !fits_binding(idx)) return "tensor exceeds a buffer binding";
             if (!fits_kernel_indexing(a) || !fits_kernel_indexing(op) || !fits_kernel_indexing(idx)) return "exceeds 32-bit indexing";
@@ -3624,8 +3626,35 @@ static const char* enc_set_rows(AmevaRecorder& rec, const struct ggml_tensor* no
                         (double)ggml_nelements(a));
 }
 
+// GET_ROWS for q4_0 / q5_0 sources (ggml block layout, not repacked): gather + dequantize → f32 dst.
+static const char* enc_get_rows_q(AmevaRecorder& rec, const struct ggml_tensor* node) {
+    const struct ggml_tensor *a = node->src[0], *idx = node->src[1];
+    const bool q5 = a->type == GGML_TYPE_Q5_0;
+    AcKernel* kernel = ameva_op_kernel(q5 ? AMEVA_K_GET_ROWS_Q5_0 : AMEVA_K_GET_ROWS_Q4_0);
+    if (!kernel) return q5 ? "no ameva_get_rows_q5_0 kernel" : "no ameva_get_rows_q4_0 kernel";
+    AmevaBind ba, bi, bd;
+    // esize=2: ba.elem * 2 = byte offset from the aligned descriptor start
+    const char* e = ameva_bind(a, 2, &ba);
+    if (!e) e = ameva_bind(idx, 4, &bi);
+    if (!e) e = ameva_bind(node, 4, &bd);
+    if (e) return e;
+    const AmevaBind bs = ameva_status_bind();
+    const uint32_t pc[16] = {
+        (uint32_t)node->ne[0], (uint32_t)idx->ne[0], (uint32_t)idx->ne[1], (uint32_t)idx->ne[2],
+        ba.elem * 2u, (uint32_t)a->nb[1],
+        bi.elem, (uint32_t)(idx->nb[0] / 4u), (uint32_t)(idx->nb[1] / 4u), (uint32_t)(idx->nb[2] / 4u),
+        bd.elem, st(node, 1), st(node, 2), st(node, 3),
+        (uint32_t)a->ne[1], (uint32_t)rec.node
+    };
+    const AcBufferBinding bind[4] = { ba.b, bi.b, bs.b, bd.b };
+    const AmevaBind reads[2] = { ba, bi };
+    return ameva_record(rec, kernel, reads, 2, &bd, 1, bind, 4, pc, sizeof(pc),
+                        ameva_grid_1d(ggml_nelements(node), 256), (double)ggml_nelements(node));
+}
+
 static const char* enc_get_rows(AmevaRecorder& rec, const struct ggml_tensor* node) {
     const struct ggml_tensor *a = node->src[0], *idx = node->src[1];
+    if (a->type == GGML_TYPE_Q4_0 || a->type == GGML_TYPE_Q5_0) return enc_get_rows_q(rec, node);
     AcKernel* kernel = ameva_op_kernel(AMEVA_K_GET_ROWS);
     if (!kernel) return "no ameva_get_rows kernel";
     const bool f16 = a->type == GGML_TYPE_F16;
@@ -4671,6 +4700,15 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
         fi == AMEVA_FAIL_FLUSH_SRC1) {
         fprintf(stderr, "ggml-ameva [FAILURE_INJECTION]: point %d triggered while binding\n", (int)fi);
         return GGML_STATUS_FAILED;
+    }
+
+    // Lazy repack: frameworks that mark a buffer WEIGHTS after upload (e.g. whisper.cpp) have their eligible
+    // MUL_MAT src0 tensors repacked here, once, before recording begins.
+    for (int i = 0; i < n_nodes; i++) {
+        struct ggml_tensor* node = ggml_graph_node(cgraph, i);
+        if (!node || node->op != GGML_OP_MUL_MAT || !node->src[0]) continue;
+        struct ggml_tensor* w = node->src[0]->view_src ? node->src[0]->view_src : node->src[0];
+        if (w->buffer) ameva_ensure_weight_repacked(w->buffer, w);
     }
 
     // token-generation GEMV layouts of weight shapes this device has not measured yet (once per shape)
