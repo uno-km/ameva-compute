@@ -15,6 +15,9 @@
 //                        dim. A ggml whose result is not [dim, n] is declined, which the test accepts for an odd dim.
 //   REPEAT               (the LoRA merge of stable-diffusion.cpp) the source repeated over the result: equal to
 //                        the reference in every bit.
+//   ADD into f16         (the same merge, ggml_add_inplace(weight, diff) on the weights of an f16 model) f16 + f32 or
+//                        f16 -> f16, in place and into a new tensor, src1 of the same shape and broadcast: equal in
+//                        every bit to f32 -> f16 of the f32 sum (the CPU backend's result).
 // The largest error of each case is printed. Exit status 0 only when every case passes.
 #include "ggml.h"
 #include "ggml-alloc.h"
@@ -184,6 +187,62 @@ static void check_repeat(ggml_backend_t be, const char* name, const int64_t a[4]
     ggml_free(ctx);
 }
 
+// ADD into an f16 tensor: y = a (f16) + b (f32 or f16, broadcast over a), stored as f16; `inplace` writes a itself, as
+// ggml_add_inplace(weight, diff) of the LoRA merge does. Reference: ggml's own conversions around an f32 addition,
+// which is what ggml_compute_forward_add does for these types.
+static void check_add_f16(ggml_backend_t be, const char* name, const int64_t a[4], const int64_t b[4], bool b_f16,
+                          bool inplace, float spread) {
+    ++g_total;
+    struct ggml_init_params ip = { 8 * ggml_tensor_overhead() + ggml_graph_overhead(), nullptr, true };
+    struct ggml_context* ctx = ggml_init(ip);
+    struct ggml_tensor* x = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, a[0], a[1], a[2], a[3]);
+    struct ggml_tensor* z = ggml_new_tensor_4d(ctx, b_f16 ? GGML_TYPE_F16 : GGML_TYPE_F32, b[0], b[1], b[2], b[3]);
+    struct ggml_tensor* y = inplace ? ggml_add_inplace(ctx, x, z) : ggml_add(ctx, x, z);
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx, ggml_backend_get_default_buffer_type(be));
+    const size_t nx = (size_t)ggml_nelements(x), nz = (size_t)ggml_nelements(z);
+    const char* fail = buf ? nullptr : "allocation";
+    if (!fail && y->type != GGML_TYPE_F16) fail = "this ggml does not give an f16 result";
+    size_t bad = 0;
+    if (!fail) {
+        std::vector<ggml_fp16_t> xv(nx), zh(nz), got(nx);
+        std::vector<float> zv(nz);
+        for (ggml_fp16_t& v : xv) v = ggml_fp32_to_fp16(rnd());
+        for (size_t i = 0; i < nz; ++i) {
+            zv[i] = rnd() * spread;
+            zh[i] = ggml_fp32_to_fp16(zv[i]);
+            if (b_f16) zv[i] = ggml_fp16_to_fp32(zh[i]);
+        }
+        ggml_backend_tensor_set(x, xv.data(), 0, nx * sizeof(ggml_fp16_t));
+        if (b_f16) {
+            ggml_backend_tensor_set(z, zh.data(), 0, nz * sizeof(ggml_fp16_t));
+        } else {
+            ggml_backend_tensor_set(z, zv.data(), 0, nz * sizeof(float));
+        }
+        if (!ggml_backend_supports_op(be, y)) fail = "supports_op says no";
+        struct ggml_cgraph* gf = ggml_new_graph(ctx);
+        ggml_build_forward_expand(gf, y);
+        if (!fail && ggml_backend_graph_compute(be, gf) != GGML_STATUS_SUCCESS) fail = "graph_compute failed";
+        if (!fail) {
+            ggml_backend_tensor_get(y, got.data(), 0, nx * sizeof(ggml_fp16_t));
+            size_t i = 0;
+            for (int64_t i3 = 0; i3 < a[3]; ++i3)
+                for (int64_t i2 = 0; i2 < a[2]; ++i2)
+                    for (int64_t i1 = 0; i1 < a[1]; ++i1)
+                        for (int64_t i0 = 0; i0 < a[0]; ++i0, ++i) {
+                            const size_t s = (size_t)((i0 % b[0]) + b[0] * ((i1 % b[1]) + b[1] * ((i2 % b[2]) + b[2] * (i3 % b[3]))));
+                            const ggml_fp16_t ref = ggml_fp32_to_fp16(ggml_fp16_to_fp32(xv[i]) + zv[s]);
+                            bad += memcmp(&got[i], &ref, sizeof(ref)) != 0;
+                        }
+            if (bad) fail = "differs from the reference";
+        }
+    }
+    printf("UNET_OPS_CHECK op=ADD_F16 case=\"%s\" src1=%s %s elements=%zu mismatches=%zu %s%s\n", name,
+           b_f16 ? "f16" : "f32", inplace ? "in place" : "new tensor", nx, bad, fail ? "FAIL: " : "PASS", fail ? fail : "");
+    if (!fail) ++g_passed;
+    if (buf) ggml_backend_buffer_free(buf);
+    ggml_free(ctx);
+}
+
 int main() {
     ggml_backend_t be = ggml_backend_ameva_init(0);
     if (!be) {
@@ -216,6 +275,21 @@ int main() {
         check_repeat(be, "scalar over 320 x 4", a0, d0);
         check_repeat(be, "5x1x3x1 over 10x7x3x2", a1, d1);
         check_repeat(be, "same shape", a2, d2);
+    }
+    {
+        // rows of odd length (halves of one word in different rows), a diff of a weight's size and smaller ones,
+        // a diff far below the weights (most sums round back) and far above (the weight is rounded away)
+        const int64_t w0[4] = { 320, 320, 1, 1 }, w1[4] = { 3, 3, 4, 5 }, w2[4] = { 77, 5, 3, 1 }, w3[4] = { 1, 1, 1, 1 };
+        const int64_t r0[4] = { 77, 1, 3, 1 }, r1[4] = { 1, 1, 4, 1 };
+        check_add_f16(be, "320 x 320 (attention projection of SD 1.x), diff of the same shape", w0, w0, false, true, 0.05f);
+        check_add_f16(be, "320 x 320, diff 1e-4 of the weights", w0, w0, false, true, 1e-4f);
+        check_add_f16(be, "320 x 320, diff 1e3 times the weights", w0, w0, false, true, 1e3f);
+        check_add_f16(be, "3 x 3 x 4 x 5 (convolution kernel, odd rows)", w1, w1, false, true, 0.05f);
+        check_add_f16(be, "3 x 3 x 4 x 5, f16 diff", w1, w1, true, true, 0.05f);
+        check_add_f16(be, "3 x 3 x 4 x 5, one value per channel", w1, r1, false, true, 0.05f);
+        check_add_f16(be, "77 x 5 x 3, a row repeated", w2, r0, true, false, 0.5f);
+        check_add_f16(be, "77 x 5 x 3, a scalar", w2, w3, false, false, 0.5f);
+        check_add_f16(be, "320 x 320, f16 diff", w0, w0, true, false, 0.05f);
     }
     printf("UNET_OPS_CHECK %d/%d passed\n", g_passed, g_total);
     ggml_backend_free(be);

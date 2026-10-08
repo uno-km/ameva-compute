@@ -19,6 +19,8 @@
 # MODEL (default ~/.cache/termux-diffusion/models/anime.gguf), SIZE (512), STEPS (8), SEED (42), THREADS (4), CFG (1),
 # SAMPLER (euler), PROMPT, EXTRA (further sd-cli arguments for every run, e.g. "--type q4_K", "--vae-tiling",
 # "--lora-model-dir DIR"), TAG (suffix of the result directory), PSNR_MIN (40; this script's choice).
+# GUARD_MB: when set, sd-cli is ended as soon as MemAvailable falls below it (checked once a second), before the
+# system ends the Termux session; the run then fails with a GUARD_KILL line.
 # Prints results only; exit status 0 when everything that ran passed.
 set -u
 LAB=$HOME/abi-lab
@@ -49,11 +51,21 @@ mkdir -p "$RES"
 
 # run_one TAG BACKEND_ASSIGNMENT: one sd-cli process, one line of results; returns 1 when the run does not pass
 run_one() {
-    local tag=$1 spec=$2 plugin=() r ok=1 splits declined prof dispatches t0 t1
+    local tag=$1 spec=$2 plugin=() r ok=1 splits declined prof dispatches t0 t1 gpid a
     case "$spec" in
         *AMEVA0*) plugin=(GGML_BACKEND_PATH="$OUT/libggml-ameva.so" AMEVA_PROFILE=1 AMEVA_STRICT=1) ;;
     esac
-    rm -f "$RES/$tag.png"
+    rm -f "$RES/$tag.png" "$RES/$tag.guard"
+    if [ -n "${GUARD_MB:-}" ]; then
+        ( while sleep 1; do
+              a=$(awk '/MemAvailable/ {print int($2 / 1024)}' /proc/meminfo)
+              if [ "$a" -lt "$GUARD_MB" ]; then
+                  echo "GUARD_KILL mem_available_mb=$a (< $GUARD_MB)" >> "$RES/$tag.guard"
+                  pkill -9 -x sd-cli
+              fi
+          done ) &
+        gpid=$!
+    fi
     t0=$(date +%s)
     # shellcheck disable=SC2086
     env GGML_SCHED_DEBUG=1 LD_LIBRARY_PATH="$RT" "${plugin[@]}" timeout "$RUN_TIMEOUT" "$SDCLI" -m "$MODEL" \
@@ -62,6 +74,8 @@ run_one() {
         -o "$RES/$tag.png" > "$RES/$tag.log" 2>&1
     r=$?
     t1=$(date +%s)
+    if [ -n "${GUARD_MB:-}" ]; then kill $gpid 2>/dev/null; wait $gpid 2>/dev/null; fi
+    [ -s "$RES/$tag.guard" ] && { ok=0; head -1 "$RES/$tag.guard"; }
     splits=$(grep -c "## SPLIT" "$RES/$tag.log")
     declined=$(grep -c "ggml-ameva: declined" "$RES/$tag.log")
     prof=$(grep -o "AMEVA_PROFILE graphs=[0-9]* nodes=[0-9]* dispatches=[0-9]*" "$RES/$tag.log" | tail -1)

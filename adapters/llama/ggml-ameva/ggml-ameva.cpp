@@ -43,7 +43,8 @@
 //                              generation GEMV selection); ameva_qgemm (64 x 32 tiles) for those weights when many
 //                              activation rows are multiplied (prompt processing)
 //                              ameva_qmm: src0 read in its raw ggml format, 15 weight types (everything else)
-//   ADD SUB MUL DIV            ameva_binary (broadcasting src1)
+//   ADD SUB MUL DIV            ameva_binary (broadcasting src1); ADD also as f16 + f32/f16 -> f16, in place or not
+//                              (-DF16: the merge of a LoRA into f16 weights)
 //   SCALE, UNARY (TANH SILU GELU GELU_ERF GELU_QUICK RELU SIGMOID NEG SQR SQRT EXP ABS)   ameva_unary
 //   GLU (REGLU GEGLU SWIGLU GEGLU_ERF GEGLU_QUICK)      ameva_glu
 //   RMS_NORM, ROPE (normal, neox, frequency factors), SET_ROWS, GET_ROWS, CPY/CONT/DUP (f32/f16)
@@ -1473,7 +1474,17 @@ const char* ameva_op_unsupported_reason(const struct ggml_tensor* op) {
         case GGML_OP_MUL:
         case GGML_OP_DIV: {
             const struct ggml_tensor *a = op->src[0], *b = op->src[1];
-            if (!is_f32(a) || !is_f32(b) || !is_f32(op)) return "binary op on non-f32 tensors";
+            if (is_f16(a) || is_f16(op)) {
+                // shaders/ameva_binary.comp -DF16: f16 + f32 or f16 -> f16, in place or not. It is the merge of a
+                // LoRA into the weights of an f16 model (stable-diffusion.cpp, ggml_add_inplace(weight, diff)).
+                // Only ADD is taken: it is the op that merge uses and the one compared with the CPU
+                // (tests/ameva_unet_ops_check).
+                if (op->op != GGML_OP_ADD) return "f16 binary op other than ADD";
+                if (!is_f16(a) || !is_f16(op) || !(is_f32(b) || is_f16(b))) return "f16 binary op on types other than f16 + f32/f16 -> f16";
+                if (!fits_binding(a) || !fits_binding(b) || !fits_binding(op)) return "f16 binary op above one buffer binding";
+            } else if (!is_f32(a) || !is_f32(b) || !is_f32(op)) {
+                return "binary op on non-f32 tensors";
+            }
             if (!ggml_are_same_shape(a, op) || !ggml_can_repeat(b, a)) return "unsupported broadcast";
             if (!rows_contiguous(a) || !rows_contiguous(b) || !rows_contiguous(op)) return "rows not contiguous";
             if (!fits_kernel_indexing(a) || !fits_kernel_indexing(b) || !fits_kernel_indexing(op)) return "exceeds 32-bit indexing";
@@ -3302,10 +3313,16 @@ static const char* enc_mul_mat(AmevaRecorder& rec, const struct ggml_tensor* nod
 
 static const char* enc_binary(AmevaRecorder& rec, const struct ggml_tensor* node) {
     const struct ggml_tensor *a = node->src[0], *b = node->src[1];
-    AcKernel* kernel = ameva_op_kernel(AMEVA_K_BINARY);
+    // shaders/ameva_binary.comp -DF16: src0 and dst f16, src1 f32 or f16 (bit 2 of op); offsets and strides count
+    // elements of each tensor's own type. It fits one binding (ameva_op_unsupported_reason), so the windows below
+    // are f32 only.
+    const bool f16 = node->type == GGML_TYPE_F16;
+    AcKernel* kernel = ameva_op_kernel(f16 ? AMEVA_K_BINARY_F16 : AMEVA_K_BINARY);
     if (!kernel) return "no ameva_binary kernel";
     AmevaBind ba, bb, bd;
-    const uint32_t op = node->op == GGML_OP_ADD ? 0u : node->op == GGML_OP_SUB ? 1u : node->op == GGML_OP_MUL ? 2u : 3u;
+    const uint32_t ea = f16 ? 2 : 4, eb = is_f16(b) ? 2 : 4;
+    const uint32_t op = (node->op == GGML_OP_ADD ? 0u : node->op == GGML_OP_SUB ? 1u : node->op == GGML_OP_MUL ? 2u : 3u) |
+                        (f16 && is_f16(b) ? 4u : 0u);
     if (!fits_binding(a) || !fits_binding(b) || !fits_binding(node)) {
         // windows of planes (binary_windows_reason): each is the op on views of `cc` planes of one index of
         // dimension 3; src1 follows the window where it has the planes of the result
@@ -3341,9 +3358,9 @@ static const char* enc_binary(AmevaRecorder& rec, const struct ggml_tensor* node
         rec.window_nodes++;
         return nullptr;
     }
-    const char* e = ameva_bind(a, 4, &ba);
-    if (!e) e = ameva_bind(b, 4, &bb);
-    if (!e) e = ameva_bind(node, 4, &bd);
+    const char* e = ameva_bind(a, ea, &ba);
+    if (!e) e = ameva_bind(b, eb, &bb);
+    if (!e) e = ameva_bind(node, ea, &bd);
     if (e) return e;
     const uint32_t pc[21] = { (uint32_t)node->ne[0], (uint32_t)node->ne[1], (uint32_t)node->ne[2], (uint32_t)node->ne[3],
                               ba.elem, st(a, 1), st(a, 2), st(a, 3),

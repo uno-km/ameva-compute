@@ -572,3 +572,85 @@ the CPU code of ggml multiplies with activations rounded to 8 bits, with f16 wei
   before any graph of the diffusion model was built: no op list. Also not done: the op checks on the A35, A53, S25 and
   S20; `test-backend-ops` and LLM text parity after these changes; the S20; an OpenCL translation of the new
   kernels; the cause of the UNet time on the S21; LoRA merged at load on AMEVA.
+  (Section 13 has the MMDiT run and the merge at load. Its log shows that the run described here ended after text
+  encoding had completed, at the load of the diffusion model, not during text encoding.)
+
+## 13. An MMDiT model on ggml-ameva and the LoRA merge at load (2026-10-08)
+
+Z-Image-Turbo (`z_image_turbo-Q2_K.gguf`, 2472 MB of parameters), text encoder Qwen3-4B Q2_K, VAE
+`z_image_ae.safetensors`, sd-cli `50d6405` unchanged. Script: `scripts/termux/lab/mmdit_census.sh` (one run under a
+guard that ends sd-cli when MemAvailable falls below 600 MB, with the op census and the memory of each phase).
+
+- **Flags.** `--mmap --backend te=cpu,diffusion=AMEVA0,vae=AMEVA0 --max-vram AMEVA0=1.5 --stream-layers
+  --params-backend diffusion=cpu --vae-conv-direct --diffusion-conv-direct`. The key of `--max-vram` is the backend's
+  device name. `--stream-layers` is ignored unless the DiT parameters stay on the CPU (`--params-backend
+  diffusion=cpu`; with `--mmap` they are the mapped file). sd-cli lowers the budget to the free memory the backend
+  reports and cuts the DiT graph to it: 283 MB and 13 segments on the A35, 384 MB and 8 segments on the S21 at 256 px
+  (19 at 512 px). Every segment's weights are sent to the backend, and repacked, in every step.
+- **Census: nothing declined.** Ops of the DiT and VAE graphs on the backend: ADD, MUL, REPEAT, CONCAT, NORM,
+  RMS_NORM, GROUP_NORM, MUL_MAT, SCALE, CONT, SOFT_MAX, CONV_2D, UPSCALE, TIMESTEP_EMBEDDING, UNARY, GLU. No scheduler
+  split and no declined op in any run below; the S21 runs had `AMEVA_STRICT=1`. The text encoder ran on the CPU in
+  every run (`te=cpu`): it is not part of this census.
+
+| device, run | graphs / nodes / dispatches | text encoder (CPU) | sampling | decode | CPU: sampling / decode | PSNR against the CPU image |
+|---|---|---|---|---|---|---|
+| A35, 256 px, 1 step (plugin of `bf0ec99`) | 14 / 2309 / 4710 | 42.08 s | 79.92 s | 11.67 s | 372.72 / 119.26 s | 40.86 dB (max 22 of 255) |
+| S21, 256 px, 1 step, strict (plugin of this section) | 9 / 2262 / 4397 | 5.45 s | 55.63 s | 8.90 s | 83.47 / 18.78 s | 39.55 dB |
+| S21, 512 px, 8 steps, strict | 216 / 17730 / 45825 | 6.95 s | 1994.08 s | 36.37 s | not run | not run |
+
+  One process per run, not alternated, GPU clock not recorded: the times are not a benchmark. A35: ssh core set 0-2,
+  4 threads, and sd-cli's times (monotonic clock) summed to 134 s where the wall clock gave 609 s. The PSNR is against
+  the CPU run of the same Q2_K weights (see section 12 on what that reference measures); the A35 multiplies with int8
+  activations (`ameva_mmq`, 213 MUL_MATs), the S21 with f32 (`ameva_qmv`, 208). The 512 px image shows the prompt (a
+  lighthouse on a rocky coast at sunset); 5 of its VAE nodes ran in windows. 8 steps at 512 px repacked 25187 MiB of
+  weights: the streaming, not the kernels, sets the 249 s per step.
+- **The plugin on the S21 and A35 was older than the source** (`out-sdw4`, built before REPEAT was added). With it
+  REPEAT was declined, the scheduler split the graph, and ggml's CPU REPEAT stopped the process
+  (`ggml-cpu/ops.cpp:1708: GGML_ASSERT(ggml_can_repeat(src0, dst))`, exit 134): for this graph a declined op is a
+  crash, not a slower path.
+- **Memory.** Lowest MemAvailable per phase (text encoder / DiT / VAE): A35 1026 / 692 / 1075 MB (2521 MB before the
+  run), S21 2125 / 1355 / 1807 MB at 256 px and 2280 / 1181 / 1661 MB at 512 px. The process's anonymous memory peaks
+  at 1563-1580 MB: the token embedding, which sd-cli converts to f32 (1483.75 MB); the other 385 text-encoder tensors
+  are the mapped file (1246.57 MB).
+  - sd-cli releases a module's parameters after use only when that module's residency is disk
+    (`ModelManager::release_params_storage_blocks`). With the flags above the 1483.75 MB buffer is released after
+    `generate_image completed`: it is allocated through the DiT and the VAE. The A35 moved it to zram (the process's
+    VmSwap 1552-1560 MB during the DiT, 8-15 MB anonymous resident); the S21 kept it resident or swapped part of it.
+  - `--params-backend te=disk,diffusion=cpu` does release it, and reads all 386 text-encoder tensors into anonymous
+    memory instead of mapping them: on the A35 the guard ended the run 14 s into text encoding (MemAvailable 495 MB;
+    the process at 798 MB anonymous and 1924 MB swapped).
+  - termux-diffusion 2.0.1 `--isolate-text-encoder` / `--sequential-stages` is parsed and stored
+    (`GenerationResult.isolated_stages`) and nothing acts on it; `SequentialClusterPipeline.execute_stages` is called
+    by a unit test only. sd-cli has no option to write or read a computed condition, so a text-encode-then-exit
+    process followed by a DiT process cannot be run today.
+- **LoRA merged at load on the backend (f16 weights).** stable-diffusion.cpp merges with
+  `ggml_add_inplace(weight, diff)` on the f16 weight. New op kernel `binary_f16` (`shaders/ameva_binary.comp -DF16`):
+  f16 + f32 or f16 -> f16, in place or not, values converted as the CPU does, halves of a word stored with atomics.
+  Only ADD is accepted for f16. The f32 kernel's SPIR-V is the same file as before (SHA-256 `f46e519d...`); the
+  regenerated header only adds the new module (S21, spirv-val).
+  - Op check (`tests/ameva_unet_ops_check`, 9 new cases: the size of an attention projection, a 3 x 3 x 4 x 5 kernel
+    with rows of odd length, broadcast diffs, diffs 1e-4 and 1e3 times the weights): equal to
+    `f32 -> f16(f16 -> f32(a) + b)` in every bit on the S21 and the A35 (24/24 with the earlier cases).
+    `test-backend-ops -o ADD` on the S21: 32 f16 cases pass on the backend (12 broadcast shapes declined, as for f32).
+  - Regression of the other op checks with this source (`conv_check.sh kernels`), S21 and A35: conv 31/31 (25/25 and
+    31/31 under `AMEVA_BINDING_LIMIT`), cnorm 15/15 x4, window 18/18, qmm 516/516. `test-backend-ops` on the S21,
+    default settings: 3969/3969 (the pass with `AMEVA_REPACK_ALL=1` was started and not read for this section).
+  - End to end (`scripts/termux/lab/lora_merge_e2e.sh`: SD 1.x `anime.gguf --type f16`, 256 px, 4 steps, the synthetic
+    adapter of section 12, `AMEVA_STRICT=1`): no declined op, no split, 6226 nodes in 7 graphs.
+
+| pair | S25 | S21 |
+|---|---|---|
+| merged at load: AMEVA against CPU (floor 40 dB) | 45.75 dB | 45.75 dB |
+| AMEVA: merged against no adapter (has to be below 30 dB) | 19.72 dB | 19.72 dB |
+| AMEVA: merged against applied at run time | 62.20 dB (max 2 of 255) | 62.20 dB |
+| CPU: merged against no adapter | 19.77 dB | 19.77 dB |
+| CPU: merged against applied at run time | 44.65 dB | 44.65 dB |
+| applied at run time: AMEVA against CPU | 45.84 dB | 45.84 dB |
+
+  - Not available: the merge into quantized weights. stable-diffusion.cpp casts the weight to f32, adds and copies
+    back to the quantized type, which reads and writes a repacked weight (declined), and its CPU path stops in ggml
+    with a q4_0 file as well; `--lora-apply-mode auto` applies at run time for quantized models (section 12).
+- Not done: a CPU reference for the 512 px image; Z-Image-Turbo on the S25 and A53 (the S25 has no copy of the
+  model); the Q4_0 file; the text encoder on the backend; a two-process run that frees the text encoder; the LoRA
+  merge end to end on the A35 (its f16 CPU reference ran 20 min in swap and was stopped) and the A53; `binary_f16`
+  on OpenCL (translated, not run); f16 ADD above one binding (declined); LLM text parity after this change.
