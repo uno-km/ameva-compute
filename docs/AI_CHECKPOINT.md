@@ -1,7 +1,7 @@
 # Current Engineering Checkpoint
 
 **Timestamp**: 2026-10-08T11:20:00+09:00  
-**Branch**: `perf/opencl-mali` (pushed up to `34440b6`; K3 and the VAE census are in the working tree, not committed).  
+**Branch**: `perf/opencl-mali` (pushed: `d31bfba` K3 ops & full VAE graph, `c93f05b` K2 group norm & bias, `109ba54` CONV_2D).  
 **Current Goal**: 5-Modality Pipeline Optimization (1. Diffusion -> 2. STT -> 3. BitNet -> 4. Vision -> 5. TTS); STRICTLY LOCAL under `dev/` (no remote branch fetch).
 
 ### Verified (Ground Truth)
