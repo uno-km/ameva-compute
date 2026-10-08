@@ -1211,7 +1211,10 @@ static const char* mul_mat_qmm_reason(const struct ggml_tensor* op) {
         if (K % 32 != 0 || K % (int64_t)v.block_elems != 0) return "K not a multiple of the block size";
         if (ggml_row_size(src0->type, K) != (size_t)(K / v.block_elems) * v.block_bytes) return "block layout mismatch";
     }
-    if (!ggml_is_contiguous(src0)) return "weights not contiguous";
+    // Row-padded weights (GGUF alignment padding between rows, nb[1] > ggml_row_size) are stored contiguously
+    // in the AMEVA buffer by set_tensor. All kernels address weight rows via ggml_row_size (the contiguous
+    // stride), so accepting element-contiguous (rows_contiguous) tensors here is correct.
+    if (!rows_contiguous(src0)) return "weights element-stride != 1";
     if (src0->ne[2] != 1 || src0->ne[3] != 1 || src1->ne[2] != 1 || src1->ne[3] != 1) return "batched (ne2/ne3 > 1)";
     if (src1->ne[0] != K || op->ne[0] != N || op->ne[1] != M) return "shape mismatch";
     if (!rows_contiguous(src1) || !rows_contiguous(op)) return "activation or output rows not contiguous";

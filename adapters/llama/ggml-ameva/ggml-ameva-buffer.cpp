@@ -244,7 +244,11 @@ bool ameva_ensure_weight_repacked(ggml_backend_buffer_t buffer, struct ggml_tens
     AmevaRepackLayout L;
     if (!ameva_repack_layout(tensor->type, &L) || !ameva_qmv_has_type(tensor->type)) return false;
     const size_t nbytes = ggml_nbytes(tensor);
-    if (!ggml_is_contiguous(tensor) || tensor->ne[0] <= 0 || tensor->ne[0] % L.block_elems != 0 || nbytes == 0)
+    // Row-padded tensors have nb[0] == ggml_type_size (element-contiguous) but nb[1] > ggml_row_size.
+    // set_tensor strips the inter-row padding, so data in the AMEVA buffer is contiguous. Repacking reads
+    // the buffer via host_read at cont strides, which is correct. Allow element-contiguous (rows_contiguous).
+    const bool elem_cont = (tensor->nb[0] == ggml_type_size(tensor->type));
+    if (!elem_cont || tensor->ne[0] <= 0 || tensor->ne[0] % L.block_elems != 0 || nbytes == 0)
         return false;
     auto* ctx = (ggml_backend_ameva_buffer_context*)buffer->context;
     const size_t t0 = base_offset(ctx, tensor->data, nbytes, "ensure_weight_repacked");
@@ -333,6 +337,23 @@ static void ggml_backend_ameva_buffer_set_tensor(ggml_backend_buffer_t buffer, s
     if (const ggml_tensor* base = resolve_for_write(buffer, tensor, offset, size, "set_tensor")) {
         repacked_access(ctx, base, (uint64_t)(dst - (char*)base->data), size, Access::Write, data, nullptr, 0,
                         "set_tensor");
+        return;
+    }
+    // Full-tensor write of a row-padded (but element-contiguous) tensor: strip inter-row padding so the GPU
+    // buffer stores rows contiguously. All kernels address weight rows via ggml_row_size(type, K) (the
+    // contiguous stride), so the stored layout must match. GGUF aligns rows to page/cache boundaries, which
+    // produces nb[1] > ggml_row_size for small filters (e.g. whisper conv1/conv2 f16 with filter_size=3).
+    if (offset == 0 && size == ggml_nbytes(tensor) &&
+        tensor->ne[0] > 0 &&
+        tensor->nb[0] == ggml_type_size(tensor->type) &&
+        tensor->nb[1] > ggml_row_size(tensor->type, tensor->ne[0])) {
+        const size_t cont_row = ggml_row_size(tensor->type, tensor->ne[0]);
+        const int64_t nrows = ggml_nrows(tensor);
+        std::vector<uint8_t> stripped((size_t)nrows * cont_row);
+        for (int64_t r = 0; r < nrows; r++)
+            memcpy(stripped.data() + (size_t)r * cont_row,
+                   (const char*)data + (size_t)r * tensor->nb[1], cont_row);
+        host_write(ctx, byte_offset, stripped.data(), stripped.size(), "set_tensor");
         return;
     }
     host_write(ctx, byte_offset, data, size, "set_tensor");
