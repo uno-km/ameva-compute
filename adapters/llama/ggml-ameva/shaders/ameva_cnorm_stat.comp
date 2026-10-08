@@ -1,0 +1,73 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// AMEVA CNORM, statistics pass. ggml's GROUP_NORM (ggml_compute_forward_group_norm_f32) normalises each group of
+// consecutive channels of each batch element over the whole plane: y = (x - mean) / sqrt(var + eps), with var the
+// mean of (x - mean)^2. In ggml's layout [W, H, C, B] a group is one run of n = W * H * channels consecutive floats.
+// This pass writes mean and 1 / sqrt(var + eps) of every group; shaders/ameva_cnorm.comp applies them.
+//
+// One workgroup per group. Invocation t takes elements 4 (t + 128 j) .. + 3 for j = 0, 1, ..: four f32 partial sums
+// per invocation, 512 per group, reduced in shared memory; first for the mean, then for the squared differences from
+// it. Those are the two passes of ggml: one pass over x and x^2 would subtract two nearly equal numbers when the mean
+// is large against the spread. ggml accumulates in double, so these f32 partial sums differ from it by rounding.
+//
+//   source  f32 [W, H, C, B], contiguous
+//   stats   two floats per group: mean, 1 / sqrt(var + eps); group g of batch element b at s_off + 2 (g + G b)
+//   push: a_off (floats), plane (W * H), C, cpg (channels per group; the last group has what remains), G (groups
+//         that have channels), B, eps (float bits), s_off (floats)
+//   grid: G * B workgroups over (x, y)
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+
+layout(std430, binding = 0) readonly buffer BufA { float src[]; };
+layout(std430, binding = 1) writeonly buffer BufS { float stats[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint a_off, plane, C, cpg;
+    uint G, B, eps, s_off;
+} pc;
+
+shared float red[128];  // partial sums of x; red[0] stays the group's sum after its reduction
+shared float red2[128]; // partial sums of (x - mean)^2
+
+void main() {
+    const uint wg = ameva_workgroup_id();
+    if (wg >= pc.G * pc.B) return; // uniform across the workgroup
+    const uint tid = gl_LocalInvocationID.x;
+    const uint c0 = (wg % pc.G) * pc.cpg;
+    const uint n = (min(c0 + pc.cpg, pc.C) - c0) * pc.plane;
+    const uint base = pc.a_off + ((wg / pc.G) * pc.C + c0) * pc.plane;
+    const uint quads = (n + 3u) >> 2u; // the last one may reach past the group: those elements are not loaded
+
+    vec4 s = vec4(0.0);
+    for (uint q = tid; q < quads; q += 128u) {
+        const uint e = 4u * q;
+        s += vec4(src[base + e], e + 1u < n ? src[base + e + 1u] : 0.0, e + 2u < n ? src[base + e + 2u] : 0.0,
+                  e + 3u < n ? src[base + e + 3u] : 0.0);
+    }
+    red[tid] = (s.x + s.y) + (s.z + s.w);
+    barrier();
+    for (uint st = 64u; st > 0u; st >>= 1u) {
+        if (tid < st) red[tid] += red[tid + st];
+        barrier();
+    }
+    const float mean = red[0] / float(n);
+
+    vec4 s2 = vec4(0.0);
+    for (uint q = tid; q < quads; q += 128u) {
+        const uint e = 4u * q;
+        const vec4 v = vec4(src[base + e], e + 1u < n ? src[base + e + 1u] : mean,
+                            e + 2u < n ? src[base + e + 2u] : mean, e + 3u < n ? src[base + e + 3u] : mean) - mean;
+        s2 += v * v;
+    }
+    red2[tid] = (s2.x + s2.y) + (s2.z + s2.w);
+    barrier();
+    for (uint st = 64u; st > 0u; st >>= 1u) {
+        if (tid < st) red2[tid] += red2[tid + st];
+        barrier();
+    }
+    if (tid == 0u) {
+        stats[pc.s_off + 2u * wg] = mean;
+        stats[pc.s_off + 2u * wg + 1u] = 1.0 / sqrt(red2[0] / float(n) + uintBitsToFloat(pc.eps));
+    }
+}

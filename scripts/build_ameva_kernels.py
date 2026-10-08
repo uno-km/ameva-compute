@@ -34,9 +34,10 @@
   rows x DRA activation rows. One variant per weight type and layout (DRW, DRA, local size).
 
 * SPIR-V-only kernels (VK_ONLY: shaders/ameva_conv.comp, the convolution without a column matrix, per weight form
-  and staging, and shaders/ameva_conv_w.comp, which brings the weights into its K order): scripts/glsl_to_opencl.py
-  does not translate them yet, so they have no entry in the OpenCL C header and the engine declines their ops on
-  the OpenCL backend.
+  and staging, shaders/ameva_conv_w.comp, which brings the weights into its K order, and the two passes of
+  GROUP_NORM, shaders/ameva_cnorm_stat.comp and shaders/ameva_cnorm.comp): scripts/glsl_to_opencl.py does not
+  translate them yet, so they have no entry in the OpenCL C header and the engine declines their ops on the OpenCL
+  backend.
 
 For every module: glslangValidator -V (vulkan1.0), spirv-val, SHA-256 (pinned by the runtime at kernel creation),
 binding count (from the source's layout declarations), push-constant size (counted from the source's push-constant
@@ -124,10 +125,13 @@ OPS_DEFINED = [("set_rows_q8_0", "set_rows_q", ["QTYPE_Q8_0"]), ("set_rows_q4_0"
 # Kernels built as SPIR-V only, in the order of enum AmevaVkKernelId: (kernel name, source, defines).
 # ameva_conv: weights f16 through the exact decoder, f16 through the built-in conversion (f16u; the engine selects it
 # after checking the device's conversion of f16 subnormals) or f32; staging scalar (s, any stride) or aligned vec4 (v).
+# ameva_cnorm_stat, ameva_cnorm: GROUP_NORM as group statistics, then the normalisation with the fused chain.
+# New kernels go at the end: the engine addresses these by enum value.
 VK_ONLY = ([("conv_%s_%s" % (w, st), "conv", wd + sd)
             for w, wd in (("f16", ["TYPE_F16"]), ("f16u", ["TYPE_F16", "F16_UNPACK"]), ("f32", ["TYPE_F32"]))
             for st, sd in (("s", []), ("v", ["STAGE_VEC4"]))] +
-           [("conv_w_f16", "conv_w", []), ("conv_w_f32", "conv_w", ["F32"])])
+           [("conv_w_f16", "conv_w", []), ("conv_w_f32", "conv_w", ["F32"])] +
+           [("cnorm_stat", "cnorm_stat", []), ("cnorm", "cnorm", [])])
 
 # the licence header of the generated files (kept identical to the other sources of the repository)
 LICENSE_HEADER = ["/**", " * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.",

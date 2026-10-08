@@ -1228,6 +1228,40 @@ static const char* ameva_conv2d_geometry(const struct ggml_tensor* op, AmevaConv
     return nullptr;
 }
 
+// GGML_OP_GROUP_NORM (ggml_group_norm): src0 = data [W, H, C, B] f32, result of the same shape; op params: the number
+// of groups (int32) and eps (f32). ggml gives a group ceil(C / groups) consecutive channels, so the last group may be
+// short and groups after it empty; G counts the groups that have channels. Computed by shaders/ameva_cnorm_stat.comp
+// (mean and scale of every group, into the scratch buffer) and shaders/ameva_cnorm.comp (one dispatch per batch
+// element).
+struct AmevaGroupNorm {
+    uint32_t plane, C, B, cpg, G; // plane = W * H, cpg = channels per group
+    uint64_t stat_bytes;          // two floats per group and batch element
+};
+
+// Fills g and returns NULL when ameva_cnorm can compute the node, otherwise the reason it cannot. A node without
+// elements is accepted with g zeroed: nothing is recorded for it.
+static const char* ameva_group_norm_geometry(const struct ggml_tensor* op, AmevaGroupNorm* g) {
+    if (ameva_backend_is_opencl()) return "group norm kernels have no OpenCL C translation";
+    const struct ggml_tensor* a = op->src[0];
+    if (!a || !is_f32(a) || !is_f32(op) || !ggml_are_same_shape(a, op)) return "group norm on non-f32 or reshaping";
+    if (!ggml_is_contiguous(a) || !ggml_is_contiguous(op)) return "group norm tensor not contiguous";
+    const int32_t n_groups = ((const int32_t*)op->op_params)[0];
+    if (n_groups < 1) return "group norm without groups";
+    if (!fits_binding(a) || !fits_binding(op)) return "tensor exceeds a buffer binding";
+    if (!fits_kernel_indexing(a) || !fits_kernel_indexing(op)) return "exceeds 32-bit indexing";
+    *g = {};
+    const uint64_t plane = (uint64_t)a->ne[0] * (uint64_t)a->ne[1], C = (uint64_t)a->ne[2], B = (uint64_t)a->ne[3];
+    if (plane == 0 || C == 0 || B == 0) return nullptr;
+    const uint64_t cpg = (C + (uint64_t)n_groups - 1) / (uint64_t)n_groups;
+    if (C > 65535 || (plane + 255) / 256 > 65535) return "grid exceeds 65535 workgroups";
+    g->plane = (uint32_t)plane, g->C = (uint32_t)C, g->B = (uint32_t)B, g->cpg = (uint32_t)cpg;
+    g->G = (uint32_t)((C + cpg - 1) / cpg);
+    g->stat_bytes = (uint64_t)g->G * B * 8;
+    const size_t span = ameva_max_binding_span();
+    if (!span || g->stat_bytes > span) return "group norm statistics exceed a buffer binding";
+    return nullptr;
+}
+
 // Returns NULL when the AMEVA graph engine can compute op, otherwise the reason it cannot.
 const char* ameva_op_unsupported_reason(const struct ggml_tensor* op) {
     if (!op) return "null op";
@@ -1398,6 +1432,10 @@ const char* ameva_op_unsupported_reason(const struct ggml_tensor* op) {
             AmevaConv2d g;
             return ameva_conv2d_geometry(op, &g);
         }
+        case GGML_OP_GROUP_NORM: {
+            AmevaGroupNorm g;
+            return ameva_group_norm_geometry(op, &g);
+        }
         default:
             return "op has no ameva kernel";
     }
@@ -1475,7 +1513,9 @@ struct AmevaRecorder {
     int64_t mmqb_nodes = 0;   // of mmq_nodes, the ones that ran ameva_mmqb
     int64_t mmvq_nodes = 0;
     int64_t conv_nodes = 0;   // CONV_2D nodes (ameva_conv)
-    int64_t fused_pairs = 0;      // node pairs computed by one dispatch sequence (ameva_find_fusion)
+    int64_t conv_bias_nodes = 0;  // of conv_nodes, the ones whose bias ADD the kernel computed
+    int64_t cnorm_nodes = 0;      // GROUP_NORM nodes (ameva_cnorm)
+    int64_t fused_pairs = 0;      // nodes computed by the dispatches of an earlier node (ameva_find_fusion, ameva_find_chain)
     // The activation row whose int8 form (ameva_quant_a8) is in the scratch buffer, for the ameva_mmvq products that
     // follow with the same src1 (Q, K, V share theirs, gate and up too). Cleared by a write to the scratch buffer or
     // to the row itself (ameva_record).
@@ -3277,12 +3317,28 @@ static bool ameva_fuse_enabled(void) {
     return on;
 }
 
-enum AmevaFuseKind { AMEVA_FUSE_NONE = 0, AMEVA_FUSE_RMS_MUL, AMEVA_FUSE_MM_EPILOGUE };
+enum AmevaFuseKind {
+    AMEVA_FUSE_NONE = 0,
+    AMEVA_FUSE_RMS_MUL,
+    AMEVA_FUSE_MM_EPILOGUE,
+    AMEVA_FUSE_CONV_BIAS,
+    AMEVA_FUSE_NORM_CHAIN
+};
+
+// The nodes after a GROUP_NORM that shaders/ameva_cnorm.comp computes with it. flags: 1 MUL by the per-channel
+// weight w, 2 ADD of the per-channel bias b, 4 SILU, applied in that order.
+struct AmevaNormChain {
+    uint32_t flags;
+    const struct ggml_tensor *w, *b;
+};
 
 struct AmevaFusion {
-    AmevaFuseKind kind;
-    const struct ggml_tensor* w;  // RMS_MUL: norm weight
-    AmevaEpilogue ep;             // MM_EPILOGUE
+    AmevaFuseKind kind = AMEVA_FUSE_NONE;
+    const struct ggml_tensor* w = nullptr;          // RMS_MUL: norm weight; CONV_BIAS: the bias
+    AmevaEpilogue ep = { 0, nullptr, nullptr };     // MM_EPILOGUE
+    AmevaNormChain chain = { 0, nullptr, nullptr }; // NORM_CHAIN
+    int last = -1;    // index of the last node the dispatches of the first one compute
+    int absorbed = 0; // nodes with work among them, the first one not counted
 };
 
 // f32 vector of exactly n elements in one contiguous row
@@ -3308,7 +3364,7 @@ static bool fused_output_safe(const struct ggml_tensor* out, const struct ggml_t
 }
 
 static AmevaFusion ameva_find_fusion(const struct ggml_tensor* n0, const struct ggml_tensor* n1) {
-    AmevaFusion f = { AMEVA_FUSE_NONE, nullptr, { 0, nullptr, nullptr } };
+    AmevaFusion f;
     if (!n1 || ggml_is_empty(n1)) return f;
     if (n0->op == GGML_OP_RMS_NORM && n1->op == GGML_OP_MUL && n1->src[0] == n0 && n1->src[1] != n0) {
         const struct ggml_tensor* w = n1->src[1];
@@ -3339,6 +3395,80 @@ static AmevaFusion ameva_find_fusion(const struct ggml_tensor* n0, const struct 
     return f;
 }
 
+// f32, one value per channel along dimension 2, consecutive in memory ([1, 1, C, 1]: the form in which sd.cpp adds a
+// bias or multiplies by a norm weight)
+static bool is_f32_channel_vector(const struct ggml_tensor* t, int64_t C) {
+    return is_f32(t) && t->ne[0] == 1 && t->ne[1] == 1 && t->ne[2] == C && t->ne[3] == 1 && t->nb[2] == sizeof(float);
+}
+
+// Index of the first node after i that computes something, or -1. Metadata-only nodes are passed over: sd.cpp
+// reshapes a bias or a norm weight to [1, 1, C, 1] right before the node that uses it, and in graph order that
+// reshape sits between the two nodes of a chain.
+static int ameva_next_work_node(struct ggml_cgraph* cgraph, int i, int n_nodes) {
+    for (int j = i + 1; j < n_nodes; ++j) {
+        const struct ggml_tensor* t = ggml_graph_node(cgraph, j);
+        if (t && !ameva_op_is_empty(t->op)) return j;
+    }
+    return -1;
+}
+
+// n continues a chain that starts at n0 and whose value so far is cur: cur is its first operand and its result is
+// stored in place of n0's
+static bool chain_link(const struct ggml_tensor* n0, const struct ggml_tensor* cur, const struct ggml_tensor* n) {
+    return n && n->src[0] == cur && is_f32(n) && !ggml_is_empty(n) && tensors_alias(n, n0);
+}
+
+// Fusions that start at a CONV_2D (the bias ADD) or at a GROUP_NORM (MUL by the weight, ADD of the bias, SILU). The
+// fused nodes store their result in place of the first node's (ggml_add_inplace and the like in sd.cpp, or an
+// allocator that reused the memory) and follow it with nothing but metadata-only nodes in between. So no node can
+// read a value the fused dispatch leaves out: what the separate nodes would leave in that memory is the last result,
+// and that is what the fused dispatch writes. A per-channel operand that overlaps the result is not fused.
+static AmevaFusion ameva_find_chain(struct ggml_cgraph* cgraph, int i, int n_nodes) {
+    AmevaFusion f;
+    const struct ggml_tensor* n0 = ggml_graph_node(cgraph, i);
+    const int64_t C = n0->ne[2];
+    if (n0->op == GGML_OP_CONV_2D) {
+        const int j = ameva_next_work_node(cgraph, i, n_nodes);
+        const struct ggml_tensor* n = j < 0 ? nullptr : ggml_graph_node(cgraph, j);
+        if (n && n->op == GGML_OP_ADD && chain_link(n0, n0, n) && is_f32_channel_vector(n->src[1], C) &&
+            !tensors_overlap(n0, n->src[1])) {
+            f.kind = AMEVA_FUSE_CONV_BIAS;
+            f.w = n->src[1];
+            f.last = j;
+            f.absorbed = 1;
+        }
+        return f;
+    }
+    if (n0->op != GGML_OP_GROUP_NORM) return f;
+    const struct ggml_tensor* cur = n0;
+    int at = i;
+    while (!(f.chain.flags & 4u)) {
+        const int j = ameva_next_work_node(cgraph, at, n_nodes);
+        const struct ggml_tensor* n = j < 0 ? nullptr : ggml_graph_node(cgraph, j);
+        if (!n || !chain_link(n0, cur, n)) break;
+        const bool vec = is_f32_channel_vector(n->src[1], C) && !tensors_overlap(n0, n->src[1]);
+        if (n->op == GGML_OP_MUL && f.chain.flags == 0 && vec) {
+            f.chain.flags |= 1u;
+            f.chain.w = n->src[1];
+        } else if (n->op == GGML_OP_ADD && !(f.chain.flags & 2u) && vec) {
+            f.chain.flags |= 2u;
+            f.chain.b = n->src[1];
+        } else if (n->op == GGML_OP_UNARY && unary_code(n) == 2) { // SILU
+            f.chain.flags |= 4u;
+        } else {
+            break;
+        }
+        cur = n;
+        at = j;
+        f.absorbed++;
+    }
+    if (f.absorbed) {
+        f.kind = AMEVA_FUSE_NORM_CHAIN;
+        f.last = at;
+    }
+    return f;
+}
+
 // =============================================================================
 // CONV_2D (shaders/ameva_conv.comp, shaders/ameva_conv_w.comp)
 // =============================================================================
@@ -3351,9 +3481,13 @@ static AmevaFusion ameva_find_fusion(const struct ggml_tensor* n0, const struct 
 // aborts.
 static std::atomic<int> s_conv_f16_decoder{-1}; // -1 not determined, 0 exact decoder, 1 built-in conversion
 static std::atomic<int64_t> s_conv_count{0};    // CONV_2D nodes completed on the GPU
+static std::atomic<int64_t> s_conv_bias_count{0};  // of those, with the bias ADD computed by the kernel
+static std::atomic<int64_t> s_group_norm_count{0}; // GROUP_NORM nodes completed on the GPU
 
 int ggml_backend_ameva_get_conv_f16_decoder(void) { return s_conv_f16_decoder.load(); }
 int64_t ggml_backend_ameva_get_conv_count(void) { return s_conv_count.load(); }
+int64_t ggml_backend_ameva_get_conv_bias_count(void) { return s_conv_bias_count.load(); }
+int64_t ggml_backend_ameva_get_group_norm_count(void) { return s_group_norm_count.load(); }
 
 // One 1x1 convolution of 32 channels to 64, 32 positions, source = the identity (position w has 1 in channel w and 0
 // elsewhere), so output (n, w) is weight (n, w) alone: every other term is a weight times zero. Two rounds of 2048
@@ -3477,8 +3611,11 @@ static bool ameva_conv_prefers_vec4(void) {
 
 // CONV_2D. The weights go into the scratch buffer in the K order of the kernel (one dispatch of ameva_conv_w, bit
 // patterns unchanged), then each batch element is convolved in slices of weight rows and output rows that keep a
-// dispatch under kDispatchMac. The bias binding is the zero vector: sd.cpp adds the bias as a node of its own.
-static const char* enc_conv_2d(AmevaRecorder& rec, const struct ggml_tensor* node) {
+// dispatch under kDispatchMac. sd.cpp adds the bias as a node of its own: with bias (that ADD's per-channel operand,
+// fused by ameva_find_chain, the ADD stored in place of this node) the kernel adds it after its sum, the one rounded
+// addition of the separate ADD; otherwise the bias binding is the zero vector.
+static const char* enc_conv_2d(AmevaRecorder& rec, const struct ggml_tensor* node,
+                               const struct ggml_tensor* bias = nullptr) {
     AmevaConv2d g;
     if (const char* why = ameva_conv2d_geometry(node, &g)) return why;
     const struct ggml_tensor *a = node->src[0], *b = node->src[1];
@@ -3491,10 +3628,11 @@ static const char* enc_conv_2d(AmevaRecorder& rec, const struct ggml_tensor* nod
     AcBuffer* zero = ameva_conv_zero_buffer();
     if (!units || !zero) return "convolution constants could not be allocated";
 
-    AmevaBind bw, bsrc, bdst, bq = {};
+    AmevaBind bw, bsrc, bdst, bq = {}, bb = {};
     const char* e = ameva_bind(a, esize, &bw);
     if (!e) e = ameva_bind(b, 4, &bsrc);
     if (!e) e = ameva_bind(node, 4, &bdst);
+    if (!e && bias) e = ameva_bind(bias, 4, &bb);
     if (e) return e;
     bq.b.buffer = s_scratch;
     bq.b.offset = 0;
@@ -3534,6 +3672,8 @@ static const char* enc_conv_2d(AmevaRecorder& rec, const struct ggml_tensor* nod
     const uint32_t rows_per_slice = (uint32_t)std::min<uint64_t>(g.OC, std::max<uint64_t>(64, mac_rows & ~63ull));
     const uint32_t stride = g.s0 | g.s1 << 8 | 1u << 16, pad = g.p0 | g.p1 << 8;
     const AcBufferBinding bzero = { zero, 0, AMEVA_CONV_ZERO_BYTES }, bunits = { units, 0, units_bytes };
+    const AcBufferBinding bbias = bias ? bb.b : bzero;
+    const uint32_t b_base = bias ? bb.elem : 0u; // float of weight row 0 inside the bias binding
     for (uint32_t bi = 0; bi < g.B; ++bi) {
         const uint32_t a_off = bsrc.elem + bi * g.W * g.H * g.IC;
         for (uint32_t n0 = 0; n0 < g.OC; n0 += rows_per_slice) {
@@ -3547,17 +3687,82 @@ static const char* enc_conv_2d(AmevaRecorder& rec, const struct ggml_tensor* nod
             for (uint32_t r0 = 0; r0 < g.OH; r0 += rows_max) {
                 const uint32_t rc = std::min(rows_max, g.OH - r0);
                 const uint32_t pc[19] = { nc, g.K, n0 * g.U * qper, 0u, 0u, a_off,
-                                          (uint32_t)(bdst.elem + ((uint64_t)bi * g.OC + n0) * P), n0,
+                                          (uint32_t)(bdst.elem + ((uint64_t)bi * g.OC + n0) * P), b_base + n0,
                                           g.W, g.H, 1u, g.IC, g.OW, g.OH, (uint32_t)P, r0, stride, pad, 0u };
-                const AcBufferBinding bind[7] = { bq.b, bq.b, bq.b, bsrc.b, bdst.b, bzero, bunits };
-                const AmevaBind reads[2] = { bq, bsrc };
-                e = ameva_record(rec, kernel, reads, 2, &bd, 1, bind, 7, pc, sizeof(pc),
+                const AcBufferBinding bind[7] = { bq.b, bq.b, bq.b, bsrc.b, bdst.b, bbias, bunits };
+                const AmevaBind reads[3] = { bq, bsrc, bb };
+                e = ameva_record(rec, kernel, reads, bias ? 3 : 2, &bd, 1, bind, 7, pc, sizeof(pc),
                                  { (nc + 63) / 64, tiles_w * rc, 1 }, (double)rc * g.OW * nc * g.K);
                 if (e) return e;
             }
         }
     }
     rec.conv_nodes++;
+    if (bias) rec.conv_bias_nodes++;
+    return nullptr;
+}
+
+// GROUP_NORM. The statistics of every group go into the scratch buffer (one dispatch of ameva_cnorm_stat), then
+// ameva_cnorm normalises one batch element per dispatch and, with a chain (ameva_find_chain), computes the nodes
+// fused into this one: their results are stored in place of this node's, so the last of them is all that is written.
+static const char* enc_group_norm(AmevaRecorder& rec, const struct ggml_tensor* node,
+                                  const AmevaNormChain* chain = nullptr) {
+    AmevaGroupNorm g;
+    if (const char* why = ameva_group_norm_geometry(node, &g)) return why;
+    const struct ggml_tensor* a = node->src[0];
+    // in place (element i is read and written by one invocation) or apart
+    if (tensors_overlap(node, a) && !tensors_alias(node, a)) return "group norm result overlaps its source";
+    AcKernel* stat = ameva_vk_kernel(AMEVA_VK_CNORM_STAT);
+    AcKernel* kernel = ameva_vk_kernel(AMEVA_VK_CNORM);
+    if (!stat || !kernel) return "no ameva_cnorm kernel";
+    if (!s_scratch || g.stat_bytes > s_scratch_bytes) return "group norm scratch not reserved";
+    const uint32_t flags = chain ? chain->flags : 0u;
+
+    AmevaBind ba, bd, bs = {}, bw = {}, bb = {};
+    const char* e = ameva_bind(a, 4, &ba);
+    if (!e) e = ameva_bind(node, 4, &bd);
+    if (!e && (flags & 1u)) e = ameva_bind(chain->w, 4, &bw);
+    if (!e && (flags & 2u)) e = ameva_bind(chain->b, 4, &bb);
+    if (e) return e;
+    bs.b.buffer = s_scratch;
+    bs.b.offset = 0;
+    bs.b.range = std::min<uint64_t>(s_scratch_bytes, s_limits.max_storage_buffer_range) & ~15ull;
+    bs.key = s_scratch;
+    bs.lo = 0;
+    bs.hi = g.stat_bytes;
+    if (bs.hi > bs.b.range) return "group norm statistics larger than one binding";
+
+    // 1. mean and scale of every group
+    const uint64_t n = (uint64_t)g.plane * g.C; // floats of one batch element
+    {
+        const uint32_t pc[8] = { ba.elem, g.plane, g.C, g.cpg, g.G, g.B, fbits(op_param_f32(node, 1)), 0u };
+        const AcBufferBinding bind[2] = { ba.b, bs.b };
+        e = ameva_record(rec, stat, &ba, 1, &bs, 1, bind, 2, pc, sizeof(pc), ameva_grid_groups((uint64_t)g.G * g.B),
+                         2.0 * (double)n * g.B);
+        if (e) return e;
+    }
+
+    // 2. the normalisation and the chain. An unused weight or bias binding gets the statistics (never read).
+    for (uint32_t bi = 0; bi < g.B; ++bi) {
+        // the planes of this batch element (hazard tracking: the dispatches of one node do not wait for each other)
+        AmevaBind ra = ba, wd = bd;
+        ra.lo = ba.lo + bi * n * 4;
+        ra.hi = ra.lo + n * 4;
+        wd.lo = bd.lo + bi * n * 4;
+        wd.hi = wd.lo + n * 4;
+        const uint32_t pc[8] = { g.plane, g.cpg, (uint32_t)(ba.elem + bi * n), 2u * g.G * bi,
+                                 (flags & 1u) ? bw.elem : 0u, (flags & 2u) ? bb.elem : 0u,
+                                 (uint32_t)(bd.elem + bi * n), flags };
+        const AcBufferBinding bind[5] = { ba.b, bs.b, (flags & 1u) ? bw.b : bs.b, (flags & 2u) ? bb.b : bs.b, bd.b };
+        AmevaBind reads[4] = { ra, bs, bs, bs };
+        int nreads = 2;
+        if (flags & 1u) reads[nreads++] = bw;
+        if (flags & 2u) reads[nreads++] = bb;
+        e = ameva_record(rec, kernel, reads, nreads, &wd, 1, bind, 5, pc, sizeof(pc),
+                         { (g.plane + 255) / 256, g.C, 1 }, (double)n);
+        if (e) return e;
+    }
+    rec.cnorm_nodes++;
     return nullptr;
 }
 
@@ -3580,6 +3785,7 @@ static const char* ameva_encode(AmevaRecorder& rec, const struct ggml_tensor* no
         case GGML_OP_DUP: return enc_cpy(rec, node);
         case GGML_OP_FLASH_ATTN_EXT: return enc_flash_attn(rec, node);
         case GGML_OP_CONV_2D: return enc_conv_2d(rec, node);
+        case GGML_OP_GROUP_NORM: return enc_group_norm(rec, node);
         default: return "op has no ameva encoder";
     }
 }
@@ -3679,6 +3885,9 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
                     }
                 }
             }
+        } else if (node->op == GGML_OP_GROUP_NORM) {
+            AmevaGroupNorm g; // mean and scale of every group
+            if (!ameva_group_norm_geometry(node, &g)) scratch_need = std::max<uint64_t>(scratch_need, g.stat_bytes);
         }
     }
     if (scratch_need && !ameva_scratch_reserve(scratch_need)) {
@@ -3747,13 +3956,21 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
             rec.kind = ameva_kind_id(kind);
         }
         const uint64_t te = ameva_now_ns(), kc0 = g_prof_kcreate_ns.load(std::memory_order_relaxed);
-        const AmevaFusion fz = ameva_fuse_enabled() && i + 1 < n_nodes
-                                   ? ameva_find_fusion(node, ggml_graph_node(cgraph, i + 1))
-                                   : AmevaFusion{ AMEVA_FUSE_NONE, nullptr, { 0, nullptr, nullptr } };
+        AmevaFusion fz;
+        if (ameva_fuse_enabled() && i + 1 < n_nodes) {
+            if (node->op == GGML_OP_CONV_2D || node->op == GGML_OP_GROUP_NORM) {
+                fz = ameva_find_chain(cgraph, i, n_nodes);
+            } else {
+                fz = ameva_find_fusion(node, ggml_graph_node(cgraph, i + 1));
+                if (fz.kind != AMEVA_FUSE_NONE) fz.last = i + 1, fz.absorbed = 1;
+            }
+        }
         const char* enc_err = fz.kind == AMEVA_FUSE_RMS_MUL
                                   ? enc_rms_norm(rec, node, ggml_graph_node(cgraph, i + 1), fz.w)
                                   : fz.kind == AMEVA_FUSE_MM_EPILOGUE ? enc_mul_mat(rec, node, &fz.ep)
-                                                                      : ameva_encode(rec, node);
+                                  : fz.kind == AMEVA_FUSE_CONV_BIAS ? enc_conv_2d(rec, node, fz.w)
+                                  : fz.kind == AMEVA_FUSE_NORM_CHAIN ? enc_group_norm(rec, node, &fz.chain)
+                                                                     : ameva_encode(rec, node);
         if (node->op >= 0 && node->op < GGML_OP_COUNT) {
             const uint64_t kc = g_prof_kcreate_ns.load(std::memory_order_relaxed) - kc0;
             g_prof_enc_ns[node->op].fetch_add(ameva_now_ns() - te - kc, std::memory_order_relaxed);
@@ -3765,8 +3982,8 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
             return GGML_STATUS_FAILED;
         }
         if (fz.kind != AMEVA_FUSE_NONE) {
-            ++i; // node i + 1 was computed by the dispatches of node i
-            rec.fused_pairs++;
+            i = fz.last; // the nodes up to there were computed by the dispatches of node i
+            rec.fused_pairs += fz.absorbed;
         }
     }
     AcBatchStats stats = {};
@@ -3874,6 +4091,8 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
     ameva_count_mul_mat(rec.mul_mat_nodes);
     ameva_count_qmv_mul_mat(rec.qmv_nodes);
     s_conv_count.fetch_add(rec.conv_nodes);
+    s_conv_bias_count.fetch_add(rec.conv_bias_nodes);
+    s_group_norm_count.fetch_add(rec.cnorm_nodes);
     ameva_count_mmq_mul_mat(rec.mmq_nodes);
     ameva_count_mmqb_mul_mat(rec.mmqb_nodes);
     g_prof_fused.fetch_add((uint64_t)rec.fused_pairs);

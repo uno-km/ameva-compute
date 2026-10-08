@@ -221,7 +221,7 @@ layout kept.
   the scratch buffer in the K order of `ameva_conv` (channel groups of 32, all taps of a group, channels). No side
   buffer is kept, so no weight memory is added; the copy runs again at every `graph_compute`. The unit tables (per
   kernel size, dilation and group count) and one zero vector for the bias binding are created once. The bias is
-  still a node of its own in the graph (not fused).
+  still a node of its own in the graph (not fused; the kernel adds it since section 9).
 - **Kernels.** A SPIR-V-only family of `scripts/build_ameva_kernels.py` (`VK_ONLY`: `conv_{f16,f16u,f32}_{s,v}`,
   `conv_w_{f16,f32}`, table `kAmevaVkKernels`). `ggml_ameva_kernels_spv.h` was regenerated on the S25 (glslang
   16.3.0, spirv-val): 4030 added lines, no existing module changed, and the OpenCL header is identical. On the
@@ -256,3 +256,74 @@ Verification, plugin built against ggml b8471 and run with the ggml libraries of
   test failed at load ("cannot locate symbol"); `conv_check.sh` now puts its own output directory first.
 - Not done: bias fusion, CONV_3D, tensors above one binding (declined), an OpenCL translation, group norm and the
   other decoder ops (K2, K3), and sd.cpp built against ggml-ameva (step 3). No decoded image exists yet.
+  (Bias fusion and group norm: section 9.)
+
+## 9. K2 group norm and the convolution bias in ggml-ameva (step 2 of section 6, 2026-10-08)
+
+- **Op.** `GGML_OP_GROUP_NORM` is computed by the graph engine (`enc_group_norm`, contract in
+  `ameva_group_norm_geometry`): f32 `[W, H, C, B]`, contiguous, inside one binding, up to 65535 channels, result in
+  place of the source or apart from it. Groups follow ggml (`ceil(C / groups)` channels each, a short last group,
+  groups without channels skipped). Declined with a reason on the OpenCL backend, as the convolution is.
+- **Kernels.** Two more SPIR-V-only modules. `ameva_cnorm_stat`: one workgroup per group and batch element; the
+  mean, then the squared differences from it (ggml's two passes), each in 512 f32 partial sums reduced in shared
+  memory; it writes the mean and `1 / sqrt(var + eps)` into the scratch buffer. `ameva_cnorm`: one dispatch per
+  batch element, grid `(ceil(W*H / 256), C)`, `y = (x - mean) * scale`. This is not the sketch of K2 in section 4:
+  both statistics passes are one dispatch, there is no `ss[p]` plane, and the RMS form of the Wan VAE is not built.
+- **Fused chain.** sd.cpp's GroupNorm32 + SiLU is GROUP_NORM, MUL by a `[1, 1, C, 1]` weight, ADD of a `[1, 1, C, 1]`
+  bias, SILU, each stored in place of the result before; in graph order the RESHAPE of the weight and of the bias
+  sit between them. `ameva_find_chain` passes over metadata-only nodes and gives the nodes that follow in that
+  order to the norm's second dispatch (`flags` of `ameva_cnorm`), provided each is stored in place of the norm's
+  result: then no node can read a value the fused dispatch leaves out. Four nodes take 2 dispatches instead of 5.
+  Every step is rounded on its own (`precise`), as the separate kernels round.
+- **Convolution bias.** A CONV_2D followed by the in-place ADD of a `[1, 1, OC, 1]` f32 bias (sd.cpp's
+  `ggml_ext_conv_2d`) binds that bias where the zero vector was; the kernel adds it after its sum, the one rounded
+  addition of the separate ADD. `AMEVA_FUSE=0` runs every node on its own.
+- **Numerics.** The norm is not bit-equal to ggml's CPU code, which accumulates the statistics in double.
+  `tests/ameva_cnorm_check` bounds the difference by the worst case of the f32 partial sums,
+  `(n / 512 + 32) * eps * (1 + |mean| * scale) * (1 + |y|)` for a group of `n` elements, widened for MUL, ADD and
+  SILU (`tolerance()` in the test). Measured: the plain norm at most 0.031 of that bound on each of the three
+  devices below; its largest absolute error on the S21 and the S20 1.2e-7 to 4.8e-7 for inputs of order 1 and
+  6.8e-6 to 6.9e-6 with a mean 30 times the spread.
+
+Verification with the kernel header regenerated on the S21 (glslang 16.3.0, spirv-val: 420 added lines, no existing
+line changed, OpenCL header identical), plugin built against ggml b8471, ggml libraries of the 2.8.1 bundle
+(`scripts/termux/lab/conv_check.sh`, logs `~/abi-lab/out-cnorm/` on each device):
+
+| | S21, Mali-G78 | S20, Turnip Adreno 650 | A53, Mali-G68 |
+|---|---|---|---|
+| `tests/ameva_conv_check`: 11 convolutions without and with the bias, one declined source; 6 runs (5 kernel selections, `AMEVA_FUSE=0`) | 23/23 x 6, bit-equal to the fused reference, 11 biases fused (0 with `AMEVA_FUSE=0`) | 23/23 x 6, bit-equal to the multiply-then-add reference, same counters | 23/23 x 6, bit-equal to the fused reference, same counters |
+| `tests/ameva_cnorm_check`: 12 shapes x 4 graphs, one declined source, one decoder block; fused and `AMEVA_FUSE=0` | 14/14 and 14/14; largest error 0.287 of the bound | 14/14 and 14/14; 0.223 of the bound | 14/14 and 14/14; 0.287 of the bound |
+| fused MUL + ADD against the separate nodes, fused SILU against the separate node (elements that differ in bits) | 0, 0 in all 12 shapes | 0, 0 in all 12 shapes | 0, 0 in all 12 shapes |
+| decoder block (norm, weight, bias, SILU, 3x3 convolution, bias: 5 fused nodes), max error / rms | 3.88e-06 | 4.12e-06 | 3.88e-06 |
+| `test-backend-ops -b AMEVA0 -o GROUP_NORM`, `-o GROUP_NORM_MUL_ADD`, `-o CONV_2D` | 2/2, 2/2, 1568/1568 | 2/2, 2/2, 1568/1568 | 2/2, 2/2, 1568/1568 |
+| `test-backend-ops -b AMEVA0`, every op | 3596/3596 | not run | not run |
+| `ameva_qmm_check`, `ameva_fuse_check` (same hash with fusion on and off, 5 and 0 pairs), `ameva_kvq_check`, `ameva_chunk_check` | 516/516, pass, pass, pass | 516/516, pass, pass, pass | 516/516; the other three not run |
+
+`test-backend-ops` computes one node per graph, so it checks the unfused kernels; the fused chains are checked by
+the two tests above, with the counters of fused nodes required to move.
+
+On the OpenCL backend (A53, `AMEVA_BACKEND=opencl`, same plugin) `supports_op` declines GROUP_NORM in all 13 cases
+of `ameva_cnorm_check` (group norm counter 0) and CONV_2D in all 11 of `ameva_conv_check`; nothing is computed
+another way. `ameva_qmm_check` there: 516/516.
+
+Timing, ms per `graph_compute`, two passes per device, graphs timed in the order norm alone, four nodes, fused (not
+alternated). The four-node form has a result tensor per node, the fused form works in place of its input, so this
+shows the size of the op, not a controlled comparison of the two forms:
+
+| 32 groups | S20 (cores 0-7, `max_gpuclk` 587 MHz) | S21 (cores 0-2,4-7, GPU clock sampled between 130 and 858 MHz) |
+|---|---|---|
+| 32x32x512: norm alone / four nodes / fused | 1.5-1.7 / 3.6-4.0 / 2.5-2.7 | 2.2-2.4 / 7.9-9.6 / 2.3-2.4 |
+| 64x64x512 | 4.9-5.0 / 11.9-12.1 / 5.1 | 6.6-89.1 / 14.3-19.6 / 3.2-7.4 |
+| 128x128x256 | 8.0-9.1 / 18.8-21.7 / 6.7 | 11.3-12.2 / 21.3-31.0 / 4.8-8.0 |
+| 256x256x128 | 12.1-15.3 / 29.2-31.7 / 10.6-11.2 | 18.0-21.0 / 31.4-38.6 / 6.7-7.6 |
+| 19.33 GFLOP convolution, f16 kernel (128x128x256, 64x64x512, 256x256x128) | 158.3-170.7 / 163.8-164.1 / 182.4-182.9 | 168.9-175.0 / 183.0-185.1 / 110.3-110.5 |
+
+- On the S21 the GPU clock was still rising inside these graphs of a few ms (the 89.1 ms is one pass of one shape;
+  the other pass gave 6.6), so its norm figures are a range, not a measurement of the kernel. Its convolution
+  figures are the first on that device and repeat within 4 %.
+- A fused norm chain is 3-6 % of the 19.33 GFLOP convolution of the same size (S20: 5.1 of 164, 6.7 of 158-171,
+  10.6-11.2 of 182-183 ms), so the convolution still decides the decode time.
+- Not done: UPSCALE, PAD, CONCAT, SOFT_MAX and the f32 MUL_MAT of the middle attention (K3), CONV_3D and the RMS
+  form of the Wan VAE, tensors above one binding (declined), an OpenCL translation of these kernels, and sd.cpp
+  built against ggml-ameva (step 3). No decoded image exists yet. S25 and A35 did not answer on 2026-10-08
+  (connection timed out), so nothing of this section ran on them.

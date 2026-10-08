@@ -61,13 +61,18 @@ GGML_API int64_t ggml_backend_ameva_get_repacked_bytes(void);
 GGML_API int64_t ggml_backend_ameva_get_qmv_mul_mat_count(void);
 GGML_API int64_t ggml_backend_ameva_get_mmq_mul_mat_count(void);
 GGML_API int64_t ggml_backend_ameva_get_mmqb_mul_mat_count(void);
-// node pairs computed by one fused dispatch sequence (graph-engine fusion, AMEVA_FUSE); counted when recorded
+// nodes computed by the dispatches of an earlier node (graph-engine fusion, AMEVA_FUSE): 1 per fused pair, and 1 per
+// node of a chain after its first (CONV_2D with its bias ADD: 1; GROUP_NORM with MUL, ADD and SILU: 3)
 GGML_API int64_t ggml_backend_ameva_get_fused_pair_count(void);
 // CONV_2D nodes completed on the GPU by ameva_conv (not cleared by reset_counters), and how that kernel converts f16
 // weights: -1 not determined yet (no f16 convolution was computed), 0 the exact decoder, 1 the built-in conversion,
 // taken after a check of the device's conversion (AMEVA_CONV_F16)
 GGML_API int64_t ggml_backend_ameva_get_conv_count(void);
 GGML_API int ggml_backend_ameva_get_conv_f16_decoder(void);
+// of the CONV_2D nodes, the ones whose bias (the ADD that follows, stored in place) the kernel added itself; and the
+// GROUP_NORM nodes completed on the GPU by ameva_cnorm (neither is cleared by reset_counters)
+GGML_API int64_t ggml_backend_ameva_get_conv_bias_count(void);
+GGML_API int64_t ggml_backend_ameva_get_group_norm_count(void);
 GGML_API const char* ggml_backend_ameva_get_build_commit(void);
 GGML_API void ggml_backend_ameva_reset_counters(void);
 

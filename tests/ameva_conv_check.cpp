@@ -11,8 +11,14 @@
 // backend's convolution counter advances by one per computed graph, so that a result cannot come from anywhere but
 // ameva_conv. Exit status 0 only when every case passes.
 //
-// The run is repeated by scripts/termux/lab/conv_check.sh with AMEVA_CONV_STAGE=scalar|vec4 and AMEVA_CONV_F16=exact
-// so that every kernel of the family is exercised.
+// Every case runs a second time with a bias in the form sd.cpp builds (ggml_ext_conv_2d): the bias reshaped to
+// [1, 1, OC, 1] and added in place of the convolution's result. The graph engine gives that ADD to the kernel
+// (ameva_find_chain); expected is the same reference plus the bias, one rounded addition, in every element. Required
+// as well: the counter of convolutions with a fused bias and the counter of fused nodes advance by one each, or by
+// zero when AMEVA_FUSE=0 runs the ADD as a node of its own (same expected result).
+//
+// The run is repeated by scripts/termux/lab/conv_check.sh with AMEVA_CONV_STAGE=scalar|vec4, AMEVA_CONV_F16=exact
+// and AMEVA_FUSE=0 so that every kernel of the family and both forms of the bias are exercised.
 #include "ggml.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
@@ -91,24 +97,32 @@ int main() {
         { "1x3 dilation 4 on height 1 (kernel larger than the padded source)", GGML_TYPE_F16, 9, 1, 8, 4, 1, 1, 3, 1, 5, 0, 2, 1, 4, 1.0f },
     };
     int passed = 0, total = 0;
+    const char* fuse_env = getenv("AMEVA_FUSE");
+    const int fuse_on = fuse_env && !strcmp(fuse_env, "0") ? 0 : 1; // the engine's default is on
     for (const Case& c : cases) {
-        ++total;
-        struct ggml_init_params ip = { 8 * ggml_tensor_overhead() + ggml_graph_overhead(), nullptr, true };
+        total += 2; // without and with a bias
+        struct ggml_init_params ip = { 16 * ggml_tensor_overhead() + 2 * ggml_graph_overhead(), nullptr, true };
         struct ggml_context* ctx = ggml_init(ip);
         struct ggml_tensor* a = ggml_new_tensor_4d(ctx, c.wtype, c.KW, c.KH, c.IC, c.OC);
         struct ggml_tensor* b = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, c.W, c.H, c.IC, c.B);
         struct ggml_tensor* d = ggml_conv_2d_direct(ctx, a, b, c.s0, c.s1, c.p0, c.p1, c.d0, c.d1);
+        // the same convolution with a bias, as sd.cpp builds it
+        struct ggml_tensor* bias = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, c.OC);
+        struct ggml_tensor* dc = ggml_conv_2d_direct(ctx, a, b, c.s0, c.s1, c.p0, c.p1, c.d0, c.d1);
+        struct ggml_tensor* db = ggml_add_inplace(ctx, dc, ggml_reshape_4d(ctx, bias, 1, 1, c.OC, 1));
         ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx, ggml_backend_get_default_buffer_type(be));
         if (!buf) {
-            printf("CONV_CHECK case=\"%s\" FAIL: allocation\n", c.name);
+            printf("CONV_CHECK case=\"%s\" FAIL: allocation (both forms)\n", c.name);
             ggml_free(ctx);
             continue;
         }
         const int OW = (int)d->ne[0], OH = (int)d->ne[1];
         const size_t nw = (size_t)ggml_nelements(a), nx = (size_t)ggml_nelements(b), nd = (size_t)ggml_nelements(d);
-        std::vector<float> w(nw), x(nx), got(nd), ref_fma(nd), ref_ma(nd);
+        std::vector<float> w(nw), x(nx), got(nd), ref_fma(nd), ref_ma(nd), bv((size_t)c.OC);
         for (float& v : w) v = rnd() * c.wscale;
         for (float& v : x) v = rnd();
+        for (float& v : bv) v = rnd();
+        ggml_backend_tensor_set(bias, bv.data(), 0, bv.size() * sizeof(float));
         size_t subnormal = 0;
         if (c.wtype == GGML_TYPE_F16) {
             std::vector<ggml_fp16_t> h(nw);
@@ -150,6 +164,37 @@ int main() {
                fail && strcmp(fail, "differs from both references") != 0 ? "-" : !bad_fma ? "fma" : !bad_ma ? "muladd" : "neither",
                rms > 0 ? maxd / rms : maxd, fail ? "FAIL: " : "PASS", fail ? fail : "");
         if (!fail) ++passed;
+
+        // with the bias: every element is the reference plus the bias of its output channel
+        const char* failb = fail ? "the case without a bias failed" : nullptr;
+        if (!failb && (!ggml_backend_supports_op(be, dc) || !ggml_backend_supports_op(be, db))) failb = "supports_op says no";
+        struct ggml_cgraph* gb = ggml_new_graph(ctx);
+        ggml_build_forward_expand(gb, db);
+        const int64_t c0 = ggml_backend_ameva_get_conv_count(), cb0 = ggml_backend_ameva_get_conv_bias_count();
+        const int64_t f0 = ggml_backend_ameva_get_fused_pair_count();
+        if (!failb && ggml_backend_graph_compute(be, gb) != GGML_STATUS_SUCCESS) failb = "graph_compute failed";
+        const int64_t dconv = ggml_backend_ameva_get_conv_count() - c0;
+        const int64_t dbias = ggml_backend_ameva_get_conv_bias_count() - cb0;
+        const int64_t dfused = ggml_backend_ameva_get_fused_pair_count() - f0;
+        if (!failb && dconv != 1) failb = "the convolution counter did not advance by one";
+        if (!failb && (dbias != fuse_on || dfused != fuse_on)) failb = "the bias was not computed the expected way (counters)";
+        size_t badb_fma = 0, badb_ma = 0, nanb = 0;
+        if (!failb) {
+            ggml_backend_tensor_get(db, got.data(), 0, nd * sizeof(float));
+            const size_t plane = (size_t)OW * OH;
+            for (size_t i = 0; i < nd; ++i) {
+                const float bo = bv[(i / plane) % (size_t)c.OC];
+                nanb += got[i] != got[i];
+                badb_fma += !(got[i] == ref_fma[i] + bo);
+                badb_ma += !(got[i] == ref_ma[i] + bo);
+            }
+            if (nanb) failb = "NaN in the result";
+            else if (badb_fma && badb_ma) failb = "differs from both references plus the bias";
+        }
+        printf("CONV_CHECK case=\"%s + bias\" bias=%s equal_to=%s mismatches_fma=%zu mismatches_muladd=%zu %s%s\n", c.name,
+               dbias == 1 ? "fused" : "separate", failb ? "-" : !badb_fma ? "fma" : "muladd", badb_fma, badb_ma,
+               failb ? "FAIL: " : "PASS", failb ? failb : "");
+        if (!failb) ++passed;
         ggml_backend_buffer_free(buf);
         ggml_free(ctx);
     }
@@ -217,9 +262,9 @@ int main() {
         }
     }
     const int dec = ggml_backend_ameva_get_conv_f16_decoder();
-    printf("CONV_CHECK %d/%d passed, f16 decoder=%s, convolutions on the GPU=%lld\n", passed, total,
+    printf("CONV_CHECK %d/%d passed, f16 decoder=%s, convolutions on the GPU=%lld, with a fused bias=%lld\n", passed, total,
            dec == 1 ? "built-in conversion" : dec == 0 ? "exact" : "not determined",
-           (long long)ggml_backend_ameva_get_conv_count());
+           (long long)ggml_backend_ameva_get_conv_count(), (long long)ggml_backend_ameva_get_conv_bias_count());
     ggml_backend_free(be);
     return passed == total ? 0 : 1;
 }
