@@ -68,21 +68,21 @@ void main() {
     float val;
 
 #if defined(Q4_0)
-    // q4_0 block: [d:f16(2), qs[16]:4-bit-pairs(16)] = 18 bytes/block
-    const uint boff = row_base + block * 18u;
-    const float d   = ameva_h2f(a_read_u16(boff));
-    const uint qs   = a_read_byte(boff + 2u + (e >> 1u));
-    const uint q4   = (e & 1u) == 0u ? (qs & 0xFu) : (qs >> 4u);
-    val = d * (float(q4) - 8.0);
+    // q4_0 block: [delta:f16(2), qs[16]:4-bit-pairs(16)] = 18 bytes/block
+    const uint boff  = row_base + block * 18u;
+    const float delta = ameva_h2f(a_read_u16(boff));
+    const uint qs    = a_read_byte(boff + 2u + (e >> 1u));
+    const uint q4    = (e & 1u) == 0u ? (qs & 0xFu) : (qs >> 4u);
+    val = delta * (float(q4) - 8.0);
 
 #elif defined(Q5_0)
-    // q5_0 block: [d:f16(2), qh[4]:high-bits(4), qs[16]:low-4-bits(16)] = 22 bytes/block
-    const uint boff = row_base + block * 22u;
-    const float d   = ameva_h2f(a_read_u16(boff));
-    const uint qh   = (a_read_byte(boff + 2u + (e >> 3u)) >> (e & 7u)) & 1u;
-    const uint qs   = a_read_byte(boff + 6u + (e >> 1u));
-    const uint ql   = (e & 1u) == 0u ? (qs & 0xFu) : (qs >> 4u);
-    val = d * (float(ql | (qh << 4u)) - 16.0);
+    // q5_0 block: [delta:f16(2), qh[4]:high-bits(4), qs[16]:low-4-bits(16)] = 22 bytes/block
+    const uint boff  = row_base + block * 22u;
+    const float delta = ameva_h2f(a_read_u16(boff));
+    const uint qh    = (a_read_byte(boff + 2u + (e >> 3u)) >> (e & 7u)) & 1u;
+    const uint qs    = a_read_byte(boff + 6u + (e >> 1u));
+    const uint ql    = (e & 1u) == 0u ? (qs & 0xFu) : (qs >> 4u);
+    val = delta * (float(ql | (qh << 4u)) - 16.0);
 
 #else
 #error "define Q4_0 or Q5_0"
