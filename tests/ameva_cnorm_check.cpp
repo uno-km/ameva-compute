@@ -138,6 +138,9 @@ int main() {
         { "8x8x16 16 groups (one channel per group)", 8, 8, 16, 1, 16, 1e-6f, 0.5f, 1.0f },
         { "6x6x3 8 groups (more groups than channels)", 6, 6, 3, 1, 8, 1e-6f, 0.5f, 1.0f },
         { "300x7x33 3 groups (plane wider than one workgroup)", 300, 7, 33, 1, 3, 1e-6f, 0.5f, 1.0f },
+        // with AMEVA_BINDING_LIMIT=1048576 (conv_check.sh): two windows of whole groups per batch element, the last
+        // group short; "128x128x256" and "32x32x512" above take windows under that limit as well
+        { "64x64x100 32 groups batch 2 (4 channels per group, 25 groups)", 64, 64, 100, 2, 32, 1e-6f, 0.4f, 1.0f },
     };
     int passed = 0, total = 0;
     for (const Case& c : cases) {
@@ -430,6 +433,17 @@ int main() {
             ggml_backend_buffer_free(buf);
             ggml_free(ctx);
             if (!ok) return 1;
+        }
+    }
+    // AMEVA_BINDING_LIMIT=<bytes>: tensors above it are computed in windows of whole groups (and, with AMEVA_FUSE=0,
+    // the MUL and ADD in windows of planes, the SILU in row chunks); the expected values and bounds are unchanged.
+    // A limit that windows nothing does not pass.
+    if (const char* lim = getenv("AMEVA_BINDING_LIMIT")) {
+        const long long windowed = (long long)ggml_backend_ameva_get_window_node_count();
+        printf("CNORM_CHECK binding limit=%s nodes in windows=%lld\n", lim, windowed);
+        if (*lim && windowed == 0) {
+            printf("CNORM_CHECK FAIL: AMEVA_BINDING_LIMIT=%s put no node into windows\n", lim);
+            ++total;
         }
     }
     printf("CNORM_CHECK %d/%d passed, group norms on the GPU=%lld, AMEVA_FUSE=%d\n", passed, total,

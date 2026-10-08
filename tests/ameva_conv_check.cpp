@@ -19,6 +19,13 @@
 //
 // The run is repeated by scripts/termux/lab/conv_check.sh with AMEVA_CONV_STAGE=scalar|vec4, AMEVA_CONV_F16=exact
 // and AMEVA_FUSE=0 so that every kernel of the family and both forms of the bias are exercised.
+//
+// With AMEVA_BINDING_LIMIT=<bytes> the engine treats a tensor above that size as above one buffer binding
+// (maxStorageBufferRange) and convolves it in passes over windows of channel groups and in slices of output planes.
+// The passes add the terms of an output in the order of the one-pass kernel, so the expected values are the same,
+// bit for bit. Under a limit a case may be declined (32 source channels, or the kernel tensor, above the limit): it
+// is reported and not counted; the run fails unless the backend's window counter advanced, so a limit that windows
+// nothing cannot pass. conv_check.sh runs two limits.
 #include "ggml.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
@@ -92,11 +99,21 @@ int main() {
         { "1x1 32->64 f16 subnormal weights", GGML_TYPE_F16, 23, 9, 32, 64, 1, 1, 1, 1, 1, 0, 0, 1, 1, 6.0e-5f },
         { "3x3 128->128 64x64", GGML_TYPE_F16, 64, 64, 128, 128, 1, 3, 3, 1, 1, 1, 1, 1, 1, 1.0f },
         { "3x3 96->200 no padding f32", GGML_TYPE_F32, 50, 21, 96, 200, 1, 3, 3, 1, 1, 0, 0, 1, 1, 1.0f },
+        // sized for AMEVA_BINDING_LIMIT=131072: 32 source channels just fit, so every channel group is a pass of its
+        // own (a partial last group, both staging forms, a stride, a batch, the result in slices of its planes), and
+        // K-ordered weights that need two passes although source and kernel tensor fit
+        { "3x3 70->40 batch 2 f32 (three channel groups)", GGML_TYPE_F32, 31, 33, 70, 40, 2, 3, 3, 1, 1, 1, 1, 1, 1, 1.0f },
+        { "3x3 100->70 stride 2 (four channel groups)", GGML_TYPE_F16, 30, 34, 100, 70, 1, 3, 3, 2, 2, 1, 1, 1, 1, 1.0f },
+        { "1x1 96->64 (three channel groups)", GGML_TYPE_F16, 32, 31, 96, 64, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1.0f },
+        { "3x3 33->96 f32 (weights of two channel groups)", GGML_TYPE_F32, 20, 12, 33, 96, 1, 3, 3, 1, 1, 1, 1, 1, 1, 1.0f },
         // ggml gives one output row although the dilated kernel (9 rows) is larger than the padded source (5 rows):
         // every tap is outside, the result is zero
         { "1x3 dilation 4 on height 1 (kernel larger than the padded source)", GGML_TYPE_F16, 9, 1, 8, 4, 1, 1, 3, 1, 5, 0, 2, 1, 4, 1.0f },
     };
-    int passed = 0, total = 0;
+    int passed = 0, total = 0, declined_under_limit = 0;
+    const char* limit_env = getenv("AMEVA_BINDING_LIMIT");
+    const bool limited = limit_env && *limit_env;
+    const int64_t win0 = ggml_backend_ameva_get_window_node_count();
     const char* fuse_env = getenv("AMEVA_FUSE");
     const int fuse_on = fuse_env && !strcmp(fuse_env, "0") ? 0 : 1; // the engine's default is on
     for (const Case& c : cases) {
@@ -113,6 +130,14 @@ int main() {
         ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx, ggml_backend_get_default_buffer_type(be));
         if (!buf) {
             printf("CONV_CHECK case=\"%s\" FAIL: allocation (both forms)\n", c.name);
+            ggml_free(ctx);
+            continue;
+        }
+        if (limited && !ggml_backend_supports_op(be, d)) {
+            printf("CONV_CHECK case=\"%s\" DECLINED under AMEVA_BINDING_LIMIT=%s (both forms, not counted)\n", c.name, limit_env);
+            total -= 2;
+            ++declined_under_limit;
+            ggml_backend_buffer_free(buf);
             ggml_free(ctx);
             continue;
         }
@@ -262,9 +287,17 @@ int main() {
         }
     }
     const int dec = ggml_backend_ameva_get_conv_f16_decoder();
-    printf("CONV_CHECK %d/%d passed, f16 decoder=%s, convolutions on the GPU=%lld, with a fused bias=%lld\n", passed, total,
+    const int64_t windowed = ggml_backend_ameva_get_window_node_count() - win0;
+    printf("CONV_CHECK %d/%d passed, f16 decoder=%s, convolutions on the GPU=%lld, with a fused bias=%lld, "
+           "in windows=%lld, binding limit=%s, declined under it=%d\n", passed, total,
            dec == 1 ? "built-in conversion" : dec == 0 ? "exact" : "not determined",
-           (long long)ggml_backend_ameva_get_conv_count(), (long long)ggml_backend_ameva_get_conv_bias_count());
+           (long long)ggml_backend_ameva_get_conv_count(), (long long)ggml_backend_ameva_get_conv_bias_count(),
+           (long long)windowed, limited ? limit_env : "device", declined_under_limit);
+    if (limited && windowed == 0) {
+        printf("CONV_CHECK FAIL: AMEVA_BINDING_LIMIT=%s put no convolution into windows\n", limit_env);
+        ggml_backend_free(be);
+        return 1;
+    }
     ggml_backend_free(be);
     return passed == total ? 0 : 1;
 }

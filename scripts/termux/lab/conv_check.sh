@@ -8,7 +8,9 @@
 # and vec4 / scalar with the exact decoder, and once with AMEVA_FUSE=0 (the bias of a convolution as a node of its
 # own instead of inside the kernel). Then tests/ameva_cnorm_check (GROUP_NORM alone and with the weight, bias and SILU
 # nodes fused into it, and one decoder block) with and without fusion, and tests/ameva_qmm_check as a regression of
-# the MUL_MAT paths.
+# the MUL_MAT paths. Both checks run again with AMEVA_BINDING_LIMIT, which makes small tensors take the paths of
+# tensors above one buffer binding (windows of channel groups and planes), and tests/ameva_window_check does that for
+# UPSCALE and the binary ops.
 #   kernels   regenerate ggml_ameva_kernels_spv.h / _cl.h first (scripts/build_ameva_kernels.py with spirv-val)
 # TIME_SHAPES adds a timing run (tests/ameva_conv_check.cpp, AMEVA_CONV_CHECK_TIME), CNORM_TIME_SHAPES one of the
 # group norm (tests/ameva_cnorm_check.cpp, AMEVA_CNORM_CHECK_TIME).
@@ -42,7 +44,7 @@ else
     grep -E "\[build_ggml_ameva\]|error|warning" "$OUT/build.log" | grep -v "^WARNING: linker" | head -30
     [ -f "$OUT/libggml-ameva.so" ] || { echo BUILD_FAIL; exit 1; }
 fi
-for t in ameva_conv_check ameva_cnorm_check ameva_qmm_check; do
+for t in ameva_conv_check ameva_cnorm_check ameva_window_check ameva_unet_ops_check ameva_qmm_check; do
     clang++ -O2 -std=c++17 -I "$GH/include" -I "$SRC/adapters/llama/ggml-ameva" \
         "$SRC/tests/$t.cpp" "$OUT/libggml-ameva.so" "$GLIB/libggml-base.so.0" "$GLIB/libggml.so.0" \
         -Wl,-rpath,"$OUT" -o "$OUT/$t" || { echo "TEST_BUILD_FAIL $t"; exit 1; }
@@ -74,6 +76,13 @@ run AMEVA_CONV_STAGE=scalar
 run AMEVA_CONV_F16=exact AMEVA_CONV_STAGE=vec4
 run AMEVA_CONV_F16=exact AMEVA_CONV_STAGE=scalar
 run AMEVA_FUSE=0
+# tensors above one buffer binding (tests/ameva_conv_check.cpp): the window passes with a limit that small tensors
+# exceed; the expected values are those of the runs above
+run AMEVA_BINDING_LIMIT=131072
+run AMEVA_BINDING_LIMIT=131072 AMEVA_CONV_STAGE=vec4
+run AMEVA_BINDING_LIMIT=131072 AMEVA_CONV_STAGE=scalar AMEVA_CONV_F16=exact
+run AMEVA_BINDING_LIMIT=131072 AMEVA_FUSE=0
+run AMEVA_BINDING_LIMIT=1048576
 # TIME_SHAPES="W,H,IC,OC,K ...": wall time of graph_compute for those convolutions (f16 kernel), default selection
 if [ -n "${TIME_SHAPES:-}" ]; then
     echo "conditions: $(date +%F_%T) cpus=$(awk '/Cpus_allowed_list/ {print $2}' /proc/self/status)"
@@ -94,10 +103,27 @@ run_cnorm() {
 }
 run_cnorm default
 run_cnorm fuse0 AMEVA_FUSE=0
+run_cnorm window AMEVA_BINDING_LIMIT=1048576
+run_cnorm window_fuse0 AMEVA_BINDING_LIMIT=1048576 AMEVA_FUSE=0
+# UPSCALE and the binary ops in windows of planes (tests/ameva_window_check.cpp sets its own limit)
+echo "== ameva_window_check"
+LD_LIBRARY_PATH="$RT" timeout 900 "$OUT/ameva_window_check" > "$OUT/window_check.log" 2>&1
+r=$?
+grep -E "FAIL|WINDOW_CHECK [0-9]+/" "$OUT/window_check.log" | grep -v "^WARNING: linker"
+echo "rc=$r"
+[ $r -eq 0 ] || rc=1
 if [ -n "${CNORM_TIME_SHAPES:-}" ]; then
     echo "conditions: $(date +%F_%T) cpus=$(awk '/Cpus_allowed_list/ {print $2}' /proc/self/status)"
     run_cnorm time AMEVA_CNORM_CHECK_TIME="$CNORM_TIME_SHAPES"
 fi
+# NORM and TIMESTEP_EMBEDDING, the ops of the UNet beyond those of the VAE (tests/ameva_unet_ops_check.cpp)
+echo "== ameva_unet_ops_check"
+LD_LIBRARY_PATH="$RT" timeout 900 "$OUT/ameva_unet_ops_check" > "$OUT/unet_ops_check.log" 2>&1
+r=$?
+grep -E "FAIL|UNET_OPS_CHECK [0-9]+/" "$OUT/unet_ops_check.log" | grep -v "^WARNING: linker"
+grep -o -E "(err_over_bound|max_abs_diff)=[0-9.e+-]+" "$OUT/unet_ops_check.log" | awk -F= '$2 + 0 > m[$1] { m[$1] = $2 + 0 } END { for (k in m) printf "largest %s=%g  ", k, m[k]; print "" }'
+echo "rc=$r"
+[ $r -eq 0 ] || rc=1
 echo "== ameva_qmm_check"
 LD_LIBRARY_PATH="$RT" timeout 1800 "$OUT/ameva_qmm_check" 2>&1 | tail -1
 [ "${PIPESTATUS[0]}" -eq 0 ] || rc=1

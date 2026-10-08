@@ -1,36 +1,33 @@
 # Current Engineering Checkpoint
 
-**Timestamp**: 2026-10-08T14:40:00+09:00  
-**Branch**: `perf/opencl-mali` (pushed: `f333149` E2E VAE decode verified, `2abb68a`, `d31bfba`).  
-**Current Goal**: 5-Modality Pipeline Optimization (1. Diffusion -> 2. STT -> 3. BitNet -> 4. Vision -> 5. TTS); STRICTLY LOCAL under `dev/` (no remote branch fetch).
+**Timestamp**: 2026-10-08T17:10:00+09:00  
+**Branch**: `perf/opencl-mali`, HEAD `1483ca8`. **This session's work is in the working tree, NOT committed** (files below).  
+**Current Goal**: Diffusion to full completion before STT (user decision 2026-10-08); STRICTLY LOCAL under `dev/`.
 
-### Verified (Ground Truth)
-- [PASS] Zero-Source Leakage Audit, Engine Isolation (`adapters/`), A53 clean-slate auto-provisioning, 5-modality real-device inference on A53, `ac_security_guard` (`AMEVA-SEC-001`). Details: git log up to `09e0186`.
-- [PASS] Block-integer MUL_MAT (`ameva_mmqb`, opt-in `AMEVA_MMQB`): wins on Mali OpenCL only. Numbers: `docs/design/opencl-prompt-path.md`.
-- **Stage 1 (Diffusion). Tables: `docs/design/diffusion-vae-conv.md` (1-2 A35 `sd-cli`, 7 kernel bench, 8 CONV_2D, 9 group norm and bias, 10 K3 and census, 11 sd.cpp decoded image).**
-- CONV_2D, GROUP_NORM (fused weight, bias, SILU, convolution bias): SPIR-V only, declined on OpenCL, IM2COL declined. K3 (UPSCALE nearest, PAD, CONCAT, SOFT_MAX, dense f32 MUL_MAT): SPIR-V and OpenCL C. S21/A53 op tests and `ameva_vae_graph_check` (SD 1.x 226 nodes none declined with `--vae-conv-direct`; f32 RMS difference 4e-6): section 10.
-- **Step 3 (2026-10-08, section 11): sd.cpp `50d6405` (ggml `8e800cef`) decodes on ggml-ameva, sd.cpp unchanged.** `sd-cli --backend "cpu,vae=AMEVA0" --vae-conv-direct`, plugin through `GGML_BACKEND_PATH`, built by `scripts/termux/lab/sd_vae_e2e.sh build` on the S25 (ggml shared, `GGML_BACKEND_DL`, `GGML_OPENMP=OFF`); the S21, A35, A53 ran the same binaries.
-- Same latent in every run (text encoder and UNet on CPU, one seed; two CPU decodes give the same file). `anime.gguf`, 256x256. AMEVA image against the CPU image: S25 60.47 dB, S21 61.11 dB, A35 63.08 dB, A53 63.08 dB; largest difference 1 level of 255; two AMEVA decodes give the same file on each device. VAE graph 226 nodes, 249 dispatches, no scheduler split on all four.
-- Decode time of the 256 px image, CPU / AMEVA (one process each, not alternated, GPU clock not recorded): S25 15.0 / 1.97 s (4 threads), S21 22.5 / 11.3 s (4), A35 73-77 / 10.3-10.6 s (3), A53 103-106 / 18.7-18.9 s (3).
-- ABI: sd.cpp compiles ggml with `GGML_MAX_NAME=160` and `ggml_tensor.extra` lies behind `name`. `ameva_abi_check` compares the name size and the VAE op names; a plugin built without `-DGGML_MAX_NAME=160` is refused at load (S25 negative control). `build_ggml_ameva.sh --cxxflags --list-devices-cmd`.
+### Verified (Ground Truth). Tables: `docs/design/diffusion-vae-conv.md` sections 1-12
+- Earlier work stands: LLM / OpenCL (`docs/design/opencl-prompt-path.md`), VAE ops and the 256 px decode (sections 8-11).
+- **Section 12 (2026-10-08). Tensors above one binding (256 MiB on Mali) run in windows of planes**: CONV_2D (passes over channel groups, `conv_*_acc` kernels, bit-equal to one pass), GROUP_NORM, UPSCALE, binary ops, SOFT_MAX, dense MUL_MAT. New ops: NORM, TIMESTEP_EMBEDDING, REPEAT. `AMEVA_STRICT=1` aborts on a declined op. The graph wait scales with the work (30 s fixed gave -405 on the A53).
+- Op checks, **S21 only** (`conv_check.sh`): conv 31/31 (25/25 and 31/31 under `AMEVA_BINDING_LIMIT`), cnorm 15/15 x4, window 18/18, unet_ops 15/15, qmm 516/516.
+- **512 px untiled VAE decode on AMEVA, no CPU split** (`sd_e2e.sh`, SD 1.x `anime.gguf`, 4 steps), decode s AMEVA / CPU: S25 7.71 / 82.54, S21 25.68 / 56.89, A35 42.45 / 333.02, A53 58.38 / 152.48. 62.66 dB, max 1 of 255, on all four. 5 window nodes on each Mali.
+- **UNet + VAE on AMEVA, no split**, 512 px sampling / decode s (CPU): S25 21.00 / 7.42 (102.32 / 82.54); S21 90.88 / 21.57 (90.26 / 56.89); with `--mmap --diffusion-fa` A53 143.93 / 57.70 (135.46 / 147.03), A35 99.41 / 42.06 (330.01 / 328.05).
+- **PSNR against the CPU image does not measure the backend with quantized weights**: ggml CPU rounds activations to 8 bits (CPU q4_0 vs CPU `--type f32`: 30.53 dB). Against the f32-weight CPU run AMEVA is 50.16 dB (4 steps), 52.80 dB (1 step). Raw 512 px PSNR vs the same-weight CPU: S25 40.69, S21 29.70, A53 33.33, A35 33.98 dB (A53 and A35: flash attention in both runs).
+- S25 only: SDXL base Q4_0 512 px 21.35 / 9.59 s (CPU 114.84 / 63.09), 51.30 dB; SDXS 1 step 1.91 / 0.76 s (7.13 / 6.83), 36.69 dB; `--type` q8_0 39.98, q4_K 23.23, f16 44.29 dB; tiled decode 15.45 s (CPU 143.43), 63.04 dB.
+- LoRA at run time on AMEVA: 192/192 tensors, no split; vs CPU 30.71 dB (q4_0), 45.84 dB (f16); the adapter moves the image by 19.3-19.8 dB on both.
 
-### Known, Not Examined
-- **f16 Vulkan reference image (the gate's named reference): not obtained.** `sd-cli --backend "cpu,vae=Vulkan0"` with ggml-vulkan `8e800cef` segfaults (139) after "vae compute buffer size" on the S25 and the S21, with and without `--vae-conv-direct`, with and without the local `ggml-vulkan.cpp` change; text encoder and UNet on `Vulkan0` run. Op not identified (no debugger). Backend and log: `~/abi-lab/out-sd/vk-crash` (S25, S21); put the library back into `sd-build/bin` and `sd_vae_e2e.sh run` adds the `Vulkan0` run. `ggml-vulkan.cpp` at `-O3` did not finish in 67 min on the S25; `-O1` takes 2-3 min.
-- No f32-kernel image comparison: `--tensor-type-rules` has no effect on this GGUF in sd-cli `50d6405`. The 40 dB floor of the script is a choice, not a measured limit.
-- Llama-3.2-1B 64-token text departs from the CPU's at byte 70 (A53 OpenCL, A35 Vulkan and OpenCL); S25 OpenCL `ameva_qmm_check` 510/516 (q2_K M=1); S20 OpenCL `ameva_qmm_check` exits 139.
-- S20 `sd-cli` (OpenCL build `3f8527a`) aborts in the UNet (-54); S20 `~/sd-cli-vulkan` asserts `compute_ctx.expired()` with `GGML_VK_PERF_LOGGER`.
-- Sections 9-10 op tests (`k3_check.sh`, `conv_check.sh`) not run on Adreno (S25, S20) or the A35; section 11 not on the S20 (held by another session). Not rerun after K3: `ameva_fuse_check`, `ameva_kvq_check`, `ameva_chunk_check`; LLM text parity.
-- Declined by design so far: bilinear/bicubic UPSCALE, SOFT_MAX with ALiBi bias or sinks, tensors above one binding, CONV_3D, Wan RMS norm.
+### Known, Not Done
+- **LoRA merged at load ("baking") is declined on AMEVA** (in-place ADD into an f16 weight; repacked weights are read-only). On the CPU it works with f16 weights and asserts in ggml with q4_0.
+- **MMDiT not validated.** The Z-Image-Turbo census on the S21 was ended by the system during text encoding (5.4 GB of parameters); no op list. SDXL ran on the S25 only.
+- A53: the UNet at 512 px without `--diffusion-fa` ended the Termux session (A35 and A53 UNet rows use `--mmap --diffusion-fa`). A35 and A53 dropped off the network for minutes during long runs. S21: UNet on AMEVA no faster than the CPU at 512 px (dense attention MUL_MAT; not profiled).
+- `ameva_mmq` (int8 activations; default on S25, S20, A35) costs 8-14 dB against exact at one step; `AMEVA_MMQ=0` for diffusion is undecided. q4_K with f32 activations: 34.17 dB from exact at 4 steps (44.22 at 1), cause not separated from the CPU text encoder.
+- Not rerun after these changes: `test-backend-ops`, LLM text parity, op checks on A35 / A53 / S25 / S20. New kernels are SPIR-V only. PAD, CONCAT, NORM, RMS_NORM, FLASH_ATTN_EXT above one binding are declined.
+- Unchanged from before: Vulkan0 VAE segfault (no f16 Vulkan reference image), Llama-3.2-1B text departs at byte 70, S20 not covered.
 
-### Current Problem & Focus
-- User Decision (2026-10-08): Full CUDA-Level Diffusion completion required before moving to STT. Must handle 512px, multi-binding (>256MB), VAE tiling (tile size 24), and UNet graph validation across models/quantizations (SD 1.x, SDXL, Z-Image-Turbo).
-- Earlier decisions stand: Fail-fast on CPU splits; CPU image accepted as official reference; exact FP16 mode default.
-
-### Relevant Files
-- `adapters/llama/ggml-ameva/ggml-ameva.cpp`, `ggml-ameva-device.cpp`, `shaders/ameva_conv.comp`, `scripts/termux/lab/sd_vae_e2e.sh`
-- Devices (S25, S21, A35, A53): `~/abi-lab/sd-build/bin`, `out-sd/`
+### Relevant Files (uncommitted)
+- `adapters/llama/ggml-ameva/`: `ggml-ameva.cpp`, `ggml-ameva-device.cpp`, `ggml-ameva.h`, `ggml_ameva_kernels_spv.h` (generated on the S21, spirv-val), `shaders/ameva_conv.comp`, `ameva_conv_w.comp`, new `ameva_norm.comp`, `ameva_timestep_embd.comp`
+- `scripts/build_ameva_kernels.py`, `scripts/termux/lab/conv_check.sh`, new `sd_e2e.sh`, `make_test_lora.py`; tests `ameva_conv_check`, `ameva_cnorm_check`, new `ameva_window_check`, `ameva_unet_ops_check`; `docs/design/diffusion-vae-conv.md`
+- Devices: sources `~/abi-lab/src-win5` (S25, S21); plugin `out-sdw5` (S25), `out-sdw4` (S21, A35, A53). Added on the S25: `sdxl-base-1.0-Q4_0.gguf` (3.94 GB), `anime-q4_K.gguf` (1.63 GB), `~/abi-lab/lora-test`.
 
 ### Next Actions
-1. Multi-binding buffer split & 512x512 VAE tiling: ensure tensors exceeding 256 MiB maxStorageBufferRange never split to CPU; verify 512x512 decode on A35/S25.
-2. UNet & MMDiT op census & quantisation verification (Q4_K, Q8_0) across SD 1.x, SDXL, and Turbo models.
-3. LoRA merge compatibility & 4-device full E2E 512px image benchmark with PSNR check. Only then proceed to STT.
+1. Commit the working tree (awaiting the user); rerun `test-backend-ops` and LLM parity; op checks on the A35, A53, S25.
+2. LoRA merge on AMEVA (f16 binary ADD and a write path for repacked weights).
+3. MMDiT census on the S25 (model has to be copied there), attention kernel for the Mali UNet, the `AMEVA_MMQ` default for diffusion.

@@ -1,0 +1,68 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// AMEVA NORM, f32: y = (x - mean) / sqrt(var + eps) per row of ne0 elements, with var the mean of (x - mean)^2
+// (ggml_compute_forward_norm_f32, the layer norm of the transformer blocks of the diffusion models and of CLIP).
+// One workgroup per row. The sum and then the sum of the squared differences from the mean are reduced in shared
+// memory: the two passes of ggml (one pass over x and x^2 would subtract two nearly equal numbers when the mean is
+// large against the spread). ggml sums in f32 as well, in another order, so the results differ by rounding only.
+// Source and destination may be the same elements: element k is read and written by one invocation, and every read
+// of the row lies before the barriers of the second reduction, every write after them.
+//
+//   push: ne0, ne1, ne2, nrows (ne1 * ne2 * ne3); a_off and the strides of dimensions 1..3 (floats); the same for
+//         dst; eps (float bits)
+//   grid: nrows workgroups over (x, y)
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+
+layout(std430, binding = 0) readonly buffer A { uint a[]; };
+layout(std430, binding = 1) writeonly buffer D { uint d[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint ne0, ne1, ne2, nrows;
+    uint a_off, a_s1, a_s2, a_s3;
+    uint d_off, d_s1, d_s2, d_s3;
+    uint eps;
+} pc;
+
+shared float red[128];  // partial sums of x; red[0] stays the row's sum after its reduction
+shared float red2[128]; // partial sums of (x - mean)^2
+
+void main() {
+    const uint row = ameva_workgroup_id();
+    if (row >= pc.nrows) return; // uniform across the workgroup
+    const uint tid = gl_LocalInvocationID.x;
+    const uint i1 = row % pc.ne1;
+    const uint i2 = (row / pc.ne1) % pc.ne2;
+    const uint i3 = row / (pc.ne1 * pc.ne2);
+    const uint ab = pc.a_off + i1 * pc.a_s1 + i2 * pc.a_s2 + i3 * pc.a_s3;
+    const uint db = pc.d_off + i1 * pc.d_s1 + i2 * pc.d_s2 + i3 * pc.d_s3;
+
+    float s = 0.0;
+    for (uint k = tid; k < pc.ne0; k += 128u) s += uintBitsToFloat(a[ab + k]);
+    red[tid] = s;
+    barrier();
+    for (uint st = 64u; st > 0u; st >>= 1u) {
+        if (tid < st) red[tid] += red[tid + st];
+        barrier();
+    }
+    const float mean = red[0] / float(pc.ne0);
+
+    float s2 = 0.0;
+    for (uint k = tid; k < pc.ne0; k += 128u) {
+        const float v = uintBitsToFloat(a[ab + k]) - mean;
+        s2 += v * v;
+    }
+    red2[tid] = s2;
+    barrier();
+    for (uint st = 64u; st > 0u; st >>= 1u) {
+        if (tid < st) red2[tid] += red2[tid + st];
+        barrier();
+    }
+    const float scale = 1.0 / sqrt(red2[0] / float(pc.ne0) + uintBitsToFloat(pc.eps));
+    for (uint k = tid; k < pc.ne0; k += 128u) {
+        precise float y = uintBitsToFloat(a[ab + k]) - mean;
+        y = y * scale;
+        d[db + k] = floatBitsToUint(y);
+    }
+}

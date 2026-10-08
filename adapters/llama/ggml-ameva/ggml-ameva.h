@@ -73,6 +73,9 @@ GGML_API int ggml_backend_ameva_get_conv_f16_decoder(void);
 // GROUP_NORM nodes completed on the GPU by ameva_cnorm (neither is cleared by reset_counters)
 GGML_API int64_t ggml_backend_ameva_get_conv_bias_count(void);
 GGML_API int64_t ggml_backend_ameva_get_group_norm_count(void);
+// nodes completed on the GPU with a tensor above one buffer binding (maxStorageBufferRange), computed in windows of
+// whole planes: CONV_2D, GROUP_NORM, UPSCALE and the binary ops (not cleared by reset_counters)
+GGML_API int64_t ggml_backend_ameva_get_window_node_count(void);
 GGML_API const char* ggml_backend_ameva_get_build_commit(void);
 GGML_API void ggml_backend_ameva_reset_counters(void);
 

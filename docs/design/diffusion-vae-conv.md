@@ -463,3 +463,112 @@ held by another session and did not run.
   optimisation level does not enter the image.
 - Not done: the Vulkan reference above; an f32-kernel image; 512 px and tiled decodes (binding limit); int8 mode;
   decode times alternated with the GPU clock recorded; the S20; the wrapper's selection of the AMEVA VAE plan.
+
+## 12. Tensors above one binding, the UNet on ggml-ameva, 512 px end to end (2026-10-08)
+
+- **Windows.** A tensor above `maxStorageBufferRange` (256 MiB on the Mali devices; the 512 x 512 x 256 f32 tensors of a
+  512 px decode are 256 MiB, 64 bytes above what a binding covers from any offset) is given to the kernels in windows
+  of whole planes, each bound from the storage alignment below its first plane (`ameva_bind_span`):
+  CONV_2D in passes over windows of channel groups (`AmevaConv2d::win_groups`; also when the K-ordered weights exceed
+  a binding) and in slices of output planes; GROUP_NORM per window of whole groups, with no kernel change; UPSCALE,
+  the binary ops and SOFT_MAX per window of planes; dense MUL_MAT one matrix at a time (the 512 MiB attention weights
+  of a 64 x 64 latent). A convolution pass after the first runs the `conv_*_acc` kernels (`-DACCUM`), which start
+  their sums from the stored result. The unit table is group-major, so a window is a run of consecutive units and
+  the passes add the terms of an output in the order of the one-pass kernel: the result is the same in every bit.
+  `ameva_conv_w` got a channel offset. What the windows cannot express is declined with its reason (UPSCALE that
+  scales dimension 2 or 3, an operand repeated along them, a mask per plane, 32 source channels or one plane above a
+  binding). PAD, CONCAT, RMS_NORM, NORM and FLASH_ATTN_EXT above one binding are still declined.
+- **UNet ops.** A census of the SD 1.x UNet (`--backend "cpu,diffusion=AMEVA0" --diffusion-conv-direct`) found two
+  declined ops: NORM (288 queries) and TIMESTEP_EMBEDDING (7). Both are kernels now (`ameva_norm`,
+  `ameva_timestep_embd`, SPIR-V only). The embedding takes its frequencies from a host table computed with the
+  expression of ggml and computes sine and cosine itself (reduction by pi / 4 in three parts, Cephes polynomials):
+  the built-in functions of Vulkan are bounded by 2^-11 inside [-pi, pi] only and the arguments reach 1000. REPEAT
+  (the LoRA merge) runs on `ameva_pad` with circular padding after the source.
+- **Fail-fast.** `AMEVA_STRICT=1` ends the process when an op is declined; `sd_e2e.sh` sets it for every AMEVA run and
+  also requires no `## SPLIT` line, no `declined` line and a dispatch count. Before that the census run had ended by
+  itself: the scheduler put an in-place MUL on the AMEVA backend whose view source lay in a CPU buffer, and the
+  engine stopped with "tensor is not in an AMEVA buffer".
+- **Graph wait.** The final wait was 30 s for any graph. A 512 px decode takes 42 to 58 s on a Mali-G68: the A53
+  ended with `AC_ERR_LAUNCH_TIMEOUT` (-405). It is now 30 s plus the recorded work at 0.05e9 multiply-accumulates per
+  second, at most two hours (`AMEVA_WAIT_TIMEOUT_S` replaces it).
+
+**Op checks** (`conv_check.sh`, Galaxy S21, Mali-G78 r38p0; not run on the other devices). `AMEVA_BINDING_LIMIT`
+makes small tensors take the window paths.
+
+| check | result |
+|---|---|
+| `ameva_conv_check`, six kernel selections | 31/31 each, every element equal to the fma reference |
+| the same with `AMEVA_BINDING_LIMIT=131072`, four selections | 25/25 each (three cases declined under that limit), 12 convolutions in windows (15 nodes with `AMEVA_FUSE=0`), equal to the same reference |
+| the same with `AMEVA_BINDING_LIMIT=1048576` | 31/31, 2 in windows |
+| `ameva_cnorm_check`, fused and `AMEVA_FUSE=0`, without and with `AMEVA_BINDING_LIMIT=1048576` | 15/15 each; 18 and 30 nodes in windows; largest error 0.287 of the bound in all four |
+| `ameva_window_check` (limit 65536: UPSCALE, ADD, SUB, MUL, DIV, MUL_MAT, SOFT_MAX) | 18/18, 16 nodes in windows |
+| `ameva_unet_ops_check` | 15/15: NORM at most 0.026 of its bound, TIMESTEP_EMBEDDING at most 5.96e-08 from the libm of the CPU, REPEAT equal |
+| `ameva_qmm_check` | 516/516 |
+
+**512 px, SD 1.x** (`sd_e2e.sh`; `anime.gguf`: q4_0 linear weights, f16 convolutions; 4 Euler steps, cfg 1, seed 42;
+text encoder on the CPU; one process per run, not alternated, GPU clock not recorded). "window nodes" is the count of
+nodes computed in windows (`AMEVA_PROFILE window_nodes`). PSNR is against the CPU image of the same row.
+
+| device (cores, threads) | CPU: sampling / decode | VAE on AMEVA: decode, window nodes, PSNR | UNet + VAE on AMEVA: sampling / decode, window nodes, PSNR |
+|---|---|---|---|
+| S25, Adreno 830 (0-1,4-5; 4) | 102.32 / 82.54 s | 7.71 s, 0, 62.66 dB (max 1) | 21.00 / 7.42 s, 0, 40.69 dB (max 79) |
+| S21, Mali-G78 (0-2,4-7; 4) | 90.26 / 56.89 s | 25.68 s, 5, 62.66 dB (max 1) | 90.88 / 21.57 s, 65, 29.70 dB (max 234) |
+| A35, Mali-G68 (0-2; 3) | 423.16 / 333.02 s | 42.45 s, 5, 62.66 dB (max 1) | with `--mmap --diffusion-fa` in both runs: 99.41 / 42.06 s (CPU 330.01 / 328.05 s), 5, 33.98 dB (max 216) |
+| A53, Mali-G68 r32p1 (0-7; 4) | 164.20 / 152.48 s | 58.38 s, 5, 62.66 dB (max 1) | with `--mmap --diffusion-fa` in both runs: 143.93 / 57.70 s (CPU 135.46 / 147.03 s), 5, 33.33 dB (max 156) |
+
+- Every AMEVA run above: no scheduler split, nothing declined. VAE graph 226 nodes (529 dispatches with windows, 518
+  without); UNet + VAE 5522 nodes in 5 graphs. Compute buffers: VAE 704.06 MB; UNet 559.62 MB on the CPU, 1066.62 MB
+  on AMEVA (the attention weights of the 64 x 64 latent are one 512 MiB tensor).
+- On the S21 the UNet on AMEVA is no faster than the CPU at 512 px (90.88 against 90.26 s). Not profiled; the dense
+  MUL_MAT kernel that computes the attention products has one invocation per element.
+- A53: the UNet + VAE run without flash attention ended the Termux session during sampling (2.3 GB of buffers on a
+  5.5 GB device), so the UNet cells of the A53 and the A35 use `--mmap --diffusion-fa` in both runs (UNet graphs
+  5266 nodes; the VAE decode of those runs is untiled as well: 5 window nodes).
+- Tiled decode (S25, `--vae-tiling`, the same GPU-sampled latent): CPU 143.43 s, AMEVA 15.45 s, 63.04 dB (max 2); two
+  AMEVA runs give the same file.
+
+**What the image comparison measures** (S25, 256 px; "exact" is a CPU run with `--type f32`: with quantized weights
+the CPU code of ggml multiplies with activations rounded to 8 bits, with f16 weights with f16 activations).
+
+| pair | 4 steps | 1 step |
+|---|---|---|
+| exact against CPU, q4_0 weights | 30.53 dB | 39.55 dB |
+| exact against AMEVA, f32 weights | 50.16 dB (max 14) | 52.80 dB (max 4) |
+| exact against AMEVA, q4_0 weights, f32 activations (`AMEVA_MMQ=0`) | 42.82 dB | 47.12 dB |
+| exact against AMEVA, q4_0 weights, int8 activations (the default where the device has integer dot products) | 28.27 dB | 39.23 dB |
+| CPU against CPU with `--diffusion-fa`, q4_0 weights | 34.34 dB | |
+| q4_K file: exact against CPU / AMEVA int8 / AMEVA f32 activations / AMEVA f32 weights | 22.28 / 28.54 / 34.17 dB / - | 28.33 / 35.93 / 44.22 / 51.87 dB |
+
+- The CPU image of a quantized model is itself 22 to 40 dB from the exact one, so a PSNR against it does not measure
+  the backend. Against the exact reference the backend is at 50 to 53 dB with f32 weights. With quantized weights and
+  f32 activations it is at 34 to 47 dB; the text encoder of those runs is the quantized one of the CPU, which that
+  of the reference is not, and that part of the difference was not separated.
+- `ameva_mmq` (int8 activations) costs 8 to 14 dB against exact at one step. It is the default on the S25, S20 and
+  A35 for many activation rows. Whether the diffusion model should run with `AMEVA_MMQ=0` is not decided.
+
+**Other models and weight types** (S25, UNet + VAE on AMEVA, no split, nothing declined in any of them).
+
+| run | CPU: sampling / decode | AMEVA: sampling / decode | PSNR against the CPU image |
+|---|---|---|---|
+| SD 1.x `--type q8_0`, 256 px, 4 steps | 13.97 / 15.39 s | 6.27 / 1.88 s | 39.98 dB |
+| SD 1.x `--type q4_K`, 256 px, 4 steps | 25.82 / 14.96 s | 16.21 / 1.90 s | 23.23 dB (see the table above) |
+| SD 1.x `--type f16`, 256 px, 4 steps | 14.08 / 14.95 s | 8.67 / 2.11 s | 44.29 dB |
+| SDXL base 1.0 Q4_0 (gpustack GGUF), 512 px, 4 steps | 114.84 / 63.09 s | 21.35 / 9.59 s | 51.30 dB (max 11); 14750 nodes, 37298 dispatches |
+| SDXS 512-DS (q8_0), 512 px, 1 step | 7.13 / 6.83 s | 1.91 / 0.76 s | 36.69 dB |
+
+**LoRA** (S25, 256 px, a synthetic rank-4 adapter on the 48 self-attention projections,
+`scripts/termux/lab/make_test_lora.py`; it is a test input, not a trained adapter).
+
+- At run time (`--lora-apply-mode at_runtime`): 192 of 192 tensors applied, UNet graphs 6546 nodes instead of 5522, no
+  split. q4_0 weights: AMEVA against CPU 30.71 dB; the adapter moves the image by 19.33 dB (CPU) and 19.45 dB (AMEVA)
+  from the run without it. f16 weights: 45.84 dB; 19.75 and 19.72 dB.
+- Merged at load (`immediately`): **not on AMEVA.** The merge adds into the f16 weight in place; the engine has no f16
+  binary kernel and no op may write a repacked weight, so the op is declined and `AMEVA_STRICT` ends the run
+  (`--params-backend cpu` does not change that). On the CPU the merge works with f16 weights (44.65 dB from its own
+  run-time form) and stops in ggml (`GGML_ASSERT(src1->type == GGML_TYPE_F32)`) with the q4_0 file.
+
+- Not done: an MMDiT model. A census of Z-Image-Turbo Q2_K on the S21 loaded 5398 MB of parameters (text encoder
+  2766 MB in RAM, diffusion model 2472 MB on AMEVA) and the process was ended by the system during text encoding,
+  before any graph of the diffusion model was built: no op list. Also not done: the op checks on the A35, A53, S25 and
+  S20; `test-backend-ops` and LLM text parity after these changes; the S20; an OpenCL translation of the new
+  kernels; the cause of the UNet time on the S21; LoRA merged at load on AMEVA.

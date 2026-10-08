@@ -126,12 +126,20 @@ OPS_DEFINED = [("set_rows_q8_0", "set_rows_q", ["QTYPE_Q8_0"]), ("set_rows_q4_0"
 # ameva_conv: weights f16 through the exact decoder, f16 through the built-in conversion (f16u; the engine selects it
 # after checking the device's conversion of f16 subnormals) or f32; staging scalar (s, any stride) or aligned vec4 (v).
 # ameva_cnorm_stat, ameva_cnorm: GROUP_NORM as group statistics, then the normalisation with the fused chain.
+# conv_*_acc (ACCUM): the same convolution kernels continuing from the stored result, for the passes after the first
+# over the channel-group windows of a source or of weights above one buffer binding.
+# ameva_norm (NORM, the layer norm) and ameva_timestep_embd (TIMESTEP_EMBEDDING): ops of the diffusion models'
+# transformer blocks and time embedding.
 # New kernels go at the end: the engine addresses these by enum value.
 VK_ONLY = ([("conv_%s_%s" % (w, st), "conv", wd + sd)
             for w, wd in (("f16", ["TYPE_F16"]), ("f16u", ["TYPE_F16", "F16_UNPACK"]), ("f32", ["TYPE_F32"]))
             for st, sd in (("s", []), ("v", ["STAGE_VEC4"]))] +
            [("conv_w_f16", "conv_w", []), ("conv_w_f32", "conv_w", ["F32"])] +
-           [("cnorm_stat", "cnorm_stat", []), ("cnorm", "cnorm", [])])
+           [("cnorm_stat", "cnorm_stat", []), ("cnorm", "cnorm", [])] +
+           [("conv_%s_%s_acc" % (w, st), "conv", wd + sd + ["ACCUM"])
+            for w, wd in (("f16", ["TYPE_F16"]), ("f16u", ["TYPE_F16", "F16_UNPACK"]), ("f32", ["TYPE_F32"]))
+            for st, sd in (("s", []), ("v", ["STAGE_VEC4"]))] +
+           [("norm", "norm", []), ("timestep_embd", "timestep_embd", [])])
 
 # the licence header of the generated files (kept identical to the other sources of the repository)
 LICENSE_HEADER = ["/**", " * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.",

@@ -34,6 +34,11 @@
 //   default     8 scalar loads per invocation and unit; any stride
 //   STAGE_VEC4  3 aligned vec4 loads per invocation and unit, shifted by the position of the run inside a vec4; the
 //               stride along w must be 1 and the source binding a whole number of vec4 (the host selects the kernel)
+// ACCUM (compile time): the sums start from the values stored in dst instead of zero. The host uses it for the
+// passes after the first over a source above one binding (or weights above one): a pass takes a window of whole
+// channel groups, which is a run of consecutive units of the whole kernel's K order, so the passes together add the
+// terms of an output in the order of the one-pass kernel. Every pass but the last gets the zero vector as bias. A
+// workgroup reads its outputs before its first barrier and writes them after its last.
 // ABLATE=<n> (kernel tuning; such a kernel gives wrong results): 1 no padding mask, 2 (STAGE_VEC4) two aligned loads
 // without the shift, 3 no loads from the source, 4 as 3 with the output stage of ameva_qgemm (position-major, no
 // bias).
@@ -57,8 +62,13 @@ layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
 #else
 #define SOURCE_ARRAY float src[]
 #endif
+#if defined(ACCUM)
+#define DST_ACCESS
+#else
+#define DST_ACCESS writeonly
+#endif
 layout(std430, binding = 3) readonly buffer BufA { SOURCE_ARRAY; };
-layout(std430, binding = 4) writeonly buffer BufD { float dst[]; };
+layout(std430, binding = 4) DST_ACCESS buffer BufD { float dst[]; };
 layout(std430, binding = 5) readonly buffer BufB { float bias[]; };
 layout(std430, binding = 6) readonly buffer BufU { uint units[]; };
 
@@ -113,6 +123,20 @@ void main() {
     // accumulation: rows 4 tn .. 4 tn + 3 of the tile, activation rows 4 tm .. 4 tm + 3
     const uint tn = tid & 15u, tm = tid >> 4u;
     vec4 acc0 = vec4(0.0), acc1 = vec4(0.0), acc2 = vec4(0.0), acc3 = vec4(0.0);
+#if defined(ACCUM)
+    // (weight row n0 + 4 tn + i, position ow0 + 4 tm + j of this row) as stored by the pass before
+    [[unroll]] for (uint i = 0u; i < 4u; ++i) {
+        const uint n = n0 + 4u * tn + i;
+        const uint owb = ow0 + 4u * tm;
+        if (n < pc.N) {
+            const uint o = pc.d_off + pc.plane * n + pc.OW * row + owb;
+            if (owb + 0u < pc.OW) acc0[i] = dst[o + 0u];
+            if (owb + 1u < pc.OW) acc1[i] = dst[o + 1u];
+            if (owb + 2u < pc.OW) acc2[i] = dst[o + 2u];
+            if (owb + 3u < pc.OW) acc3[i] = dst[o + 3u];
+        }
+    }
+#endif
 
     for (uint u = 0u; u < U; ++u) {
         if (tid < 64u) {
