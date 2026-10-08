@@ -327,3 +327,77 @@ shows the size of the op, not a controlled comparison of the two forms:
   form of the Wan VAE, tensors above one binding (declined), an OpenCL translation of these kernels, and sd.cpp
   built against ggml-ameva (step 3). No decoded image exists yet. S25 and A35 did not answer on 2026-10-08
   (connection timed out), so nothing of this section ran on them.
+
+## 10. K3 ops and the VAE graph census (step 2 of section 6, 2026-10-08)
+
+- **Ops.** UPSCALE (nearest), PAD (zeros and circular), CONCAT (f32, f16), SOFT_MAX (scale, f32 or f16 mask, in
+  place) and f32 x f32 MUL_MAT of any shape are computed by the graph engine (`enc_upscale`, `enc_pad`, `enc_concat`,
+  `enc_soft_max`, `enc_mul_mat_dense`; contract in `ameva_op_unsupported_reason` and `mul_mat_dense_reason`).
+- **Kernels.** Four op kernels, built as SPIR-V and translated to OpenCL C like the other op kernels (unlike the
+  convolution and the group norm): `ameva_upscale`, `ameva_pad` (one invocation per result element, words copied
+  without a float conversion, any strides), `ameva_soft_max` (one workgroup per row; maximum and sum reduced in
+  shared memory; an invocation writes only what it read, so the result may lie in place of the source) and `ameva_mm`
+  (one invocation per result element, scalar loads, four partial sums). CONCAT is two dispatches of `ameva_cpy`,
+  each source copied into its part of the result.
+- **Exactness.** UPSCALE, PAD and CONCAT equal ggml's CPU result in every bit. ggml takes nearest index
+  `(int64_t)(i / sf)` with `sf = (float)dst / src`; the kernel computes `i * src / dst` in integers, and a node is
+  accepted only when both agree for every index of every axis (always so for whole factors; checked index by index
+  for fractional ones, declined when they differ). SOFT_MAX and MUL_MAT differ from the CPU by rounding (f32 tree
+  sums against ggml's double sum and SIMD order); the tests bound it.
+- **Declined with a reason.** UPSCALE in any mode other than nearest without flags; SOFT_MAX with an ALiBi bias or
+  attention sinks; CONCAT of other types than f32 and f16; circular padding wider than the source (ggml's own index
+  is negative there); tensors above one binding.
+- **f32 MUL_MAT.** The first product of sd.cpp's VAE attention (K = 512 channels) ran on `ameva_qmm` before. The
+  second has K = h * w latent positions: `ameva_qmm` takes it when that is a multiple of 32, `ameva_mm` otherwise
+  (a 30x30 latent: K = 900) and for tensors of several matrices. ggml repeats each matrix of src0 over
+  `ne2(src1) / ne2(src0)` consecutive matrices of src1 (index `i / r`, not `i % n`): the first version of the
+  kernel's host code used the modulo and failed 64 cases of `test-backend-ops`; corrected before the runs below.
+- **Census** (`tests/ameva_vae_graph_check`, graphs rebuilt node for node from stable-diffusion.cpp `50d6405`, not
+  read from a running sd.cpp; compute memory from `ggml_gallocr` as in sd.cpp). The S21's `sd-cli` is linked
+  statically and prints no scheduler splits, so its graph could not be recorded.
+
+| decoder graph | nodes (compute) | distinct signatures | declined by ggml-ameva |
+|---|---|---|---|
+| SD 1.x AutoencoderKL, `ggml_conv_2d_direct` (`--vae-conv-direct`) | 346 (226) | 12 | 0 |
+| the same with z = 16 and no `post_quant_conv` (Flux, Z-Image) | 343 (224) | 12 | 0 |
+| TAESD `TinyDecoder` | 146 (114) | 7 | 0 |
+| SD 1.x with `ggml_conv_2d` (sd.cpp's default) | 586 (306) | 14 | 80: 40 IM2COL, 40 f16 x f16 MUL_MAT |
+
+  SD 1.x signatures: CONV_2D f16 kernel 40, ADD of a `[1, 1, C, 1]` vector 70, GROUP_NORM 30, MUL by a vector 30,
+  SILU 29, ADD of two tensors 15, CONT of a permuted tensor 5, UPSCALE 3, MUL_MAT 2, SCALE 1, SOFT_MAX 1. TAESD: CONV_2D
+  35, ADD of a vector 32, RELU 31, ADD 10, UPSCALE 3, SCALE 2, TANH 1. PAD and CONCAT are not in these three graphs
+  (sd.cpp uses them for circular padding and in the video decoders); they are covered by the op tests only. The
+  wrapper has to pass `--vae-conv-direct`: the default form is declined at its IM2COL nodes.
+- **Whole graph against the CPU backend.** With an f16 kernel ggml's CPU convolution rounds every activation to f16
+  before its product (`ggml_compute_forward_conv_2d_impl`, `GGML_CPU_FP32_TO_FP16`); `ameva_conv` does not. The
+  reference therefore holds the same kernel values as f32. Against it the SD 1.x decoder output differs by 3.9e-6
+  to 4.1e-6 of its RMS (largest difference 1.5e-5 at values up to 3.3); against the CPU path with f16 kernels by
+  9.6e-3 to 1.05e-2, which is that path's own rounding. A comparison of a decoded image with sd.cpp's CPU image
+  will show that second figure.
+
+Verification with the kernel header regenerated on the S21 (glslang 16.3.0, spirv-val: SPIR-V header 942 added
+lines and none changed; OpenCL header 425 added, 5 changed by the renumbering of four op kernels), plugin built
+against ggml b8471, ggml libraries of the 2.8.1 bundle (`scripts/termux/lab/k3_check.sh`, logs `~/abi-lab/out-k3/`):
+
+| | S21, Mali-G78, Vulkan | A53, Mali-G68, Vulkan | A53, Mali-G68, OpenCL |
+|---|---|---|---|
+| `tests/ameva_k3_check`: UPSCALE 8, PAD 7, CONCAT 7, SOFT_MAX 8, MUL_MAT 9 cases | 39/39 | 39/39 | 39/39 |
+| `test-backend-ops -b AMEVA0 -o UPSCALE`, `PAD`, `CONCAT`, `SOFT_MAX`, `MUL_MAT` (passed; declined) | 4/4; 18, 15/15; 0, 16/16; 16, 65/65; 147, 371/371; 883 | the same | the same |
+| `-o CONV_2D`, `-o GROUP_NORM` | 1568/1568, 2/2 | 1568/1568, 2/2 | declined (no OpenCL translation) |
+| `test-backend-ops -b AMEVA0`, every op | 3885/3885 (3596 before this section) | not run | not run |
+| `ameva_vae_graph_check`, 16x16 latent: SD 1.x and TAESD, RMS difference / reference RMS | 4.1e-6, 2.1e-6 | 4.1e-6, 2.1e-6 | not applicable |
+| the same, 32x32 latent (256x256 image) | 3.9e-6, 7.2e-7 | not run | not applicable |
+| `conv_check.sh` (convolution 6 runs, group norm 2 runs, `ameva_qmm_check`) | 23/23 x 6, 14/14 x 2, 516/516 | not run | not run |
+
+Wall time of one `graph_compute` of the rebuilt SD 1.x decoder (random weights; one run each, not alternated, CPU
+with 4 threads): S21 32x32 latent 7.07 s, CPU 20.4 s with f32 kernels and 11.9 s with f16 kernels (cores 0-2,4-7);
+S21 16x16 latent 1.18 s and 2.71 s in two runs of the same graph (the GPU clock swing of that device), A53 16x16
+latent 5.13 s, CPU 70.3 s and 29.9 s (cores 0-2). For scale only: the S21's `sd-cli` (ggml-vulkan, real SD 1.x
+weights, `--vae-conv-direct`) reported 133.96 s for the decode of one 256x256 image on the same day; that is
+another program and was not alternated with the figure above.
+
+- Not done: sd.cpp built against ggml-ameva (step 3), so no decoded image exists yet; CONV_3D and the RMS form of
+  the Wan VAE; tensors above one binding; attention sinks and the ALiBi bias of SOFT_MAX; bilinear and bicubic
+  UPSCALE; an OpenCL translation of the convolution and group norm kernels. Nothing of this section ran on Adreno:
+  the S25 and the A35 did not answer (connection timed out) and the S20 was running another session's benchmark.
+  `ameva_fuse_check`, `ameva_kvq_check` and `ameva_chunk_check` were not rerun.

@@ -1,0 +1,47 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// AMEVA PAD, f32 (ggml_compute_forward_pad_f32): the result holds the source at offset (lp0, lp1, lp2, lp3) and,
+// outside it, zeros (circular == 0) or the source repeated on every axis (circular != 0: index
+// (i - lp + a_ne) % a_ne, ggml_wrap_around; the host declines lp > a_ne, where ggml's own index is negative). The
+// padding after the source is the rest of the result's shape. The words are copied without a float conversion, so
+// the result equals the CPU's in every bit. Any strides.
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+
+layout(std430, binding = 0) readonly buffer A { uint a[]; };
+layout(std430, binding = 1) writeonly buffer D { uint d[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint d_ne0, d_ne1, d_ne2, d_ne3;
+    uint a_ne0, a_ne1, a_ne2, a_ne3;
+    uint lp0, lp1, lp2, lp3;
+    uint a_off, a_s0, a_s1, a_s2;
+    uint a_s3, d_off, d_s0, d_s1;
+    uint d_s2, d_s3, circular;
+} pc;
+
+void main() {
+    const uint k = ameva_linear_id();
+    if (k >= pc.d_ne0 * pc.d_ne1 * pc.d_ne2 * pc.d_ne3) return;
+    uint t = k;
+    const uint i0 = t % pc.d_ne0;
+    t /= pc.d_ne0;
+    const uint i1 = t % pc.d_ne1;
+    t /= pc.d_ne1;
+    const uint i2 = t % pc.d_ne2;
+    const uint i3 = t / pc.d_ne2;
+    uint v = 0u;
+    if (pc.circular != 0u) {
+        const uint s0 = (i0 + pc.a_ne0 - pc.lp0) % pc.a_ne0;
+        const uint s1 = (i1 + pc.a_ne1 - pc.lp1) % pc.a_ne1;
+        const uint s2 = (i2 + pc.a_ne2 - pc.lp2) % pc.a_ne2;
+        const uint s3 = (i3 + pc.a_ne3 - pc.lp3) % pc.a_ne3;
+        v = a[pc.a_off + s0 * pc.a_s0 + s1 * pc.a_s1 + s2 * pc.a_s2 + s3 * pc.a_s3];
+    } else if (i0 >= pc.lp0 && i0 - pc.lp0 < pc.a_ne0 && i1 >= pc.lp1 && i1 - pc.lp1 < pc.a_ne1 &&
+               i2 >= pc.lp2 && i2 - pc.lp2 < pc.a_ne2 && i3 >= pc.lp3 && i3 - pc.lp3 < pc.a_ne3) {
+        v = a[pc.a_off + (i0 - pc.lp0) * pc.a_s0 + (i1 - pc.lp1) * pc.a_s1 + (i2 - pc.lp2) * pc.a_s2 +
+              (i3 - pc.lp3) * pc.a_s3];
+    }
+    d[pc.d_off + i0 * pc.d_s0 + i1 * pc.d_s1 + i2 * pc.d_s2 + i3 * pc.d_s3] = v;
+}

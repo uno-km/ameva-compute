@@ -1,0 +1,36 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// AMEVA UPSCALE, nearest, f32: element (i0, i1, i2, i3) of the result is element (i0 * a_ne0 / d_ne0, ...) of the
+// source, on each axis the integer form of ggml's index i / ((float)d_ne / a_ne)
+// (ggml_compute_forward_upscale_f32, GGML_SCALE_MODE_NEAREST without flags). The host accepts a node only when the
+// two forms give the same index for every i of every axis, so the result equals the CPU's in every bit; the words
+// are copied without a float conversion. Any strides.
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+
+layout(std430, binding = 0) readonly buffer A { uint a[]; };
+layout(std430, binding = 1) writeonly buffer D { uint d[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint d_ne0, d_ne1, d_ne2, d_ne3;
+    uint a_ne0, a_ne1, a_ne2, a_ne3;
+    uint a_off, a_s0, a_s1, a_s2;
+    uint a_s3, d_off, d_s0, d_s1;
+    uint d_s2, d_s3;
+} pc;
+
+void main() {
+    const uint k = ameva_linear_id();
+    if (k >= pc.d_ne0 * pc.d_ne1 * pc.d_ne2 * pc.d_ne3) return;
+    uint t = k;
+    const uint i0 = t % pc.d_ne0;
+    t /= pc.d_ne0;
+    const uint i1 = t % pc.d_ne1;
+    t /= pc.d_ne1;
+    const uint i2 = t % pc.d_ne2;
+    const uint i3 = t / pc.d_ne2;
+    const uint si = pc.a_off + (i0 * pc.a_ne0 / pc.d_ne0) * pc.a_s0 + (i1 * pc.a_ne1 / pc.d_ne1) * pc.a_s1 +
+                    (i2 * pc.a_ne2 / pc.d_ne2) * pc.a_s2 + (i3 * pc.a_ne3 / pc.d_ne3) * pc.a_s3;
+    d[pc.d_off + i0 * pc.d_s0 + i1 * pc.d_s1 + i2 * pc.d_s2 + i3 * pc.d_s3] = a[si];
+}

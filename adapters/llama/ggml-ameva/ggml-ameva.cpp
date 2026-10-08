@@ -1132,7 +1132,7 @@ bool ameva_qmv_has_type(enum ggml_type type) {
 // MUL_MAT: weights in the repacked layout run on ameva_qmv, all others on ameva_qmm. Both kernels take the same
 // shapes, so a weight that is repacked after supports_op accepted its MUL_MAT (the layout is decided by the first
 // write) is still accepted by graph_compute.
-static const char* mul_mat_reason(const struct ggml_tensor* op) {
+static const char* mul_mat_qmm_reason(const struct ggml_tensor* op) {
     const struct ggml_tensor* src0 = op->src[0];
     const struct ggml_tensor* src1 = op->src[1];
     if (!src0 || !src1) return "missing source";
@@ -1167,6 +1167,33 @@ static const char* mul_mat_reason(const struct ggml_tensor* op) {
     if (!fits_kernel_indexing(src1) || !fits_kernel_indexing(op) || (uint64_t)M * (uint64_t)K > UINT32_MAX / 2 ||
         (uint64_t)M * (uint64_t)N > UINT32_MAX / 2) return "exceeds 32-bit addressing";
     return nullptr;
+}
+
+// MUL_MAT of two f32 tensors in a shape ameva_qmm does not take (K not a multiple of 32, activation rows that do not
+// lie at multiples of 16 bytes, or several matrices: dimensions 2 and 3, src0 repeated over them as ggml_can_mul_mat
+// allows): shaders/ameva_mm.comp, one invocation per result element. The manual attention of sd.cpp's VAE
+// (ggml_ext_attention_ext without flash attention) multiplies by a matrix of K = h * w latent positions.
+static const char* mul_mat_dense_reason(const struct ggml_tensor* op) {
+    const struct ggml_tensor *a = op->src[0], *b = op->src[1];
+    if (!a || !b) return "missing source";
+    if (!is_f32(a) || !is_f32(b) || !is_f32(op)) return "dense MUL_MAT on non-f32";
+    if (a->ne[0] == 0 || a->ne[2] == 0 || a->ne[3] == 0) return "MUL_MAT with an empty source";
+    if (a->ne[0] != b->ne[0] || op->ne[0] != a->ne[1] || op->ne[1] != b->ne[1] || op->ne[2] != b->ne[2] ||
+        op->ne[3] != b->ne[3] || b->ne[2] % a->ne[2] || b->ne[3] % a->ne[3]) return "shape mismatch";
+    if (!rows_contiguous(a) || !rows_contiguous(b) || !rows_contiguous(op)) return "rows not contiguous";
+    if (!fits_binding(a) || !fits_binding(b) || !fits_binding(op)) return "tensor exceeds a buffer binding";
+    if (!fits_kernel_indexing(a) || !fits_kernel_indexing(b) || !fits_kernel_indexing(op)) return "exceeds 32-bit indexing";
+    if ((uint64_t)b->ne[2] * (uint64_t)b->ne[3] > 4096) return "more than 4096 matrices";
+    return nullptr;
+}
+
+// MUL_MAT: the shapes of ameva_qmv / ameva_qmm (mul_mat_qmm_reason) or, for f32 x f32, any shape (ameva_mm).
+static const char* mul_mat_reason(const struct ggml_tensor* op) {
+    const char* why = mul_mat_qmm_reason(op);
+    if (!why) return nullptr;
+    const struct ggml_tensor* src0 = op->src[0];
+    if (!src0 || !is_f32(src0) || ameva_repacked_base(src0)) return why;
+    return mul_mat_dense_reason(op);
 }
 
 // metadata-only ops: no work on any backend
@@ -1435,6 +1462,85 @@ const char* ameva_op_unsupported_reason(const struct ggml_tensor* op) {
         case GGML_OP_GROUP_NORM: {
             AmevaGroupNorm g;
             return ameva_group_norm_geometry(op, &g);
+        }
+        case GGML_OP_UPSCALE: {
+            // Nearest without flags. ggml takes result index i from source index (int64_t)(i / sf) with
+            // sf = (float)d_ne / a_ne; shaders/ameva_upscale.comp computes i * a_ne / d_ne in integers. A node is
+            // accepted when both give the same index for every i of every axis, so the result equals the CPU's:
+            // always so for a whole factor (i < 2^24: the float quotient cannot round up to the next integer),
+            // checked index by index otherwise.
+            const struct ggml_tensor* a = op->src[0];
+            if (((const int32_t*)op->op_params)[0] != (int32_t)GGML_SCALE_MODE_NEAREST)
+                return "upscale mode other than nearest without flags";
+            if (!is_f32(a) || !is_f32(op)) return "upscale on non-f32";
+            if (!fits_binding(a) || !fits_binding(op)) return "tensor exceeds a buffer binding";
+            if (!fits_kernel_indexing(a) || !fits_kernel_indexing(op)) return "exceeds 32-bit indexing";
+            if (ggml_nelements(op) == 0) return nullptr; // nothing is computed
+            for (int i = 0; i < 4; ++i) {
+                const int64_t an = a->ne[i], dn = op->ne[i];
+                if (an == 0) return "upscale of an empty tensor";
+                if (dn > (1 << 24) || (uint64_t)dn * (uint64_t)an > UINT32_MAX) return "upscale axis too long";
+                if (dn % an == 0) continue;
+                if (dn > 65536) return "upscale by a fractional factor to more than 65536 elements";
+                const float sf = (float)dn / an;
+                for (int64_t k = 0; k < dn; ++k) {
+                    if ((int64_t)(k / sf) != k * an / dn) return "upscale factor whose nearest index is not i * src / dst";
+                }
+            }
+            return nullptr;
+        }
+        case GGML_OP_PAD: {
+            // op params: lp0, rp0, lp1, rp1, lp2, rp2, lp3, rp3, circular (ggml_pad_ext, ggml_pad_ext_circular). A
+            // ggml that stores them otherwise fails the shape test.
+            const struct ggml_tensor* a = op->src[0];
+            if (!is_f32(a) || !is_f32(op)) return "pad on non-f32";
+            if (!ggml_is_contiguous(op)) return "pad result not contiguous";
+            const int32_t* prm = (const int32_t*)op->op_params;
+            const bool circular = prm[8] != 0;
+            for (int i = 0; i < 4; ++i) {
+                const int64_t lp = prm[2 * i], rp = prm[2 * i + 1];
+                if (lp < 0 || rp < 0 || op->ne[i] != a->ne[i] + lp + rp) return "pad shape does not match its padding";
+                if (a->ne[i] == 0) return "pad of an empty tensor";
+                // ggml_wrap_around is (i - lp + size) % size: negative for lp > size
+                if (circular && lp > a->ne[i]) return "circular padding wider than the source";
+                if (op->ne[i] > INT32_MAX) return "exceeds 32-bit indexing";
+            }
+            if (!fits_binding(a) || !fits_binding(op)) return "tensor exceeds a buffer binding";
+            if (!fits_kernel_indexing(a) || !fits_kernel_indexing(op)) return "exceeds 32-bit indexing";
+            return nullptr;
+        }
+        case GGML_OP_CONCAT: {
+            const struct ggml_tensor *a = op->src[0], *b = op->src[1];
+            const int32_t dim = ((const int32_t*)op->op_params)[0];
+            if (!a || !b || dim < 0 || dim > 3) return "concat dimension";
+            if (!((is_f32(a) && is_f32(b) && is_f32(op)) || (is_f16(a) && is_f16(b) && is_f16(op))))
+                return "concat on types other than f32 or f16";
+            for (int i = 0; i < 4; ++i) {
+                if (i == dim ? op->ne[i] != a->ne[i] + b->ne[i] : (a->ne[i] != op->ne[i] || b->ne[i] != op->ne[i]))
+                    return "concat shape";
+            }
+            if (!fits_binding(a) || !fits_binding(b) || !fits_binding(op)) return "tensor exceeds a buffer binding";
+            if (!fits_kernel_indexing(a) || !fits_kernel_indexing(b) || !fits_kernel_indexing(op)) return "exceeds 32-bit indexing";
+            return nullptr;
+        }
+        case GGML_OP_SOFT_MAX: {
+            // op params: scale, max_bias (ggml_soft_max_ext); src1 = mask, src2 = attention sinks
+            const struct ggml_tensor *a = op->src[0], *m = op->src[1];
+            if (op->src[2]) return "soft_max with attention sinks";
+            if (!is_f32(a) || !is_f32(op) || !ggml_are_same_shape(a, op)) return "soft_max on non-f32";
+            float max_bias;
+            memcpy(&max_bias, (const char*)op->op_params + sizeof(float), sizeof(float));
+            if (max_bias != 0.0f) return "soft_max with an ALiBi bias";
+            if (m) {
+                if (!is_f32(m) && !is_f16(m)) return "soft_max mask not f32 or f16";
+                if (m->ne[0] != a->ne[0] || m->ne[1] < a->ne[1] || m->ne[2] == 0 || m->ne[3] == 0 ||
+                    a->ne[2] % m->ne[2] || a->ne[3] % m->ne[3]) return "soft_max mask shape";
+                if (!rows_contiguous(m)) return "rows not contiguous";
+            }
+            if (!rows_contiguous(a) || !rows_contiguous(op)) return "rows not contiguous";
+            if (!fits_binding(a) || !fits_binding(op) || (m && !fits_binding(m))) return "tensor exceeds a buffer binding";
+            if (!fits_kernel_indexing(a) || !fits_kernel_indexing(op) || !fits_kernel_indexing(m)) return "exceeds 32-bit indexing";
+            return nullptr;
         }
         default:
             return "op has no ameva kernel";
@@ -2746,6 +2852,52 @@ static void ameva_qmv_layout_report(void) {
 
 // MUL_MAT. Weights are multiplied in slices of rows that fit one binding (per region for repacked weights) and at most
 // 65535 workgroups; activation rows in chunks (see below). Repacked weights bind their Q, H and S regions.
+// MUL_MAT of two f32 tensors outside the shapes of ameva_qmm (mul_mat_dense_reason): shaders/ameva_mm.comp, one
+// dispatch per matrix of dimensions 2 and 3 and per chunk of result rows of at most kDispatchMac multiply-accumulates.
+static const char* enc_mul_mat_dense(AmevaRecorder& rec, const struct ggml_tensor* node) {
+    const struct ggml_tensor *a = node->src[0], *b = node->src[1];
+    AcKernel* kernel = ameva_op_kernel(AMEVA_K_MM);
+    if (!kernel) return "no ameva_mm kernel";
+    AmevaBind ba, bb, bd;
+    const char* e = ameva_bind(a, 4, &ba);
+    if (!e) e = ameva_bind(b, 4, &bb);
+    if (!e) e = ameva_bind(node, 4, &bd);
+    if (e) return e;
+    const uint32_t K = (uint32_t)a->ne[0], N = (uint32_t)a->ne[1], M = (uint32_t)b->ne[1];
+    const uint32_t sa = st(a, 1), sb = st(b, 1), sd = st(node, 1);
+    const uint32_t mc_max =
+        (uint32_t)std::max<double>(1.0, std::min<double>((double)M, kDispatchMac / ((double)N * (double)K)));
+    // the rows a dispatch writes, for the hazard tracking: exact when the result's rows lie at one stride, else the
+    // whole tensor (a barrier between the dispatches)
+    const bool linear = rows_linear(node);
+    // ggml repeats each matrix of src0 over r2 x r3 consecutive matrices of src1 (ggml_compute_forward_mul_mat)
+    const int64_t r2 = b->ne[2] / a->ne[2], r3 = b->ne[3] / a->ne[3];
+    const AcBufferBinding bind[3] = { ba.b, bb.b, bd.b };
+    const AmevaBind reads[2] = { ba, bb };
+    for (int64_t i3 = 0; i3 < b->ne[3]; ++i3) {
+        for (int64_t i2 = 0; i2 < b->ne[2]; ++i2) {
+            const uint32_t ao = ba.elem + (uint32_t)(i2 / r2) * st(a, 2) + (uint32_t)(i3 / r3) * st(a, 3);
+            const uint32_t bo = bb.elem + (uint32_t)i2 * st(b, 2) + (uint32_t)i3 * st(b, 3);
+            const uint32_t d0 = bd.elem + (uint32_t)i2 * st(node, 2) + (uint32_t)i3 * st(node, 3);
+            for (uint32_t m0 = 0; m0 < M; m0 += mc_max) {
+                const uint32_t mc = std::min(mc_max, M - m0);
+                AmevaBind w = bd;
+                if (linear) {
+                    const uint64_t row = ((uint64_t)i3 * (uint64_t)node->ne[2] + (uint64_t)i2) * M + m0;
+                    w.lo = bd.lo + row * sd * 4;
+                    w.hi = w.lo + ((uint64_t)(mc - 1) * sd + N) * 4;
+                }
+                const uint32_t pc[9] = { mc, K, N, ao, sa, bo + m0 * sb, sb, d0 + m0 * sd, sd };
+                e = ameva_record(rec, kernel, reads, 2, &w, 1, bind, 3, pc, sizeof(pc),
+                                 ameva_grid_1d((uint64_t)N * mc, 64), (double)mc * N * K);
+                if (e) return e;
+            }
+        }
+    }
+    rec.mul_mat_nodes++;
+    return nullptr;
+}
+
 static const char* enc_mul_mat(AmevaRecorder& rec, const struct ggml_tensor* node,
                                const AmevaEpilogue* ep = nullptr) {
     {
@@ -2755,6 +2907,10 @@ static const char* enc_mul_mat(AmevaRecorder& rec, const struct ggml_tensor* nod
             if (ep) return "epilogue on a prompt-sized MUL_MAT";
             return enc_mul_mat_mmq(rec, node, chunk_rows);
         }
+    }
+    if (mul_mat_qmm_reason(node)) { // the contract accepted it through mul_mat_dense_reason
+        if (ep) return "epilogue on a dense MUL_MAT";
+        return enc_mul_mat_dense(rec, node);
     }
     const struct ggml_tensor* src0 = node->src[0];
     const struct ggml_tensor* src1 = node->src[1];
@@ -3766,6 +3922,103 @@ static const char* enc_group_norm(AmevaRecorder& rec, const struct ggml_tensor* 
     return nullptr;
 }
 
+// UPSCALE (nearest): shaders/ameva_upscale.comp, one invocation per element of the result.
+static const char* enc_upscale(AmevaRecorder& rec, const struct ggml_tensor* node) {
+    const struct ggml_tensor* a = node->src[0];
+    AcKernel* kernel = ameva_op_kernel(AMEVA_K_UPSCALE);
+    if (!kernel) return "no ameva_upscale kernel";
+    AmevaBind ba, bd;
+    const char* e = ameva_bind(a, 4, &ba);
+    if (!e) e = ameva_bind(node, 4, &bd);
+    if (e) return e;
+    const uint32_t pc[18] = { (uint32_t)node->ne[0], (uint32_t)node->ne[1], (uint32_t)node->ne[2], (uint32_t)node->ne[3],
+                              (uint32_t)a->ne[0], (uint32_t)a->ne[1], (uint32_t)a->ne[2], (uint32_t)a->ne[3],
+                              ba.elem, st(a, 0), st(a, 1), st(a, 2), st(a, 3),
+                              bd.elem, st(node, 0), st(node, 1), st(node, 2), st(node, 3) };
+    const AcBufferBinding bind[2] = { ba.b, bd.b };
+    return ameva_record(rec, kernel, &ba, 1, &bd, 1, bind, 2, pc, sizeof(pc), ameva_grid_1d(ggml_nelements(node), 256),
+                        (double)ggml_nelements(node));
+}
+
+// PAD (zeros or circular): shaders/ameva_pad.comp, one invocation per element of the result.
+static const char* enc_pad(AmevaRecorder& rec, const struct ggml_tensor* node) {
+    const struct ggml_tensor* a = node->src[0];
+    AcKernel* kernel = ameva_op_kernel(AMEVA_K_PAD);
+    if (!kernel) return "no ameva_pad kernel";
+    const int32_t* prm = (const int32_t*)node->op_params;
+    AmevaBind ba, bd;
+    const char* e = ameva_bind(a, 4, &ba);
+    if (!e) e = ameva_bind(node, 4, &bd);
+    if (e) return e;
+    const uint32_t pc[23] = { (uint32_t)node->ne[0], (uint32_t)node->ne[1], (uint32_t)node->ne[2], (uint32_t)node->ne[3],
+                              (uint32_t)a->ne[0], (uint32_t)a->ne[1], (uint32_t)a->ne[2], (uint32_t)a->ne[3],
+                              (uint32_t)prm[0], (uint32_t)prm[2], (uint32_t)prm[4], (uint32_t)prm[6],
+                              ba.elem, st(a, 0), st(a, 1), st(a, 2), st(a, 3),
+                              bd.elem, st(node, 0), st(node, 1), st(node, 2), st(node, 3), prm[8] != 0 ? 1u : 0u };
+    const AcBufferBinding bind[2] = { ba.b, bd.b };
+    return ameva_record(rec, kernel, &ba, 1, &bd, 1, bind, 2, pc, sizeof(pc), ameva_grid_1d(ggml_nelements(node), 256),
+                        (double)ggml_nelements(node));
+}
+
+// CONCAT of f32 or f16 tensors: each source is copied by ameva_cpy into its part of the result, which is addressed
+// as a view of the result with the source's shape (ggml_compute_forward_concat). Two dispatches.
+static const char* enc_concat(AmevaRecorder& rec, const struct ggml_tensor* node) {
+    AcKernel* kernel = ameva_op_kernel(AMEVA_K_CPY);
+    if (!kernel) return "no ameva_cpy kernel";
+    const int32_t dim = ((const int32_t*)node->op_params)[0];
+    const bool f16 = node->type == GGML_TYPE_F16;
+    const uint32_t esize = f16 ? 2 : 4;
+    AmevaBind bd;
+    const char* e = ameva_bind(node, esize, &bd);
+    if (e) return e;
+    uint32_t start = 0; // elements of the result along dim that precede the source
+    for (int s = 0; s < 2; ++s) {
+        const struct ggml_tensor* a = node->src[s];
+        if (ggml_nelements(a) > 0) {
+            AmevaBind ba;
+            e = ameva_bind(a, esize, &ba);
+            if (e) return e;
+            const uint32_t pc[19] = { (uint32_t)a->ne[0], (uint32_t)a->ne[1], (uint32_t)a->ne[2], (uint32_t)a->ne[3],
+                                      ba.elem, st(a, 0), st(a, 1), st(a, 2), st(a, 3),
+                                      (uint32_t)a->ne[0], (uint32_t)a->ne[1], (uint32_t)a->ne[2],
+                                      bd.elem + start * st(node, dim), st(node, 0), st(node, 1), st(node, 2),
+                                      st(node, 3), f16 ? 1u : 0u, f16 ? 1u : 0u };
+            const AcBufferBinding bind[2] = { ba.b, bd.b };
+            e = ameva_record(rec, kernel, &ba, 1, &bd, 1, bind, 2, pc, sizeof(pc), ameva_grid_1d(ggml_nelements(a), 256),
+                             (double)ggml_nelements(a));
+            if (e) return e;
+        }
+        start += (uint32_t)a->ne[dim];
+    }
+    return nullptr;
+}
+
+// SOFT_MAX over rows of ne0, with the scale and the optional mask of ggml_soft_max_ext: shaders/ameva_soft_max.comp,
+// one workgroup per row. The result may lie in place of the source (ggml_soft_max_inplace).
+static const char* enc_soft_max(AmevaRecorder& rec, const struct ggml_tensor* node) {
+    const struct ggml_tensor *a = node->src[0], *m = node->src[1];
+    AcKernel* kernel = ameva_op_kernel(AMEVA_K_SOFT_MAX);
+    if (!kernel) return "no ameva_soft_max kernel";
+    const bool mf16 = m && m->type == GGML_TYPE_F16;
+    AmevaBind ba, bd, bm = {};
+    const char* e = ameva_bind(a, 4, &ba);
+    if (!e) e = ameva_bind(node, 4, &bd);
+    if (!e && m) e = ameva_bind(m, mf16 ? 2 : 4, &bm);
+    if (e) return e;
+    const uint64_t nrows = (uint64_t)node->ne[1] * node->ne[2] * node->ne[3];
+    const uint32_t pc[20] = { (uint32_t)node->ne[0], (uint32_t)node->ne[1], (uint32_t)node->ne[2], (uint32_t)nrows,
+                              ba.elem, st(a, 1), st(a, 2), st(a, 3),
+                              bd.elem, st(node, 1), st(node, 2), st(node, 3),
+                              fbits(op_param_f32(node, 0)),
+                              m ? (mf16 ? 2u : 1u) : 0u, m ? bm.elem : 0u, m ? st(m, 1) : 0u,
+                              m ? st(m, 2) : 0u, m ? st(m, 3) : 0u, m ? (uint32_t)m->ne[2] : 1u,
+                              m ? (uint32_t)m->ne[3] : 1u };
+    const AcBufferBinding bind[3] = { ba.b, bd.b, m ? bm.b : ba.b };
+    const AmevaBind reads[2] = { ba, bm };
+    return ameva_record(rec, kernel, reads, m ? 2 : 1, &bd, 1, bind, 3, pc, sizeof(pc), ameva_grid_groups(nrows),
+                        3.0 * (double)ggml_nelements(node));
+}
+
 static const char* ameva_encode(AmevaRecorder& rec, const struct ggml_tensor* node) {
     switch (node->op) {
         case GGML_OP_MUL_MAT: return enc_mul_mat(rec, node);
@@ -3786,6 +4039,10 @@ static const char* ameva_encode(AmevaRecorder& rec, const struct ggml_tensor* no
         case GGML_OP_FLASH_ATTN_EXT: return enc_flash_attn(rec, node);
         case GGML_OP_CONV_2D: return enc_conv_2d(rec, node);
         case GGML_OP_GROUP_NORM: return enc_group_norm(rec, node);
+        case GGML_OP_UPSCALE: return enc_upscale(rec, node);
+        case GGML_OP_PAD: return enc_pad(rec, node);
+        case GGML_OP_CONCAT: return enc_concat(rec, node);
+        case GGML_OP_SOFT_MAX: return enc_soft_max(rec, node);
         default: return "op has no ameva encoder";
     }
 }
@@ -3936,7 +4193,7 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
                 const bool rp = ameva_repacked_base(node->src[0]) != nullptr;
                 uint32_t mmq_rows = 0;
                 uint64_t mmq_bytes = 0;
-                const char* path = !rp ? "qmm"
+                const char* path = !rp ? (mul_mat_qmm_reason(node) ? "mm" : "qmm")
                                        : ameva_mmq_plan(node, &mmq_rows, &mmq_bytes)
                                              ? (ameva_mmqb_find(node->src[0]->type) >= 0 ? "mmqb" : "mmq")
                                              : (node->src[1]->ne[1] >= (int64_t)ameva_qgemm_min_rows() ? "qgemm" : "qmv");

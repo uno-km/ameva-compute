@@ -1,0 +1,43 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// AMEVA MM: ggml MUL_MAT of two f32 matrices in any shape, dst[m][n] = sum over k of a[n][k] * b[m][k]
+// (a: N rows of K, b: M rows of K, dst: M rows of N). The engine uses it where ameva_qmm does not apply: K not a
+// multiple of 32, activation rows that do not start at multiples of 16 bytes, or tensors of several matrices (one
+// dispatch per matrix, the offsets pointing at it). One invocation per result element, scalar loads, four partial
+// sums; the sum order differs from the CPU's, so the result differs from it by rounding.
+//   push constants: M, K, N, then offset and row stride (in floats) of a, of b and of dst
+//   grid: N * M invocations in workgroups of 64
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+
+layout(std430, binding = 0) readonly buffer A { uint a[]; };
+layout(std430, binding = 1) readonly buffer B { uint b[]; };
+layout(std430, binding = 2) writeonly buffer D { uint d[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint M, K, N;
+    uint a_off, a_s1;
+    uint b_off, b_s1;
+    uint d_off, d_s1;
+} pc;
+
+void main() {
+    const uint id = ameva_linear_id();
+    if (id >= pc.N * pc.M) return;
+    const uint n = id % pc.N;
+    const uint m = id / pc.N;
+    const uint ab = pc.a_off + n * pc.a_s1;
+    const uint bb = pc.b_off + m * pc.b_s1;
+    vec4 acc = vec4(0.0);
+    uint k = 0u;
+    for (; k + 4u <= pc.K; k += 4u) {
+        acc += vec4(uintBitsToFloat(a[ab + k]), uintBitsToFloat(a[ab + k + 1u]), uintBitsToFloat(a[ab + k + 2u]),
+                    uintBitsToFloat(a[ab + k + 3u])) *
+               vec4(uintBitsToFloat(b[bb + k]), uintBitsToFloat(b[bb + k + 1u]), uintBitsToFloat(b[bb + k + 2u]),
+                    uintBitsToFloat(b[bb + k + 3u]));
+    }
+    float s = (acc.x + acc.y) + (acc.z + acc.w);
+    for (; k < pc.K; ++k) s += uintBitsToFloat(a[ab + k]) * uintBitsToFloat(b[bb + k]);
+    d[pc.d_off + m * pc.d_s1 + n] = floatBitsToUint(s);
+}
