@@ -1215,7 +1215,18 @@ static const char* mul_mat_qmm_reason(const struct ggml_tensor* op) {
     // in the AMEVA buffer by set_tensor. All kernels address weight rows via ggml_row_size (the contiguous
     // stride), so accepting element-contiguous (rows_contiguous) tensors here is correct.
     if (!rows_contiguous(src0)) return "weights element-stride != 1";
-    if (src0->ne[2] != 1 || src0->ne[3] != 1 || src1->ne[2] != 1 || src1->ne[3] != 1) return "batched (ne2/ne3 > 1)";
+    // Batched qmm (whisper conv: weight [K, N, ne2] x im2col [K, M, ne2] for each of ne2 filter positions).
+    // src0 may broadcast over src1's batches (ggml_can_mul_mat invariant: src1->ne[i] % src0->ne[i] == 0).
+    const int64_t b2 = src1->ne[2], b3 = src1->ne[3];
+    if (src0->ne[2] > b2 || src0->ne[3] > b3) return "src0 batch larger than src1";
+    if (b2 % src0->ne[2] != 0 || b3 % src0->ne[3] != 0) return "batch not broadcast-compatible";
+    if (b2 * b3 > 4096) return "more than 4096 batch matrices";
+    // Batched non-unit: require full tensors fit in one binding so enc_mul_mat_qmm can use one binding.
+    if (b2 * b3 > 1) {
+        const size_t span = ameva_max_binding_span();
+        if (!span || ggml_nbytes(src0) > span || ggml_nbytes(src1) > span || ggml_nbytes(op) > span)
+            return "batched qmm tensor exceeds one buffer binding";
+    }
     if (src1->ne[0] != K || op->ne[0] != N || op->ne[1] != M) return "shape mismatch";
     if (!rows_contiguous(src1) || !rows_contiguous(op)) return "activation or output rows not contiguous";
     if (src1->nb[1] % 16 != 0) return "activation row stride not a multiple of 16 bytes";
@@ -3304,10 +3315,21 @@ static const char* enc_mul_mat(AmevaRecorder& rec, const struct ggml_tensor* nod
     // activation/output rows per dispatch: at most kDispatchMac multiply-accumulates and one binding for the rows of
     // src1 and of dst it touches; whole 8-row tiles when the 8-column kernel runs
     const uint64_t rows_fit = std::max<uint64_t>(1, std::min<uint64_t>(span / ((uint64_t)s1 * 4), span / ((uint64_t)sd * 4)));
+    // Batched qmm: src0 may broadcast over src1's ne[2]/ne[3] batches (ggml_can_mul_mat; e.g. whisper conv with
+    // weight [K, N, filter_size] x im2col [K, M, filter_size]). src0 data is stored contiguously (set_tensor strips
+    // GGUF inter-row and inter-batch padding), so its batch stride is N * row_bytes regardless of nb[2].
+    const int64_t r2 = src1->ne[2] / src0->ne[2], r3 = src1->ne[3] / src0->ne[3];
+    for (int64_t i3 = 0; i3 < src1->ne[3]; i3++) {
+    for (int64_t i2 = 0; i2 < src1->ne[2]; i2++) {
+    // src0 uses contiguous batch stride (N * row_bytes per batch regardless of nb[2])
+    const uint64_t s0_batch_off = ((i2 / r2) + (i3 / r3) * (uint64_t)src0->ne[2]) * (uint64_t)N * row_bytes;
+    const uint64_t s1_batch_off = (uint64_t)i2 * src1->nb[2] + (uint64_t)i3 * src1->nb[3];
+    const uint64_t d_batch_off  = (uint64_t)i2 * node->nb[2]  + (uint64_t)i3 * node->nb[3];
     for (uint32_t n0 = 0; n0 < N; n0 += rows_per_slice) {
         const uint32_t nc = std::min(rows_per_slice, N - n0);
         AmevaBind w[3]; // ggml layout: w[0] = the rows; repacked: Q, H, S of the rows
         if (base) {
+            if (r2 * r3 > 1 || src1->ne[2] > 1 || src1->ne[3] > 1) return "batched qmm with repacked weights";
             const uint64_t row = first_row + n0;
             // vector elements of the Q and H bindings (shaders/ameva_qmv.comp QVEC, HVEC); S in bytes, read at even
             // addresses
@@ -3319,7 +3341,7 @@ static const char* enc_mul_mat(AmevaRecorder& rec, const struct ggml_tensor* nod
             }
         } else {
             // weights are addressed in bytes (every ggml block size is even, the kernel reads at even addresses)
-            e = ameva_bind_span(src0, (uint64_t)n0 * row_bytes, (uint64_t)nc * row_bytes, 2, &w[0]);
+            e = ameva_bind_span(src0, s0_batch_off + (uint64_t)n0 * row_bytes, (uint64_t)nc * row_bytes, 2, &w[0]);
         }
         if (e) return e;
         uint64_t mc_max = std::min<uint64_t>(rows_fit, (uint64_t)(kDispatchMac / ((double)nc * (double)K)));
@@ -3337,9 +3359,9 @@ static const char* enc_mul_mat(AmevaRecorder& rec, const struct ggml_tensor* nod
                 b1.hi = (uint64_t)(m0 + mc) * K * 4;
                 e = nullptr;
             } else {
-                e = ameva_bind_span(src1, (uint64_t)m0 * s1 * 4, ((uint64_t)(mc - 1) * s1 + K) * 4, 4, &b1);
+                e = ameva_bind_span(src1, s1_batch_off + (uint64_t)m0 * s1 * 4, ((uint64_t)(mc - 1) * s1 + K) * 4, 4, &b1);
             }
-            if (!e) e = ameva_bind_span(node, ((uint64_t)m0 * sd + n0) * 4, ((uint64_t)(mc - 1) * sd + nc) * 4, 4, &bd);
+            if (!e) e = ameva_bind_span(node, d_batch_off + ((uint64_t)m0 * sd + n0) * 4, ((uint64_t)(mc - 1) * sd + nc) * 4, 4, &bd);
             if (e) return e;
             if (b1.elem % 4 != 0) return "activation offset not a multiple of 16 bytes";
             const AcDim3 grid = { (nc + rows_per_wg - 1) / rows_per_wg, (mc + cols_per_wg - 1) / cols_per_wg, 1 };
@@ -3369,6 +3391,7 @@ static const char* enc_mul_mat(AmevaRecorder& rec, const struct ggml_tensor* nod
             if (e) return e;
         }
     }
+    }} // end i2 / i3 batch loops
     rec.mul_mat_nodes++;
     if (base) rec.qmv_nodes++;
     return nullptr;
