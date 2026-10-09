@@ -143,6 +143,14 @@ Record only:
 - backend
 - result
 - relevant timing
+
+### STRICT ANTI-HANG REMOTE EXECUTION PROTOCOL (엄격 원격 대기 금지 규칙)
+NEVER use blocking sleep polling loops on remote devices (e.g. `until ! pgrep ...; do sleep 10; done`).
+Such loops hang indefinitely when child shells linger or processes fail-fast in 0.1s.
+Always enforce the 3-step robust execution pattern:
+1. Launch with timeout & completion sentinel: `nohup bash -c 'timeout 180s COMMAND > run.log 2>&1; echo $? > run.done' > /dev/null 2>&1 &`
+2. Immediate 2-second crash detection: `sleep 2; kill -0 $PID 2>/dev/null || cat run.log`
+3. Non-blocking completion check: `test -f run.done && cat run.done || echo STILL_RUNNING`
 - relevant numerical error
 - failure reason
 
