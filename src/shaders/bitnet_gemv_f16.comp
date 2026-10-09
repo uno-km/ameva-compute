@@ -6,15 +6,36 @@
 // ============================================================================
 // AMUDA Kernel: f16-weight GEMV on f32 activations, the BitNet LM head (adapters/bitnet, ac_bitnet_engine.cpp)
 // ============================================================================
-// y[out_offset + r] = sum_c f16(W[r][c]) * x[c] for the rows of one weight slice (rows of n_in f16, n_in even).
-// The f16 values go through unpackHalf2x16. A workgroup computes 4 rows; the 32 lanes of a row each take one word
-// (two weights) per step.
+// y[out_offset + r] = sum_c f16(W[r][c]) * x[c] for the rows of one weight slice (rows of n_in f16, n_in a multiple of
+// 8). The f16 values go through unpackHalf2x16. A workgroup computes 4 rows; the 32 lanes of a row each load WPL words
+// (2 WPL weights) per step (-DWPL=1, 2 or 4: Adreno 650 under Turnip reads 4-byte loads 1.8 times faster than 16-byte
+// ones, Adreno 830 and Mali-G78 the 16-byte ones slightly faster, 2026-10-09).
 // ============================================================================
+
+#ifndef WPL
+#define WPL 1
+#endif
 
 layout(local_size_x = 32, local_size_y = 4, local_size_z = 1) in;
 
-layout(std430, binding = 0) readonly buffer WeightBuffer { uint wts[]; };
-layout(std430, binding = 1) readonly buffer XBuffer { float x[]; };
+layout(std430, binding = 0) readonly buffer WeightBuffer {
+#if WPL == 4
+    uvec4 wts[];
+#elif WPL == 2
+    uvec2 wts[];
+#else
+    uint wts[];
+#endif
+};
+layout(std430, binding = 1) readonly buffer XBuffer {
+#if WPL == 4
+    vec4 x[];  // two per load
+#elif WPL == 2
+    vec4 x[];  // one per load
+#else
+    vec2 x[];  // one per load
+#endif
+};
 layout(std430, binding = 2) writeonly buffer OutBuffer { float y[]; };
 
 layout(push_constant) uniform PushConstants {
@@ -31,11 +52,19 @@ void main() {
     uint row = gl_WorkGroupID.x * 4u + lrow;
     float acc = 0.0;
     if (row < n_rows) {
-        uint words = n_in / 2u;
-        uint base = row * words;
-        for (uint w = lane; w < words; w += 32u) {
-            vec2 f = unpackHalf2x16(wts[base + w]);
-            acc += f.x * x[2u * w] + f.y * x[2u * w + 1u];
+        uint units = n_in / (2u * WPL);
+        uint base = row * units;
+        for (uint w = lane; w < units; w += 32u) {
+#if WPL == 4
+            uvec4 h = wts[base + w];
+            acc += dot(vec4(unpackHalf2x16(h.x), unpackHalf2x16(h.y)), x[2u * w]) +
+                   dot(vec4(unpackHalf2x16(h.z), unpackHalf2x16(h.w)), x[2u * w + 1u]);
+#elif WPL == 2
+            uvec2 h = wts[base + w];
+            acc += dot(vec4(unpackHalf2x16(h.x), unpackHalf2x16(h.y)), x[w]);
+#else
+            acc += dot(unpackHalf2x16(wts[base + w]), x[w]);
+#endif
         }
     }
     red[lrow][lane] = acc;

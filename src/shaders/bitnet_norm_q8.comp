@@ -9,7 +9,8 @@
 // h = a (mode 0), relu(a)^2 * b (mode 1, BitNet b1.58 FFN), silu(a) * b (mode 2, Falcon-E / Falcon3 FFN)
 // y = rms_norm(h) * w when do_norm, h otherwise (rms_norm of the CPU path: h * (1 / sqrt(mean(h^2) + eps)) * w)
 // q = int8 absmax quantization of y (quantize_activation_int8 of the CPU path: scale 127 / max(|y|, 1e-7), rounding
-//     half away from zero, clamp to +-127), four per word; act[0] = 1 / scale.
+//     half away from zero, clamp to +-127), four per word; act[0] = 1 / scale, act[1] = sum of q; qeo the
+//     even / odd split of q + 128 (bitnet_gemv_i2_s -DEMU_DOT).
 // One workgroup. Every invocation owns the words t, t + 256, ... (four elements each) in all three passes, so no
 // invocation reads an element another one wrote. dim is a multiple of 4.
 // ============================================================================
@@ -21,7 +22,11 @@ layout(std430, binding = 1) readonly buffer BBuffer { float b[]; };   // FFN up 
 layout(std430, binding = 2) readonly buffer WBuffer { float w[]; };   // norm weight (do_norm)
 layout(std430, binding = 3) buffer YBuffer { float y[]; };            // the f32 activations (also read by the LM head)
 layout(std430, binding = 4) writeonly buffer QBuffer { uint q[]; };   // int8 activations, four per word
-layout(std430, binding = 5) writeonly buffer SBuffer { uint act[]; }; // act[0]: dequantization factor (float bits)
+layout(std430, binding = 5) writeonly buffer SBuffer { uint act[]; }; // act[0] dequantization factor (float bits),
+                                                                    // act[1] sum of the int8 values (int bits)
+layout(std430, binding = 6) writeonly buffer EOBuffer { uvec2 qeo[]; }; // per word: ((q0+128) << 16 | (q2+128),
+                                                                       //  (q1+128) << 16 | (q3+128)), for the
+                                                                       // emulated dot product of bitnet_gemv_i2_s
 
 layout(push_constant) uniform PushConstants {
     uint dim;
@@ -31,6 +36,7 @@ layout(push_constant) uniform PushConstants {
 };
 
 shared float red[256];
+shared int redi[256];
 
 float activation(uint i) {
     if (mode == 0u) return a[i];
@@ -87,17 +93,31 @@ void main() {
     }
     float qs = 127.0 / max(red[0], 1e-7);
 
-    // pass 3: int8 quantization
+    // pass 3: int8 quantization, the sum of the int8 values, and their even / odd split with offset 128
+    int qsum = 0;
     for (uint wi = t; wi < words; wi += 256u) {
         uint packed = 0u;
+        uint u[4];
         for (uint k = 0u; k < 4u; ++k) {
             precise float v = y[wi * 4u + k] * qs;
             float r = trunc(v);
             if (abs(v - r) >= 0.5) r += sign(v);
             int iv = clamp(int(r), -127, 127);
             packed |= (uint(iv) & 0xFFu) << (8u * k);
+            qsum += iv;
+            u[k] = uint(iv + 128);
         }
         q[wi] = packed;
+        qeo[wi] = uvec2((u[0] << 16u) | u[2], (u[1] << 16u) | u[3]);
     }
-    if (t == 0u) act[0] = floatBitsToUint(1.0 / qs);
+    redi[t] = qsum;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (t < s) redi[t] += redi[t + s];
+        barrier();
+    }
+    if (t == 0u) {
+        act[0] = floatBitsToUint(1.0 / qs);
+        act[1] = uint(redi[0]);
+    }
 }

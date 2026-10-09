@@ -55,6 +55,41 @@ void AcBitNetEngine::Initialize() {
     max_range_ = lim.max_storage_buffer_range;
     max_groups_x_ = lim.max_compute_workgroup_count[0];
     if (max_range_ == 0) throw AcBitNetError("device reports maxStorageBufferRange 0", (int)AC_ERR_INVALID_ARGUMENT);
+    // AC_BITNET_GEMV: auto (default) takes the integer dot product where the device enabled it; dot requires it; emu
+    // takes the emulated form (bitnet_gemv_i2_s.comp -DEMU_DOT). Both give the same integers.
+    {
+        const char* e = getenv("AC_BITNET_GEMV");
+        const std::string mode = (e && *e) ? e : "auto";
+        if (mode != "auto" && mode != "dot" && mode != "emu") {
+            throw AcBitNetError("AC_BITNET_GEMV must be auto, dot or emu, got " + mode, (int)AC_ERR_INVALID_ARGUMENT);
+        }
+        if (mode == "dot" && !lim.integer_dot_product) {
+            throw AcBitNetError("AC_BITNET_GEMV=dot on a device without VK_KHR_shader_integer_dot_product",
+                                (int)AC_ERR_FEATURE_NOT_SUPPORTED);
+        }
+        use_dot_ = mode == "dot" || (mode == "auto" && lim.integer_dot_product);
+        // AC_BITNET_GEMV_SHAPE: the work split of the GEMV (lanes per row x words per load, kAcBitnetGemvShapes)
+        const char* sh = getenv("AC_BITNET_GEMV_SHAPE");
+        const std::string shape = (sh && *sh) ? sh : "l32w1";
+        gemv_shape_ = AC_BITNET_GEMV_SHAPES;
+        for (uint32_t i = 0; i < AC_BITNET_GEMV_SHAPES; ++i) {
+            if (shape == kAcBitnetGemvShapes[i]) gemv_shape_ = i;
+        }
+        if (gemv_shape_ == AC_BITNET_GEMV_SHAPES) {
+            throw AcBitNetError("AC_BITNET_GEMV_SHAPE " + shape + " is not a built GEMV shape", (int)AC_ERR_INVALID_ARGUMENT);
+        }
+        // AC_BITNET_LMHEAD_SHAPE: words per load of the f16 LM head (w1, w2, w4)
+        const char* lh = getenv("AC_BITNET_LMHEAD_SHAPE");
+        const std::string lshape = (lh && *lh) ? lh : "w1";
+        if (lshape == "w1") lmhead_kernel_ = AC_BITNET_K_GEMV_F16_W1;
+        else if (lshape == "w2") lmhead_kernel_ = AC_BITNET_K_GEMV_F16_W2;
+        else if (lshape == "w4") lmhead_kernel_ = AC_BITNET_K_GEMV_F16_W4;
+        else throw AcBitNetError("AC_BITNET_LMHEAD_SHAPE must be w1, w2 or w4, got " + lshape, (int)AC_ERR_INVALID_ARGUMENT);
+        fprintf(stderr, "[ac_bitnet] %s: i2_s GEMV through %s (AC_BITNET_GEMV=%s), work split %s, LM head %s\n",
+                device_name_.c_str(),
+                use_dot_ ? "the integer dot product (VK_KHR_shader_integer_dot_product)" : "the emulated dot product",
+                mode.c_str(), shape.c_str(), lshape.c_str());
+    }
     if (const char* e = getenv("AC_BITNET_PROFILE")) {
         if (strcmp(e, "1") == 0) profile_ = true;
         else if (*e && strcmp(e, "0") != 0) throw AcBitNetError(std::string("AC_BITNET_PROFILE must be 0 or 1, got ") + e, (int)AC_ERR_INVALID_ARGUMENT);
@@ -69,6 +104,8 @@ void AcBitNetEngine::Initialize() {
     kernels_.assign(AC_BITNET_K_COUNT, nullptr);
     for (uint32_t i = 0; i < AC_BITNET_K_COUNT; ++i) {
         const AcBitnetKernel& k = kAcBitnetKernels[i];
+        if (i < AC_BITNET_K_NORM_Q8 && i != GemvKernel(false) && i != GemvKernel(true)) continue; // not dispatched
+        if (i >= AC_BITNET_K_GEMV_F16_W1 && i <= AC_BITNET_K_GEMV_F16_W4 && i != lmhead_kernel_) continue;
         AcKernelRuntimeMetadata meta = { k.name, "main", k.bindings, kBindings, k.push_constant_bytes,
                                          { k.local_size[0], k.local_size[1], k.local_size[2] }, 0, k.spirv_sha256, 0,
                                          nullptr };
@@ -141,6 +178,7 @@ void AcBitNetEngine::Configure(const BitNetGpuConfig& cfg) {
     x_ = NewBuffer(4ull * cfg.n_embd, "x");
     y_ = NewBuffer(4ull * vmax, "y");
     q8_ = NewBuffer(vmax, "q8");
+    qeo_ = NewBuffer(2ull * vmax, "q8 even / odd");
     act_ = NewBuffer(16, "act");
     q_ = NewBuffer(4ull * q_dim, "q");
     k_ = NewBuffer(4ull * kv_dim, "k");
@@ -190,7 +228,7 @@ void AcBitNetEngine::UploadLayer(uint32_t l, const BitNetGpuLayerHost& lay) {
 }
 
 void AcBitNetEngine::UploadOutput(const float* output_norm, const uint16_t* lm_head_f16, uint32_t n_vocab) {
-    if (!configured_ || !output_norm || !lm_head_f16 || n_vocab == 0 || cfg_.n_embd % 2 != 0) {
+    if (!configured_ || !output_norm || !lm_head_f16 || n_vocab == 0 || cfg_.n_embd % 8 != 0) {
         throw AcBitNetError("UploadOutput: missing output norm or LM head", (int)AC_ERR_INVALID_ARGUMENT);
     }
     if (!lm_slices_.empty()) throw AcBitNetError("UploadOutput called twice", (int)AC_ERR_INVALID_ARGUMENT);
@@ -229,16 +267,24 @@ void AcBitNetEngine::Barrier(AcCommandBatch* batch) { check(ac_runtime_batch_bar
 
 void AcBitNetEngine::RecordNormQ8(AcCommandBatch* batch, AcBufferBinding in_a, AcBufferBinding in_b, AcBufferBinding w,
                                   uint32_t dim, uint32_t mode, bool do_norm) {
-    const AcBufferBinding b[6] = { in_a, in_b, w, Bind(y_, 0, 4ull * dim), Bind(q8_, 0, dim), Bind(act_, 0, 16) };
+    const AcBufferBinding b[7] = { in_a, in_b, w, Bind(y_, 0, 4ull * dim), Bind(q8_, 0, dim), Bind(act_, 0, 16),
+                                   Bind(qeo_, 0, 2ull * dim) };
     const uint32_t pc[4] = { dim, fbits(cfg_.norm_eps), mode, do_norm ? 1u : 0u };
-    Dispatch(batch, AC_BITNET_K_NORM_Q8, b, 6, pc, sizeof(pc), 1);
+    Dispatch(batch, AC_BITNET_K_NORM_Q8, b, 7, pc, sizeof(pc), 1);
+}
+
+uint32_t AcBitNetEngine::GemvKernel(bool accum) const {
+    return AC_BITNET_K_GEMV + 4 * gemv_shape_ + (use_dot_ ? 0 : 2) + (accum ? 1 : 0);
 }
 
 void AcBitNetEngine::RecordGemv(AcCommandBatch* batch, bool accum, AcBufferBinding weights, uint32_t in_dim,
                                 uint32_t out_dim, float scale, AcBufferBinding out, uint32_t out_offset_words) {
-    const AcBufferBinding b[4] = { weights, Bind(q8_, 0, in_dim), out, Bind(act_, 0, 16) };
+    const AcBufferBinding b[4] = { weights, use_dot_ ? Bind(q8_, 0, in_dim) : Bind(qeo_, 0, 2ull * in_dim), out,
+                                   Bind(act_, 0, 16) };
     const uint32_t pc[4] = { in_dim, out_dim, fbits(scale), out_offset_words };
-    Dispatch(batch, accum ? AC_BITNET_K_GEMV_I2_S_ACC : AC_BITNET_K_GEMV_I2_S, b, 4, pc, sizeof(pc), (out_dim + 3) / 4);
+    const uint32_t k = GemvKernel(accum);
+    const uint32_t rows_per_group = kAcBitnetKernels[k].local_size[1];
+    Dispatch(batch, k, b, 4, pc, sizeof(pc), (out_dim + rows_per_group - 1) / rows_per_group);
 }
 
 void AcBitNetEngine::RecordLayer(AcCommandBatch* batch, const Layer& L, uint32_t pos) {
@@ -298,7 +344,7 @@ void AcBitNetEngine::RecordLMHead(AcCommandBatch* batch, AcBufferBinding x_norm)
     for (const LMSlice& s : lm_slices_) {
         const AcBufferBinding b[3] = { Bind(s.buf, 0, 2ull * s.rows * cfg_.n_embd), x_norm, Bind(logits_, 0, 4ull * n_vocab_) };
         const uint32_t pc[3] = { cfg_.n_embd, s.rows, s.row0 };
-        Dispatch(batch, AC_BITNET_K_GEMV_F16, b, 3, pc, sizeof(pc), (s.rows + 3) / 4);
+        Dispatch(batch, lmhead_kernel_, b, 3, pc, sizeof(pc), (s.rows + 3) / 4);
     }
 }
 
@@ -410,7 +456,7 @@ void AcBitNetEngine::Release() {
     layers_.clear();
     for (LMSlice& s : lm_slices_) drop(s.buf);
     lm_slices_.clear();
-    for (AcBuffer** b : { &x_, &y_, &q8_, &act_, &q_, &k_, &att_, &scores_, &gate_, &up_, &cs_, &out_norm_, &logits_, &dummy_ }) {
+    for (AcBuffer** b : { &x_, &y_, &q8_, &qeo_, &act_, &q_, &k_, &att_, &scores_, &gate_, &up_, &cs_, &out_norm_, &logits_, &dummy_ }) {
         drop(*b);
     }
     for (AcKernel*& k : kernels_) {

@@ -11,24 +11,55 @@
 // emit, gives +2 as in the CPU kernel ggml_vec_dot_i2_i8_s of adapters/bitnet/src/cpu/ggml_bitnet_mad.cpp).
 // Packing: 128 weights per 32-byte block; byte k of a block holds the weights k, 32 + k, 64 + k and 96 + k of the
 // block in bits 7-6, 5-4, 3-2 and 1-0. A row of in_dim weights is in_dim / 4 bytes.
-// Activations: int8 values packed four per uint (element j in byte j % 4 of word j / 4), with their dequantization
-// factor in act[0] (bitnet_norm_q8.comp), as quantize_activation_int8 of the CPU path makes them.
-// Result: y[r] = float(sum_j (c_rj - 1) * q_j) * (act_dequant * weight_scale). The integer sum is exact in any order,
-// so y equals the CPU result bit for bit when the activations and their factor are the same.
-// Work split: a workgroup computes 4 rows; the 32 lanes of a row each take one weight word (16 weights) per step.
-// -DACCUM: y[r] += result (the residual connections after the output and down projections).
+// Activations (bitnet_norm_q8.comp): int8 q_j, element j in byte j % 4 of word j / 4; act[0] their dequantization
+// factor (float bits), act[1] their sum (int bits).
+// Result: y[r] = float(sum_j (c_rj - 1) * q_j) * (act_dequant * weight_scale), with the integer sum taken as
+// sum_j c_rj * q_j - sum_j q_j. The sum is exact in any order, so y equals the CPU result bit for bit when the
+// activations and their factor are the same.
+// Word w of a row is word w % 8 of block w / 8: its byte i (= 4 (w % 8) + i of the block) holds, for group g, the code
+// of the activation block * 128 + g * 32 + 4 (w % 8) + i, so the four codes of group g in one word meet one
+// activation word: (w >> (6 - 2g)) & 0x03030303 against activation word block * 32 + g * 8 + w % 8.
+// Variants:
+//   default    the products of a word pair through dotPacked4x8EXT (VK_KHR_shader_integer_dot_product)
+//   -DEMU_DOT  without the extension: the codes split into even / odd bytes in 16-bit lanes, multiplied by the
+//              activations + 128 in the matching lanes (qeo, written by bitnet_norm_q8): two 32-bit multiplications per
+//              four products, as ameva_mmvq -DEMU_DOT; sum c * q = sum c * (q + 128) - 128 * sum c
+//   -DACCUM    y[r] += result (the residual connections after the output and down projections)
+// Work split (-DLPR, -DWPL): a workgroup of 128 invocations computes 128 / LPR rows; the LPR lanes of a row each load
+// WPL consecutive weight words (16 WPL weights) per step. A row is in_dim / 16 words, a multiple of 8, so LPR 32 x WPL 1,
+// 16 x 2 and 8 x 4 all give every lane of a 2560-, 6912- or 9216-weight row the same number of steps up to one.
 // ============================================================================
+#ifndef EMU_DOT
+#extension GL_EXT_integer_dot_product : require
+#endif
+#ifndef LPR
+#define LPR 32
+#endif
+#ifndef WPL
+#define WPL 1
+#endif
+#define RPW (128 / LPR)
 
-layout(local_size_x = 32, local_size_y = 4, local_size_z = 1) in;
+layout(local_size_x = LPR, local_size_y = RPW, local_size_z = 1) in;
 
 // Binding 0: packed 2-bit ternary weights of this matrix (bound from the matrix start)
 layout(std430, binding = 0) readonly buffer WeightBuffer {
+#if WPL == 4
+    uvec4 raw_weights[];
+#elif WPL == 2
+    uvec2 raw_weights[];
+#else
     uint raw_weights[];
+#endif
 };
 
-// Binding 1: int8 activations, four per word
+// Binding 1: int8 activations, four per word (default); their even / odd split with offset 128 (EMU_DOT)
 layout(std430, binding = 1) readonly buffer ActivationBuffer {
+#ifdef EMU_DOT
+    uvec2 activations[];
+#else
     uint activations[];
+#endif
 };
 
 // Binding 2: output vector
@@ -36,7 +67,7 @@ layout(std430, binding = 2) buffer OutputBuffer {
     float output_vec[];
 };
 
-// Binding 3: activation dequantization factor (act[0], float bits) written by bitnet_norm_q8
+// Binding 3: act[0] dequantization factor (float bits), act[1] sum of the activations (int bits)
 layout(std430, binding = 3) readonly buffer ActScaleBuffer {
     uint act[];
 };
@@ -48,52 +79,63 @@ layout(push_constant) uniform PushConstants {
     uint output_offset_words; // first output element (the V projection writes its cache row in place)
 };
 
-shared int row_shared_sum[4][32];
+shared int row_shared_sum[RPW][LPR];
 
 void main() {
-    uint local_lane = gl_LocalInvocationID.x;  // 0..31
-    uint local_row  = gl_LocalInvocationID.y;  // 0..3
-    uint global_row = gl_WorkGroupID.x * 4 + local_row;
+    uint local_lane = gl_LocalInvocationID.x;  // 0 .. LPR - 1
+    uint local_row  = gl_LocalInvocationID.y;  // 0 .. RPW - 1
+    uint global_row = gl_WorkGroupID.x * RPW + local_row;
 
     int acc = 0;
 
     if (global_row < out_dim) {
-        uint row_words = in_dim / 16u;
-        uint row_base = global_row * row_words;
-
-        for (uint w = local_lane; w < row_words; w += 32u) {
-            uint packed_word = raw_weights[row_base + w];
-            // word w of the row is word (w % 8) of block w / 8: bytes k = 4 (w % 8) + 0..3 of that block, whose
-            // activations of group g are the four int8 at block * 128 + g * 32 + 4 (w % 8), i.e. one word
-            uint act_base = (w / 8u) * 32u + (w % 8u);
-            for (uint g = 0u; g < 4u; ++g) {
-                uint a = activations[act_base + g * 8u];
-                uint codes = (packed_word >> (6u - 2u * g)) & 0x03030303u;
-                for (uint k = 0u; k < 4u; ++k) {
-                    int wv = int((codes >> (8u * k)) & 0x3u) - 1;
-                    int xv = bitfieldExtract(int(a), int(8u * k), 8);
-                    acc += wv * xv;
+        uint row_units = in_dim / (16u * WPL);  // loads per row
+        uint row_base = global_row * row_units;
+#ifdef EMU_DOT
+        uint d = 0u;  // sum of c * (q + 128)
+        uint s = 0u;  // sum of c, two 16-bit lanes
+#endif
+        for (uint qi = local_lane; qi < row_units; qi += LPR) {
+#if WPL == 1
+            uint wq[1] = uint[1](raw_weights[row_base + qi]);
+#elif WPL == 2
+            uvec2 wq = raw_weights[row_base + qi];
+#else
+            uvec4 wq = raw_weights[row_base + qi];
+#endif
+            for (uint j = 0u; j < uint(WPL); ++j) {
+                uint w = qi * WPL + j;
+                uint wd = wq[j];
+                uint act_base = (w / 8u) * 32u + (w % 8u);
+                for (uint g = 0u; g < 4u; ++g) {
+                    uint codes = (wd >> (6u - 2u * g)) & 0x03030303u;
+#ifdef EMU_DOT
+                    uvec2 eo = activations[act_base + g * 8u];
+                    uint ce = codes & 0x00FF00FFu, co = (codes >> 8u) & 0x00FF00FFu;
+                    d += (ce * eo.x + co * eo.y) >> 16u;
+                    s += ce + co;
+#else
+                    acc += dotPacked4x8EXT(int(codes), int(activations[act_base + g * 8u]));
+#endif
                 }
             }
         }
+#ifdef EMU_DOT
+        acc = int(d) - 128 * int((s & 0xFFFFu) + (s >> 16u));
+#endif
     }
 
-    // 5-stage parallel tree reduction (32 lanes -> 1)
+    // parallel tree reduction (LPR lanes -> 2)
     row_shared_sum[local_row][local_lane] = acc;
     barrier();
-
-    if (local_lane < 16) { row_shared_sum[local_row][local_lane] += row_shared_sum[local_row][local_lane + 16]; }
-    barrier();
-    if (local_lane < 8)  { row_shared_sum[local_row][local_lane] += row_shared_sum[local_row][local_lane + 8];  }
-    barrier();
-    if (local_lane < 4)  { row_shared_sum[local_row][local_lane] += row_shared_sum[local_row][local_lane + 4];  }
-    barrier();
-    if (local_lane < 2)  { row_shared_sum[local_row][local_lane] += row_shared_sum[local_row][local_lane + 2];  }
-    barrier();
+    for (uint s = LPR / 2u; s > 1u; s >>= 1u) {
+        if (local_lane < s) row_shared_sum[local_row][local_lane] += row_shared_sum[local_row][local_lane + s];
+        barrier();
+    }
 
     // Master lane writes the dequantized result: the same two roundings as the CPU path
     if (local_lane == 0 && global_row < out_dim) {
-        int sum = row_shared_sum[local_row][0] + row_shared_sum[local_row][1];
+        int sum = row_shared_sum[local_row][0] + row_shared_sum[local_row][1] - int(act[1]);
         float total_scale = uintBitsToFloat(act[0]) * uintBitsToFloat(weight_scale_bits);
         precise float r = float(sum) * total_scale;
 #ifdef ACCUM

@@ -124,6 +124,7 @@ private:
     void Barrier(AcCommandBatch* batch);
     void RecordNormQ8(AcCommandBatch* batch, AcBufferBinding in_a, AcBufferBinding in_b, AcBufferBinding w,
                       uint32_t dim, uint32_t mode, bool do_norm);
+    uint32_t GemvKernel(bool accum) const;
     void RecordGemv(AcCommandBatch* batch, bool accum, AcBufferBinding weights, uint32_t in_dim, uint32_t out_dim,
                     float scale, AcBufferBinding out, uint32_t out_offset_words);
     void RecordLayer(AcCommandBatch* batch, const Layer& L, uint32_t pos);
@@ -143,6 +144,9 @@ private:
     uint64_t max_range_ = 0;
     uint32_t max_groups_x_ = 65535;
     bool configured_ = false;
+    bool use_dot_ = false;         // i2_s GEMV through VK_KHR_shader_integer_dot_product
+    uint32_t gemv_shape_ = 0;      // index into kAcBitnetGemvShapes (AC_BITNET_GEMV_SHAPE)
+    uint32_t lmhead_kernel_ = 0;   // AC_BITNET_K_GEMV_F16_W1 / W2 / W4 (AC_BITNET_LMHEAD_SHAPE)
     BitNetGpuConfig cfg_;
     std::vector<Layer> layers_;
     std::vector<LMSlice> lm_slices_;
@@ -153,7 +157,8 @@ private:
     AcBuffer* x_ = nullptr;        // residual stream, n_embd f32
     AcBuffer* y_ = nullptr;        // f32 activations of norm_q8, max(n_embd, n_ffn)
     AcBuffer* q8_ = nullptr;       // int8 activations, max(n_embd, n_ffn) / 4 words
-    AcBuffer* act_ = nullptr;      // dequantization factor of q8_
+    AcBuffer* qeo_ = nullptr;      // q8_ + 128 split into even / odd bytes (emulated dot product)
+    AcBuffer* act_ = nullptr;      // dequantization factor and sum of q8_
     AcBuffer* q_ = nullptr;        // Q, n_heads * head_dim
     AcBuffer* k_ = nullptr;        // K before RoPE, n_kv_heads * head_dim
     AcBuffer* att_ = nullptr;      // attention output, n_heads * head_dim

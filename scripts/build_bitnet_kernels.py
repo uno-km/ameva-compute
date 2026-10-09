@@ -5,12 +5,14 @@
     python3 scripts/build_bitnet_kernels.py [--glslang glslangValidator] [--spirv-val spirv-val] [--out HEADER]
 
 Kernels (src/shaders), in the order of enum AcBitnetKernelId:
-* bitnet_gemv_i2_s      i2_s ternary GEMV on int8 activations
-* bitnet_gemv_i2_s_acc  the same, adding the result to the output (-DACCUM: residual connections)
+* bitnet_gemv_i2_s_<shape>[_emu][_acc]  i2_s ternary GEMV on int8 activations, one variant per work split
+  (GEMV_SHAPES: lanes per row x words per load), with VK_KHR_shader_integer_dot_product or without it (_emu,
+  -DEMU_DOT), writing or adding to the output (_acc, -DACCUM: residual connections). Order: shape, then emu, then acc
+  (index AC_BITNET_K_GEMV + 4 * shape + 2 * emu + acc).
 * bitnet_norm_q8        activation / RMS norm / int8 quantization stage before each i2_s projection
 * bitnet_rope           rotary embedding of Q (in place) and K (into its KV-cache row)
 * bitnet_attn_decode    single-token attention over the KV cache
-* bitnet_gemv_f16       f16-weight GEMV (LM head)
+* bitnet_gemv_f16_w1/2/4 f16-weight GEMV (LM head), 1, 2 or 4 words per load
 
 For every module: glslangValidator -V (vulkan1.0), spirv-val, SHA-256 (pinned by ac_runtime at kernel creation),
 binding count and push-constant bytes (from the source, cross-checked against glslang's reflection), local size, and
@@ -31,12 +33,16 @@ SHADERS = os.path.join(ROOT, "src", "shaders")
 DEFAULT_OUT = os.path.join(ROOT, "adapters", "bitnet", "src", "core", "bitnet_kernels_spv.h")
 
 # (kernel name, source, defines)
-KERNELS = [("bitnet_gemv_i2_s", "bitnet_gemv_i2_s.comp", []),
-           ("bitnet_gemv_i2_s_acc", "bitnet_gemv_i2_s.comp", ["ACCUM"]),
+# (name, lanes per row, words per load): 128 invocations per workgroup
+GEMV_SHAPES = [("l32w1", 32, 1), ("l16w2", 16, 2), ("l8w4", 8, 4)]
+GEMV = [("bitnet_gemv_i2_s_%s%s%s" % (sh, "_emu" if emu else "", "_acc" if acc else ""), "bitnet_gemv_i2_s.comp",
+         ["LPR=%d" % lpr, "WPL=%d" % wpl] + (["EMU_DOT"] if emu else []) + (["ACCUM"] if acc else []), (lpr, 128 // lpr, 1))
+        for sh, lpr, wpl in GEMV_SHAPES for emu in (0, 1) for acc in (0, 1)]
+KERNELS = GEMV + [
            ("bitnet_norm_q8", "bitnet_norm_q8.comp", []),
            ("bitnet_rope", "bitnet_rope.comp", []),
            ("bitnet_attn_decode", "bitnet_attn_decode.comp", []),
-           ("bitnet_gemv_f16", "bitnet_gemv_f16.comp", [])]
+           ] + [("bitnet_gemv_f16_w%d" % w, "bitnet_gemv_f16.comp", ["WPL=%d" % w]) for w in (1, 2, 4)]
 
 
 def local_size(path):
@@ -68,10 +74,11 @@ def main():
         "#include <stddef.h>", "#include <stdint.h>", ""]
     entries = []
     with tempfile.TemporaryDirectory() as tmp:
-        for name, source, defines in KERNELS:
+        for entry in KERNELS:
+            name, source, defines = entry[:3]
             src = os.path.join(SHADERS, source)
             nbind, npush, _ = bak.source_info(src)
-            local = local_size(src)
+            local = list(entry[3]) if len(entry) > 3 else local_size(src)
             spv = os.path.join(tmp, name + ".spv")
             data, refl_push = bak.compile_module(args, src, defines, spv, None)
             if refl_push != npush:
@@ -80,16 +87,24 @@ def main():
                 bak.fail("%s: declares specialization constants" % name)
             var = "kAcBitnetSpv_" + name
             bak.emit_array(lines, var, data)
-            entries.append((name, nbind, npush, local, var, len(data), hashlib.sha256(data).hexdigest()))
-    lines += ["", "typedef enum {"] + ["    AC_BITNET_K_%s," % e[0][len("bitnet_"):].upper() for e in entries] + \
+            # the kernels whose source enables GL_EXT_integer_dot_product for these defines need the device feature
+            pre = bak.run([args.glslang, "-E"] + ["-D%s" % d for d in defines] + [src])
+            int_dot = 1 if re.search(r"#extension\s+GL_EXT_integer_dot_product", pre) else 0
+            entries.append((name, nbind, npush, local, var, len(data), hashlib.sha256(data).hexdigest(), int_dot))
+    lines += ["", "#define AC_BITNET_GEMV_SHAPES %du" % len(GEMV_SHAPES),
+              "static const char* const kAcBitnetGemvShapes[AC_BITNET_GEMV_SHAPES] = { %s };"
+              % ", ".join('"%s"' % sh[0] for sh in GEMV_SHAPES)]
+    lines += ["", "typedef enum {", "    AC_BITNET_K_GEMV = 0, /* first of the 4 x AC_BITNET_GEMV_SHAPES GEMV variants */"] + \
+             ["    AC_BITNET_K_%s%s," % (e[0][len("bitnet_"):].upper(), " = %d" % len(GEMV) if i == 0 else "") for i, e in enumerate(entries[len(GEMV):])] + \
              ["    AC_BITNET_K_COUNT", "} AcBitnetKernelId;", "",
+              
               "typedef struct {", "    const char* name;", "    uint32_t bindings;", "    uint32_t push_constant_bytes;",
               "    uint32_t local_size[3];", "    const uint32_t* spirv;", "    uint32_t spirv_bytes;",
-              "    const char* spirv_sha256;", "} AcBitnetKernel;", "",
+              "    const char* spirv_sha256;", "    uint32_t needs_integer_dot_product;", "} AcBitnetKernel;", "",
               "static const AcBitnetKernel kAcBitnetKernels[AC_BITNET_K_COUNT] = {"]
-    for name, nbind, npush, local, var, nbytes, sha in entries:
-        lines.append('    { "%s", %uu, %uu, { %uu, %uu, %uu }, %s, %uu, "%s" },'
-                     % (name, nbind, npush, local[0], local[1], local[2], var, nbytes, sha))
+    for name, nbind, npush, local, var, nbytes, sha, int_dot in entries:
+        lines.append('    { "%s", %uu, %uu, { %uu, %uu, %uu }, %s, %uu, "%s", %uu },'
+                     % (name, nbind, npush, local[0], local[1], local[2], var, nbytes, sha, int_dot))
     lines += ["};", "", "#endif /* AC_BITNET_KERNELS_SPV_H */", ""]
     with open(args.out, "w", newline="\n") as f:
         f.write("\n".join(lines))

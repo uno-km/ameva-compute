@@ -18,7 +18,13 @@
 // of the later positions). For every position: KL(CPU || GPU) of the softmax of the logits, whether the arg-max agrees,
 // and the largest absolute logit difference. Then each context generates GEN tokens greedily on its own and the two
 // token sequences are compared (length of the common prefix).
-// Exit status 0 only when max KLD <= --kld-max (default 1e-3) and the arg-max agreement >= --top1-min (default 0.99).
+// Exit status 0 only when the mean KLD <= --kld-mean-max (default 2.7e-3), the largest KLD <= --kld-max (default 1,
+// i.e. not gated), the arg-max agreement >= --top1-min (default 0, not gated) and no decisive disagreement: an arg-max
+// that differs where the reference's first choice leads its second by at least --margin-min logits (default 0.5).
+// The defaults come from the CPU path's own sensitivity on BitNet b1.58 2B (S25, 2026-10-09): the CPU build with
+// multiply-add contraction differs from the reference by KLD mean 1.34e-3 over 110 positions, and every arg-max flip
+// of the CPU variant builds (and of the GPU) fell where the reference lead was 0.063 to 0.174 logits
+// (docs/design/bitnet-amuda-engine.md).
 #include "termux_bitnet.h"
 
 #include <algorithm>
@@ -38,6 +44,20 @@ double now_ms() {
 
 int argmax(const float* v, int n) {
     return (int)(std::max_element(v, v + n) - v);
+}
+
+// the reference's lead of its first choice over its second (logits)
+double top2_margin(const float* v, int n) {
+    float a = -INFINITY, b = -INFINITY;
+    for (int i = 0; i < n; ++i) {
+        if (v[i] > a) {
+            b = a;
+            a = v[i];
+        } else if (v[i] > b) {
+            b = v[i];
+        }
+    }
+    return (double)a - b;
 }
 
 // KL(p || q) of softmax(a), softmax(b), in double
@@ -75,8 +95,8 @@ std::string piece(bitnet_context_t ctx, int tok) {
 }
 
 struct Stats {
-    double kmax = 0, ksum = 0, dmax = 0;
-    int agree = 0, total = 0, kmax_pos = -1;
+    double kmax = 0, ksum = 0, dmax = 0, margin_min = 0.5;
+    int agree = 0, total = 0, kmax_pos = -1, decisive = 0;
     void add(int pos, int tok, const float* ref, const float* got, int n_vocab, bool always_print) {
         const double k = kld(ref, got, n_vocab);
         const int ar = argmax(ref, n_vocab), ag = argmax(got, n_vocab);
@@ -89,15 +109,19 @@ struct Stats {
         }
         dmax = std::max(dmax, d);
         agree += ar == ag;
+        if (ar != ag && top2_margin(ref, n_vocab) >= margin_min) ++decisive;
         ++total;
         if (always_print || ar != ag) {
-            printf("pos %3d tok %6d  kld %.3e  maxdiff %.4f  argmax ref %6d got %6d%s\n", pos, tok, k, d, ar, ag,
+            printf("pos %3d tok %6d  kld %.3e  maxdiff %.4f  argmax ref %6d got %6d%s", pos, tok, k, d, ar, ag,
                    ar == ag ? "" : "  DIFFER");
+            if (ar != ag) printf(" (reference margin %.4f)", top2_margin(ref, n_vocab));
+            printf("\n");
         }
     }
     void print(const char* what) const {
-        printf("%s positions %d: kld mean %.3e max %.3e (pos %d), max |logit diff| %.4f, argmax agree %d/%d\n", what,
-               total, ksum / total, kmax, kmax_pos, dmax, agree, total);
+        printf("%s positions %d: kld mean %.3e max %.3e (pos %d), max |logit diff| %.4f, argmax agree %d/%d, "
+               "decisive disagreements %d (reference lead >= %.2f)\n", what, total, ksum / total, kmax, kmax_pos, dmax,
+               agree, total, decisive, margin_min);
     }
 };
 
@@ -107,7 +131,7 @@ int main(int argc, char** argv) {
     const char* model = nullptr;
     std::string prompt = "The capital of France is";
     int gen = 32, n_ctx = 512, threads = 4;
-    double kld_max = 1e-3, top1_min = 0.99;
+    double kld_max = 1.0, kld_mean_max = 2.7e-3, top1_min = 0.0, margin_min = 0.5;
     const char* save = nullptr;
     const char* load = nullptr;
     std::string backend;
@@ -126,6 +150,8 @@ int main(int argc, char** argv) {
         else if (a == "-c") n_ctx = atoi(next());
         else if (a == "-t") threads = atoi(next());
         else if (a == "--kld-max") kld_max = atof(next());
+        else if (a == "--kld-mean-max") kld_mean_max = atof(next());
+        else if (a == "--margin-min") margin_min = atof(next());
         else if (a == "--top1-min") top1_min = atof(next());
         else if (a == "--save") save = next();
         else if (a == "--load") load = next();
@@ -136,7 +162,8 @@ int main(int argc, char** argv) {
         }
     }
     if (!model) {
-        fprintf(stderr, "usage: ac_bitnet_parity -m MODEL [-p PROMPT] [-n GEN] [-c N_CTX] [-t THREADS]\n");
+        fprintf(stderr, "usage: ac_bitnet_parity -m MODEL [-p PROMPT] [-n GEN] [-c N_CTX] [-t THREADS] [--kld-mean-max X]\n"
+                        "       [--kld-max X] [--top1-min F] [--margin-min L] [--save FILE | --load FILE] [--backend cpu|gpu]\n");
         return 2;
     }
 
@@ -178,6 +205,7 @@ int main(int argc, char** argv) {
             seq.resize(np);
         }
         Stats st;
+        st.margin_min = margin_min;
         std::vector<float> out;
         double t_eval = 0;
         const int n_pos = load ? (int)seq.size() : (int)seq.size() + gen;
@@ -217,8 +245,10 @@ int main(int argc, char** argv) {
             return 0;
         }
         st.print("COMPARED");
-        const bool pass = st.kmax <= kld_max && (double)st.agree / st.total >= top1_min;
-        printf("PARITY %s (gate: max kld <= %.1e, argmax agreement >= %.3f)\n", pass ? "PASS" : "FAIL", kld_max, top1_min);
+        const bool pass = st.ksum / st.total <= kld_mean_max && st.kmax <= kld_max &&
+                          (double)st.agree / st.total >= top1_min && st.decisive == 0;
+        printf("PARITY %s (gate: mean kld <= %.1e, max kld <= %.1e, argmax agreement >= %.3f, no decisive disagreement)\n",
+               pass ? "PASS" : "FAIL", kld_mean_max, kld_max, top1_min);
         return pass ? 0 : 1;
     }
 
@@ -244,7 +274,7 @@ int main(int argc, char** argv) {
     // teacher-forced comparison
     int n_vocab = 0;
     double kmax = 0, ksum = 0, dmax = 0, t_cpu = 0, t_gpu = 0;
-    int agree = 0, total = 0, kmax_pos = -1;
+    int agree = 0, total = 0, kmax_pos = -1, decisive = 0;
     std::vector<float> lc;
     int32_t tok = toks[0];
     for (int pos = 0; pos < np + gen; ++pos) {
@@ -281,16 +311,20 @@ int main(int argc, char** argv) {
         }
         dmax = std::max(dmax, d);
         agree += ac == ag;
+        if (ac != ag && top2_margin(lc.data(), n_vocab) >= margin_min) ++decisive;
         ++total;
         if (pos < 4 || ac != ag || pos == np + gen - 1) {
-            printf("pos %3d tok %6d  kld %.3e  maxdiff %.4f  argmax cpu %6d gpu %6d%s\n", pos, tok, k, d, ac, ag,
+            printf("pos %3d tok %6d  kld %.3e  maxdiff %.4f  argmax cpu %6d gpu %6d%s", pos, tok, k, d, ac, ag,
                    ac == ag ? "" : "  DIFFER");
+            if (ac != ag) printf(" (reference margin %.4f)", top2_margin(lc.data(), n_vocab));
+            printf("\n");
         }
         if (pos >= np - 1) tok = ac; // the CPU's greedy choice feeds both
     }
     const double top1 = (double)agree / total;
-    printf("TEACHER-FORCED positions %d: kld mean %.3e max %.3e (pos %d), max |logit diff| %.4f, argmax agree %d/%d\n",
-           total, ksum / total, kmax, kmax_pos, dmax, agree, total);
+    printf("TEACHER-FORCED positions %d: kld mean %.3e max %.3e (pos %d), max |logit diff| %.4f, argmax agree %d/%d, "
+           "decisive disagreements %d (reference lead >= %.2f)\n", total, ksum / total, kmax, kmax_pos, dmax, agree, total,
+           decisive, margin_min);
     printf("TIME per token: CPU %.1f ms, GPU %.1f ms\n", t_cpu / total, t_gpu / total);
 
     // free-running greedy generation of each context
@@ -322,8 +356,9 @@ int main(int argc, char** argv) {
     }
     printf("GREEDY common prefix %d/%d tokens\n", common, gen);
 
-    const bool pass = kmax <= kld_max && top1 >= top1_min;
-    printf("PARITY %s (gate: max kld <= %.1e, argmax agreement >= %.3f)\n", pass ? "PASS" : "FAIL", kld_max, top1_min);
+    const bool pass = ksum / total <= kld_mean_max && kmax <= kld_max && top1 >= top1_min && decisive == 0;
+    printf("PARITY %s (gate: mean kld <= %.1e, max kld <= %.1e, argmax agreement >= %.3f, no decisive disagreement)\n",
+           pass ? "PASS" : "FAIL", kld_mean_max, kld_max, top1_min);
     bitnet_free(gpu);
     bitnet_free(cpu);
     return pass ? 0 : 1;
