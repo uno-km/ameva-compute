@@ -1,0 +1,95 @@
+#version 450
+/**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
+// ============================================================================
+// AMUDA Kernel: BitNet single-token multi-head attention over the KV cache (adapters/bitnet, ac_bitnet_engine.cpp)
+// ============================================================================
+// multi_head_attention of the CPU path, one workgroup per query head h (KV head h / (n_heads / n_kv_heads)):
+//   s_p = (q_h . k_p) * inv_sqrt, p = 0 .. n_pos - 1
+//   w_p = exp(s_p - max s) / (sum exp(s - max s) + 1e-9)
+//   out_h = sum_p w_p * v_p
+// Cache rows: element (p, kv head, d) at p * kv_stride + kv_head * head_dim + d. The scores of head h are kept in
+// scores[h * score_stride + p] (score_stride >= n_pos); an invocation reads back only the scores it wrote until the
+// last pass, which follows a buffer barrier.
+// ============================================================================
+
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer QBuffer { float q[]; };
+layout(std430, binding = 1) readonly buffer KCacheBuffer { float kcache[]; };
+layout(std430, binding = 2) readonly buffer VCacheBuffer { float vcache[]; };
+// coherent: the last pass reads scores other invocations of the workgroup wrote
+layout(std430, binding = 3) coherent buffer ScoreBuffer { float scores[]; };
+layout(std430, binding = 4) writeonly buffer OutBuffer { float outv[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_heads;
+    uint n_kv_heads;
+    uint head_dim;
+    uint n_pos;
+    uint kv_stride;
+    uint score_stride;
+    uint inv_sqrt_bits;
+};
+
+shared float red[128];
+shared float qs[256];
+
+void main() {
+    uint h = gl_WorkGroupID.x;
+    uint t = gl_LocalInvocationID.x;
+    uint kvh = h / (n_heads / n_kv_heads);
+    uint sbase = h * score_stride;
+    float inv_sqrt = uintBitsToFloat(inv_sqrt_bits);
+
+    for (uint d = t; d < head_dim; d += 128u) qs[d] = q[h * head_dim + d];
+    barrier();
+
+    // scores and their maximum
+    float m = -1e9;
+    for (uint p = t; p < n_pos; p += 128u) {
+        uint kb = p * kv_stride + kvh * head_dim;
+        float dot = 0.0;
+        for (uint d = 0u; d < head_dim; ++d) dot += qs[d] * kcache[kb + d];
+        float s = dot * inv_sqrt;
+        scores[sbase + p] = s;
+        m = max(m, s);
+    }
+    red[t] = m;
+    barrier();
+    for (uint s = 64u; s > 0u; s >>= 1u) {
+        if (t < s) red[t] = max(red[t], red[t + s]);
+        barrier();
+    }
+    float mx = red[0];
+    barrier();
+
+    // exponentials and their sum
+    float sum = 0.0;
+    for (uint p = t; p < n_pos; p += 128u) {
+        float e = exp(scores[sbase + p] - mx);
+        scores[sbase + p] = e;
+        sum += e;
+    }
+    red[t] = sum;
+    barrier();
+    for (uint s = 64u; s > 0u; s >>= 1u) {
+        if (t < s) red[t] += red[t + s];
+        barrier();
+    }
+    float inv_sum = 1.0 / (red[0] + 1e-9);
+    memoryBarrierBuffer();
+    barrier();
+
+    // weighted sum of the values
+    for (uint d = t; d < head_dim; d += 128u) {
+        float acc = 0.0;
+        for (uint p = 0u; p < n_pos; ++p) {
+            float wgt = scores[sbase + p] * inv_sum;
+            acc += wgt * vcache[p * kv_stride + kvh * head_dim + d];
+        }
+        outv[h * head_dim + d] = acc;
+    }
+}

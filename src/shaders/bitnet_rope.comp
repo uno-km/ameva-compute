@@ -1,0 +1,56 @@
+#version 450
+/**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
+// ============================================================================
+// AMUDA Kernel: BitNet rotary position embedding of one token (adapters/bitnet, ac_bitnet_engine.cpp)
+// ============================================================================
+// Pairs (i, i + head_dim / 2) of every head (apply_rope of the CPU path):
+//   v0' = v0 * cos - v1 * sin,  v1' = v1 * cos + v0 * sin
+// The cos / sin of the position come from the host (cs[0 .. half) cos, cs[half .. head_dim) sin), computed by the
+// same code as the CPU path: the GPU's sin and cos are not specified outside [-pi, pi].
+// Q is rotated in place; K is read from its projection and written rotated into its KV-cache row (kcache, word
+// offset kcache_offset).
+// ============================================================================
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) buffer QBuffer { float q[]; };
+layout(std430, binding = 1) readonly buffer KBuffer { float k[]; };
+layout(std430, binding = 2) writeonly buffer KCacheBuffer { float kcache[]; };
+layout(std430, binding = 3) readonly buffer CsBuffer { float cs[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_heads;
+    uint n_kv_heads;
+    uint head_dim;
+    uint kcache_offset;
+};
+
+void main() {
+    uint half_dim = head_dim / 2u;
+    uint id = gl_GlobalInvocationID.x;
+    uint head = id / half_dim;
+    uint i = id % half_dim;
+    if (head >= n_heads + n_kv_heads) return;
+    float c = cs[i];
+    float s = cs[half_dim + i];
+    if (head < n_heads) {
+        uint base = head * head_dim;
+        float v0 = q[base + i];
+        float v1 = q[base + i + half_dim];
+        precise float r0 = v0 * c - v1 * s;
+        precise float r1 = v1 * c + v0 * s;
+        q[base + i] = r0;
+        q[base + i + half_dim] = r1;
+    } else {
+        uint base = (head - n_heads) * head_dim;
+        float v0 = k[base + i];
+        float v1 = k[base + i + half_dim];
+        precise float r0 = v0 * c - v1 * s;
+        precise float r1 = v1 * c + v0 * s;
+        kcache[kcache_offset + base + i] = r0;
+        kcache[kcache_offset + base + i + half_dim] = r1;
+    }
+}

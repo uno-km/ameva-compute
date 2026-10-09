@@ -37,8 +37,8 @@
 #include <immintrin.h>
 #endif
 
-#if defined(GGML_USE_VULKAN)
-#include "core/vulkan_bitnet_engine.h"
+#if defined(AC_BITNET_GPU)
+#include "core/ac_bitnet_engine.h"
 #endif
 
 // IEEE 754 Half-Precision Float Converter
@@ -80,6 +80,56 @@ static void print_download_catalog_help(std::ostream& out) {
 template<typename T>
 static bool read_val(std::ifstream& f, T& val) {
     return (bool)f.read(reinterpret_cast<char*>(&val), sizeof(T));
+}
+
+// GPT-2 byte-level BPE alphabet (tokenizer.ggml.model "gpt2"): every byte is one code point, the printable ones
+// themselves, the others 256 + n in byte order (bytes_to_unicode of the GPT-2 tokenizer).
+static uint32_t byte_level_cp(uint8_t b) {
+    static const std::vector<uint32_t> table = [] {
+        std::vector<uint32_t> a(256);
+        uint32_t n = 0;
+        for (uint32_t c = 0; c < 256; ++c) {
+            const bool printable = (c >= 33 && c <= 126) || (c >= 161 && c <= 172) || (c >= 174 && c <= 255);
+            a[c] = printable ? c : 256 + n++;
+        }
+        return a;
+    }();
+    return table[b];
+}
+
+static void append_utf8(std::string& out, uint32_t cp) {
+    if (cp < 0x80) {
+        out += (char)cp;
+    } else if (cp < 0x800) {
+        out += (char)(0xC0 | (cp >> 6));
+        out += (char)(0x80 | (cp & 0x3F));
+    } else {
+        out += (char)(0xE0 | (cp >> 12));
+        out += (char)(0x80 | ((cp >> 6) & 0x3F));
+        out += (char)(0x80 | (cp & 0x3F));
+    }
+}
+
+// the bytes a byte-level token string stands for; false when it holds a code point outside the alphabet
+static bool byte_level_decode(const std::string& s, std::string& out) {
+    static const std::vector<int> reverse = [] {
+        std::vector<int> r(0x200, -1);
+        for (uint32_t b = 0; b < 256; ++b) r[byte_level_cp((uint8_t)b)] = (int)b;
+        return r;
+    }();
+    out.clear();
+    for (size_t i = 0; i < s.size();) {
+        const uint8_t c = (uint8_t)s[i];
+        uint32_t cp;
+        size_t len;
+        if (c < 0x80) { cp = c; len = 1; }
+        else if ((c & 0xE0) == 0xC0 && i + 1 < s.size()) { cp = ((c & 0x1F) << 6) | (s[i + 1] & 0x3F); len = 2; }
+        else return false;
+        if (cp >= reverse.size() || reverse[cp] < 0) return false;
+        out += (char)reverse[cp];
+        i += len;
+    }
+    return true;
 }
 
 static bool read_string(std::ifstream& f, std::string& str) {
@@ -217,7 +267,9 @@ bitnet_context_t bitnet_init(const bitnet_params_t* params) {
         uint32_t val_type = 0;
         if (!read_val(model_file, val_type)) break;
 
-        if (key == "tokenizer.ggml.tokens" && val_type == 9) { // Array of tokens
+        if (key == "tokenizer.ggml.model" && val_type == 8) {
+            if (!read_string(model_file, ctx->vocab.model)) break;
+        } else if (key == "tokenizer.ggml.tokens" && val_type == 9) { // Array of tokens
             uint32_t elem_type = 0;
             uint64_t elem_count = 0;
             if (read_val(model_file, elem_type) && read_val(model_file, elem_count)) {
@@ -311,6 +363,14 @@ bitnet_context_t bitnet_init(const bitnet_params_t* params) {
                 ctx->vocab.byte_to_id[b] = (int32_t)i;
             }
         }
+    }
+
+    // Only the byte-level BPE vocabulary (tokenizer.ggml.model "gpt2") is implemented below
+    if (ctx->vocab.model != "gpt2") {
+        std::cerr << "[termux-bitnet ERROR] [FAIL-FAST] tokenizer.ggml.model is \"" << ctx->vocab.model
+                  << "\"; this core implements the byte-level BPE vocabulary (\"gpt2\") only." << std::endl;
+        delete ctx;
+        return nullptr;
     }
 
     // Fail-Fast: verify vocabulary presence
@@ -408,6 +468,26 @@ bitnet_context_t bitnet_init(const bitnet_params_t* params) {
         ctx->output_weight_type = ctx->embd_type;
     }
 
+    if (!ctx->embd_weight || (ctx->embd_type != 0 && ctx->embd_type != 1)) {
+        std::cerr << "[termux-bitnet FATAL] token_embd.weight is missing or has type " << ctx->embd_type
+                  << "; the embedding lookup reads F32 or F16 only" << std::endl;
+        bitnet_free(ctx);
+        return nullptr;
+    }
+    // an i2_s LM head would need its per-tensor scale, which this path does not read: F32 / F16 only
+    if (!ctx->output_weight || (ctx->output_weight_type != 0 && ctx->output_weight_type != 1)) {
+        std::cerr << "[termux-bitnet FATAL] output weight is missing or has unsupported type " << ctx->output_weight_type
+                  << std::endl;
+        bitnet_free(ctx);
+        return nullptr;
+    }
+    if (ctx->output_norm && ctx->output_norm_type != 0 && ctx->output_norm_type != 1) {
+        std::cerr << "[termux-bitnet FATAL] output_norm.weight has type " << ctx->output_norm_type
+                  << "; norms must be F32 or F16" << std::endl;
+        bitnet_free(ctx);
+        return nullptr;
+    }
+
     // Bind Layer Tensors across all N layers
     ctx->layers.resize(ctx->config.n_layers);
     for (uint32_t l = 0; l < ctx->config.n_layers; ++l) {
@@ -469,33 +549,36 @@ bitnet_context_t bitnet_init(const bitnet_params_t* params) {
             }
             return true;
         };
-        if (lay.wq && !check_type("attn_q.weight", lay.wq_type)) {
-            bitnet_free(ctx);
-            return nullptr;
+        // A missing projection would make bitnet_gemv return zeros: refuse the model instead
+        const std::pair<const char*, std::pair<const void*, uint32_t>> projections[] = {
+            { "attn_q.weight", { lay.wq, lay.wq_type } }, { "attn_k.weight", { lay.wk, lay.wk_type } },
+            { "attn_v.weight", { lay.wv, lay.wv_type } }, { "attn_output.weight", { lay.wo, lay.wo_type } },
+            { "ffn_gate.weight", { lay.w_gate, lay.w_gate_type } }, { "ffn_up.weight", { lay.w_up, lay.w_up_type } },
+            { "ffn_down.weight", { lay.w_down, lay.w_down_type } } };
+        for (const auto& pr : projections) {
+            if (!pr.second.first) {
+                std::cerr << "[termux-bitnet FATAL] Layer " << l << " has no tensor '" << pr.first << "'" << std::endl;
+                bitnet_free(ctx);
+                return nullptr;
+            }
+            if (!check_type(pr.first, pr.second.second)) {
+                bitnet_free(ctx);
+                return nullptr;
+            }
         }
-        if (lay.wk && !check_type("attn_k.weight", lay.wk_type)) {
-            bitnet_free(ctx);
-            return nullptr;
-        }
-        if (lay.wv && !check_type("attn_v.weight", lay.wv_type)) {
-            bitnet_free(ctx);
-            return nullptr;
-        }
-        if (lay.wo && !check_type("attn_output.weight", lay.wo_type)) {
-            bitnet_free(ctx);
-            return nullptr;
-        }
-        if (lay.w_gate && !check_type("ffn_gate.weight", lay.w_gate_type)) {
-            bitnet_free(ctx);
-            return nullptr;
-        }
-        if (lay.w_up && !check_type("ffn_up.weight", lay.w_up_type)) {
-            bitnet_free(ctx);
-            return nullptr;
-        }
-        if (lay.w_down && !check_type("ffn_down.weight", lay.w_down_type)) {
-            bitnet_free(ctx);
-            return nullptr;
+        // norms are read as f32 (type 0) or f16 (type 1) only; anything else would be read as f32 bytes
+        const std::pair<const char*, std::pair<const void*, uint32_t>> norms[] = {
+            { "attn_norm.weight", { lay.attn_norm, lay.attn_norm_type } },
+            { "attn_sub_norm.weight", { lay.attn_sub_norm, lay.attn_sub_norm_type } },
+            { "ffn_norm.weight", { lay.ffn_norm, lay.ffn_norm_type } },
+            { "ffn_sub_norm.weight", { lay.ffn_sub_norm, lay.ffn_sub_norm_type } } };
+        for (const auto& nm : norms) {
+            if (nm.second.first && nm.second.second != 0 && nm.second.second != 1) {
+                std::cerr << "[termux-bitnet FATAL] Layer " << l << " tensor '" << nm.first << "' has type "
+                          << nm.second.second << "; norms must be F32 or F16" << std::endl;
+                bitnet_free(ctx);
+                return nullptr;
+            }
         }
     }
 
@@ -504,184 +587,87 @@ bitnet_context_t bitnet_init(const bitnet_params_t* params) {
     ctx->logits.assign(ctx->config.n_vocab, 0.0f);
     ctx->context_tokens.reserve(ctx->config.n_ctx);
 
-    // Initialize GPU Acceleration Engine (Fail-Fast: Never Silent Fallback)
+    // GPU execution on the AMUDA runtime (Fail-Fast: Never Silent Fallback)
     ctx->n_gpu_layers = params->n_gpu_layers;
-#if defined(GGML_USE_VULKAN)
+#if defined(AC_BITNET_GPU)
     if (ctx->n_gpu_layers > 0) {
         try {
-            auto* engine = new ameva::core::VulkanBitNetEngine();
+            const auto& cfg = ctx->config;
+            if (ctx->output_weight_type != 1) {
+                throw std::runtime_error("the GPU LM head reads an F16 output weight; this model's is type " +
+                                         std::to_string(ctx->output_weight_type));
+            }
+            auto engine = std::make_unique<ameva::core::AcBitNetEngine>();
             engine->Initialize();
-            
-            uint32_t max_dim = std::max({ctx->config.n_embd, ctx->config.n_ffn, ctx->config.n_vocab});
-            uint32_t q_dim = ctx->config.n_embd;
-            uint32_t kv_dim = ctx->config.n_kv_heads * ctx->config.head_dim;
-            int32_t offloaded_layers = std::min(ctx->n_gpu_layers, (int32_t)ctx->config.n_layers);
+            ameva::core::BitNetGpuConfig gc;
+            gc.n_embd = cfg.n_embd;
+            gc.n_ffn = cfg.n_ffn;
+            gc.n_heads = cfg.n_heads;
+            gc.n_kv_heads = cfg.n_kv_heads;
+            gc.head_dim = cfg.head_dim;
+            gc.n_ctx = cfg.n_ctx;
+            gc.n_layers = (uint32_t)std::min(ctx->n_gpu_layers, (int32_t)cfg.n_layers);
+            gc.norm_eps = cfg.norm_eps;
+            gc.rope_theta = cfg.rope_theta;
+            gc.relu2_ffn = ctx->layers[0].ffn_sub_norm != nullptr; // the FFN form forward_swiglu chooses
+            engine->Configure(gc);
 
-            uint32_t align_bytes = engine->GetDeviceInfo().required_alignment;
-            if (align_bytes < 128) align_bytes = 128;
-            auto align_up = [](size_t s, size_t a) -> size_t {
-                return (s + a - 1) & ~(a - 1);
+            // norms as f32, as rms_norm of the CPU path reads them
+            auto norm_f32 = [](const float* w, uint32_t type, uint32_t n, std::vector<float>& out) -> const float* {
+                if (!w) return nullptr;
+                out.resize(n);
+                if (type == 1) {
+                    const uint16_t* hw = (const uint16_t*)w;
+                    for (uint32_t i = 0; i < n; ++i) out[i] = f16_to_f32(hw[i]);
+                } else {
+                    std::memcpy(out.data(), w, n * sizeof(float));
+                }
+                return out.data();
             };
-
-            // Calculate exact offsets for each layer's weights and norm parameters
-            size_t current_offset = 0;
-            for (int32_t l = 0; l < offloaded_layers; ++l) {
-                auto& lay = ctx->layers[l];
-                size_t wq_bytes = (size_t)q_dim * (ctx->config.n_embd / 128) * 32;
-                size_t wk_bytes = (size_t)kv_dim * (ctx->config.n_embd / 128) * 32;
-                size_t wv_bytes = (size_t)kv_dim * (ctx->config.n_embd / 128) * 32;
-                size_t wo_bytes = (size_t)ctx->config.n_embd * (ctx->config.n_embd / 128) * 32;
-                size_t w_gate_bytes = (size_t)ctx->config.n_ffn * (ctx->config.n_embd / 128) * 32;
-                size_t w_up_bytes = (size_t)ctx->config.n_ffn * (ctx->config.n_embd / 128) * 32;
-                size_t w_down_bytes = (size_t)ctx->config.n_embd * (ctx->config.n_ffn / 128) * 32;
-
-                if (lay.attn_norm) {
-                    size_t norm_bytes = ctx->config.n_embd * sizeof(float);
-                    lay.gpu_offset_attn_norm = (uint32_t)current_offset;
-                    current_offset = align_up(current_offset + norm_bytes, align_bytes);
-                } else {
-                    lay.gpu_offset_attn_norm = 0xFFFFFFFF;
-                }
-
-                lay.gpu_offset_wq = (uint32_t)current_offset;
-                current_offset = align_up(current_offset + wq_bytes, align_bytes);
-
-                lay.gpu_offset_wk = (uint32_t)current_offset;
-                current_offset = align_up(current_offset + wk_bytes, align_bytes);
-
-                lay.gpu_offset_wv = (uint32_t)current_offset;
-                current_offset = align_up(current_offset + wv_bytes, align_bytes);
-
-                lay.gpu_offset_wo = (uint32_t)current_offset;
-                current_offset = align_up(current_offset + wo_bytes, align_bytes);
-
-                if (lay.attn_sub_norm) {
-                    size_t sub_norm_bytes = ctx->config.n_embd * sizeof(float);
-                    lay.gpu_offset_attn_sub_norm = (uint32_t)current_offset;
-                    current_offset = align_up(current_offset + sub_norm_bytes, align_bytes);
-                } else {
-                    lay.gpu_offset_attn_sub_norm = 0xFFFFFFFF;
-                }
-
-                if (lay.ffn_norm) {
-                    size_t norm_bytes = ctx->config.n_embd * sizeof(float);
-                    lay.gpu_offset_ffn_norm = (uint32_t)current_offset;
-                    current_offset = align_up(current_offset + norm_bytes, align_bytes);
-                } else {
-                    lay.gpu_offset_ffn_norm = 0xFFFFFFFF;
-                }
-
-                lay.gpu_offset_w_gate = (uint32_t)current_offset;
-                current_offset = align_up(current_offset + w_gate_bytes, align_bytes);
-
-                lay.gpu_offset_w_up = (uint32_t)current_offset;
-                current_offset = align_up(current_offset + w_up_bytes, align_bytes);
-
-                lay.gpu_offset_w_down = (uint32_t)current_offset;
-                current_offset = align_up(current_offset + w_down_bytes, align_bytes);
-
-                if (lay.ffn_sub_norm) {
-                    size_t sub_norm_bytes = ctx->config.n_ffn * sizeof(float);
-                    lay.gpu_offset_ffn_sub_norm = (uint32_t)current_offset;
-                    current_offset = align_up(current_offset + sub_norm_bytes, align_bytes);
-                } else {
-                    lay.gpu_offset_ffn_sub_norm = 0xFFFFFFFF;
-                }
-            }
-
-            size_t total_weight_bytes = current_offset;
-            engine->AllocateModelBuffers(total_weight_bytes, max_dim, max_dim, ctx->config.n_layers, ctx->config.n_ctx, ctx->config.n_kv_heads, ctx->config.head_dim);
-
-            // Upload all offloaded layer weights into permanent GPU buffer ONCE
-            for (int32_t l = 0; l < offloaded_layers; ++l) {
+            std::vector<float> n0, n1, n2, n3;
+            for (uint32_t l = 0; l < gc.n_layers; ++l) {
                 const auto& lay = ctx->layers[l];
-                size_t wq_bytes = (size_t)q_dim * (ctx->config.n_embd / 128) * 32;
-                size_t wk_bytes = (size_t)kv_dim * (ctx->config.n_embd / 128) * 32;
-                size_t wv_bytes = (size_t)kv_dim * (ctx->config.n_embd / 128) * 32;
-                size_t wo_bytes = (size_t)ctx->config.n_embd * (ctx->config.n_embd / 128) * 32;
-                size_t w_gate_bytes = (size_t)ctx->config.n_ffn * (ctx->config.n_embd / 128) * 32;
-                size_t w_up_bytes = (size_t)ctx->config.n_ffn * (ctx->config.n_embd / 128) * 32;
-                size_t w_down_bytes = (size_t)ctx->config.n_embd * (ctx->config.n_ffn / 128) * 32;
-
-                if (lay.attn_norm && lay.gpu_offset_attn_norm != 0xFFFFFFFF) {
-                    std::vector<float> norm_f32(ctx->config.n_embd);
-                    if (lay.attn_norm_type == 1) {
-                        const uint16_t* hw = (const uint16_t*)lay.attn_norm;
-                        for (uint32_t i = 0; i < ctx->config.n_embd; ++i) norm_f32[i] = f16_to_f32(hw[i]);
-                    } else {
-                        std::memcpy(norm_f32.data(), lay.attn_norm, ctx->config.n_embd * sizeof(float));
+                const uint32_t types[7] = { lay.wq_type, lay.wk_type, lay.wv_type, lay.wo_type, lay.w_gate_type,
+                                            lay.w_up_type, lay.w_down_type };
+                for (uint32_t ty : types) {
+                    if (ty != 36 && ty != 30) {
+                        throw std::runtime_error("layer " + std::to_string(l) + " has a projection of type " +
+                                                 std::to_string(ty) + "; the GPU chain runs i2_s projections only");
                     }
-                    engine->UploadWeightAtOffset(norm_f32.data(), ctx->config.n_embd * sizeof(float), lay.gpu_offset_attn_norm);
                 }
-
-                engine->UploadWeightAtOffset(lay.wq, wq_bytes, lay.gpu_offset_wq);
-                engine->UploadWeightAtOffset(lay.wk, wk_bytes, lay.gpu_offset_wk);
-                engine->UploadWeightAtOffset(lay.wv, wv_bytes, lay.gpu_offset_wv);
-                engine->UploadWeightAtOffset(lay.wo, wo_bytes, lay.gpu_offset_wo);
-                if (lay.attn_sub_norm && lay.gpu_offset_attn_sub_norm != 0xFFFFFFFF) {
-                    std::vector<float> norm_f32(ctx->config.n_embd);
-                    if (lay.attn_sub_norm_type == 1) {
-                        const uint16_t* hw = (const uint16_t*)lay.attn_sub_norm;
-                        for (uint32_t i = 0; i < ctx->config.n_embd; ++i) norm_f32[i] = f16_to_f32(hw[i]);
-                    } else {
-                        std::memcpy(norm_f32.data(), lay.attn_sub_norm, ctx->config.n_embd * sizeof(float));
-                    }
-                    engine->UploadWeightAtOffset(norm_f32.data(), ctx->config.n_embd * sizeof(float), lay.gpu_offset_attn_sub_norm);
-                }
-
-                if (lay.ffn_norm && lay.gpu_offset_ffn_norm != 0xFFFFFFFF) {
-                    std::vector<float> norm_f32(ctx->config.n_embd);
-                    if (lay.ffn_norm_type == 1) {
-                        const uint16_t* hw = (const uint16_t*)lay.ffn_norm;
-                        for (uint32_t i = 0; i < ctx->config.n_embd; ++i) norm_f32[i] = f16_to_f32(hw[i]);
-                    } else {
-                        std::memcpy(norm_f32.data(), lay.ffn_norm, ctx->config.n_embd * sizeof(float));
-                    }
-                    engine->UploadWeightAtOffset(norm_f32.data(), ctx->config.n_embd * sizeof(float), lay.gpu_offset_ffn_norm);
-                }
-
-                engine->UploadWeightAtOffset(lay.w_gate, w_gate_bytes, lay.gpu_offset_w_gate);
-                engine->UploadWeightAtOffset(lay.w_up, w_up_bytes, lay.gpu_offset_w_up);
-                engine->UploadWeightAtOffset(lay.w_down, w_down_bytes, lay.gpu_offset_w_down);
-                if (lay.ffn_sub_norm && lay.gpu_offset_ffn_sub_norm != 0xFFFFFFFF) {
-                    std::vector<float> norm_f32(ctx->config.n_ffn);
-                    if (lay.ffn_sub_norm_type == 1) {
-                        const uint16_t* hw = (const uint16_t*)lay.ffn_sub_norm;
-                        for (uint32_t i = 0; i < ctx->config.n_ffn; ++i) norm_f32[i] = f16_to_f32(hw[i]);
-                    } else {
-                        std::memcpy(norm_f32.data(), lay.ffn_sub_norm, ctx->config.n_ffn * sizeof(float));
-                    }
-                    engine->UploadWeightAtOffset(norm_f32.data(), ctx->config.n_ffn * sizeof(float), lay.gpu_offset_ffn_sub_norm);
-                }
+                ameva::core::BitNetGpuLayerHost h;
+                h.attn_norm = norm_f32(lay.attn_norm, lay.attn_norm_type, cfg.n_embd, n0);
+                h.attn_sub_norm = norm_f32(lay.attn_sub_norm, lay.attn_sub_norm_type, cfg.n_embd, n1);
+                h.ffn_norm = norm_f32(lay.ffn_norm, lay.ffn_norm_type, cfg.n_embd, n2);
+                h.ffn_sub_norm = norm_f32(lay.ffn_sub_norm, lay.ffn_sub_norm_type, cfg.n_ffn, n3);
+                h.wq = lay.wq;
+                h.wk = lay.wk;
+                h.wv = lay.wv;
+                h.wo = lay.wo;
+                h.w_gate = lay.w_gate;
+                h.w_up = lay.w_up;
+                h.w_down = lay.w_down;
+                h.scale_wq = lay.scale_wq;
+                h.scale_wk = lay.scale_wk;
+                h.scale_wv = lay.scale_wv;
+                h.scale_wo = lay.scale_wo;
+                h.scale_w_gate = lay.scale_w_gate;
+                h.scale_w_up = lay.scale_w_up;
+                h.scale_w_down = lay.scale_w_down;
+                engine->UploadLayer(l, h);
             }
-
-            // LM Head GPU residency (FP16 Vocabulary Output Projection)
-            if (ctx->output_weight && ctx->output_weight_type == 1) {
-                uint32_t active_vocab = ctx->config.n_vocab;
-                if (ctx->params.vocab_slice > 0 && (uint32_t)ctx->params.vocab_slice < ctx->config.n_vocab) {
-                    active_vocab = (uint32_t)ctx->params.vocab_slice;
-                }
-                size_t lm_head_bytes = (size_t)active_vocab * ctx->config.n_embd * sizeof(uint16_t);
-                engine->AllocateLMHeadBuffer(lm_head_bytes, active_vocab, ctx->config.n_embd);
-                engine->UploadLMHeadWeights(ctx->output_weight, lm_head_bytes);
-                std::cout << "[termux-bitnet] LM Head (FP16 " << active_vocab << "x" << ctx->config.n_embd
-                          << ", " << (lm_head_bytes / (1024 * 1024)) << " MB) permanently resident in GPU VRAM.";
-                if (active_vocab < ctx->config.n_vocab) {
-                    std::cout << " (Vocab Sliced from " << ctx->config.n_vocab << ")";
-                }
-                std::cout << std::endl;
-            }
-
-            ctx->vk_engine = engine;
-            std::cout << "[termux-bitnet] Vulkan GPU Engine activated: "
-                      << engine->GetDeviceInfo().device_name
-                      << " (" << offloaded_layers << "/" << ctx->config.n_layers
-                      << " layers permanently resident in GPU VRAM: "
-                      << (total_weight_bytes / (1024 * 1024)) << " MB, Zero Silent Fallback)" << std::endl;
+            if (!ctx->output_norm) throw std::runtime_error("the model has no output_norm.weight");
+            std::vector<float> on;
+            engine->UploadOutput(norm_f32(ctx->output_norm, ctx->output_norm_type, cfg.n_embd, on),
+                                 (const uint16_t*)ctx->output_weight, cfg.n_vocab);
+            std::cout << "[termux-bitnet] AMUDA ac_runtime GPU engine: " << engine->DeviceName() << " ("
+                      << gc.n_layers << "/" << cfg.n_layers << " layers, weights "
+                      << (engine->WeightBytes() >> 20) << " MB, LM head " << (engine->LMHeadBytes() >> 20)
+                      << " MB, KV cache " << (engine->KVCacheBytes() >> 20) << " MB)" << std::endl;
+            ctx->gpu_engine = engine.release();
         } catch (const std::exception& e) {
-            std::cerr << "[termux-bitnet FATAL FAIL-FAST] GPU offload requested (-ngl "
-                      << ctx->n_gpu_layers << "), but Vulkan initialization failed: "
-                      << e.what() << std::endl;
+            std::cerr << "[termux-bitnet FATAL FAIL-FAST] GPU offload requested (-ngl " << ctx->n_gpu_layers
+                      << "), but the AMUDA GPU engine could not be set up: " << e.what() << std::endl;
             bitnet_free(ctx);
             return nullptr;
         }
@@ -689,7 +675,7 @@ bitnet_context_t bitnet_init(const bitnet_params_t* params) {
 #else
     if (ctx->n_gpu_layers > 0) {
         std::cerr << "[termux-bitnet FATAL FAIL-FAST] -ngl " << ctx->n_gpu_layers
-                  << " requested, but binary was built without GGML_USE_VULKAN!" << std::endl;
+                  << " requested, but this library was built without the AMUDA GPU engine (AC_BITNET_GPU)" << std::endl;
         bitnet_free(ctx);
         return nullptr;
     }
@@ -762,12 +748,9 @@ void bitnet_free(bitnet_context_t ctx) {
         std::lock_guard<std::recursive_mutex> lock(ctx->ctx_mutex);
         ctx->is_initialized = false;
 
-#if defined(GGML_USE_VULKAN)
-        if (ctx->vk_engine) {
-            auto* engine = static_cast<ameva::core::VulkanBitNetEngine*>(ctx->vk_engine);
-            delete engine;
-            ctx->vk_engine = nullptr;
-        }
+#if defined(AC_BITNET_GPU)
+        delete static_cast<ameva::core::AcBitNetEngine*>(ctx->gpu_engine);
+        ctx->gpu_engine = nullptr;
 #endif
 
         // Clean up mmap handles
@@ -815,17 +798,10 @@ int32_t bitnet_tokenize(bitnet_context_t ctx, const char* text, int32_t* tokens,
         tokens[count++] = ctx->vocab.bos_id;
     }
 
-    // Convert raw string to GPT-2/Llama-3 byte-level BPE representation (space -> Ġ, newline -> Ċ)
-    std::string s = "";
-    for (size_t i = 0; text[i] != '\0'; ++i) {
-        if (text[i] == ' ') {
-            s += "\xc4\xa0"; // Ġ
-        } else if (text[i] == '\n') {
-            s += "\xc4\x8a"; // Ċ
-        } else {
-            s += text[i];
-        }
-    }
+    // Every byte of the text in the byte-level BPE alphabet (space -> U+0120, newline -> U+010A, ...). The split is a
+    // greedy longest match over the vocabulary, not the BPE merges of the reference tokenizer.
+    std::string s;
+    for (size_t i = 0; text[i] != '\0'; ++i) append_utf8(s, byte_level_cp((uint8_t)text[i]));
 
     size_t pos = 0;
     while (pos < s.length() && count < max_tokens) {
@@ -847,16 +823,10 @@ int32_t bitnet_tokenize(bitnet_context_t ctx, const char* text, int32_t* tokens,
             tokens[count++] = best_id;
             pos += best_len;
         } else {
-            uint8_t byte_val = (uint8_t)s[pos];
-            int32_t byte_tok = ctx->vocab.byte_to_id[byte_val];
-            if (byte_tok >= 0) {
-                tokens[count++] = byte_tok;
-            } else if (ctx->vocab.unk_id >= 0) {
-                tokens[count++] = ctx->vocab.unk_id;
-            } else {
-                tokens[count++] = (int32_t)(byte_val % ctx->config.n_vocab);
-            }
-            pos++;
+            // every byte-level symbol is a token of a gpt2 vocabulary; a vocabulary without it cannot encode the text
+            std::cerr << "[termux-bitnet ERROR] bitnet_tokenize: no vocabulary entry for byte offset " << pos
+                      << " of the encoded text" << std::endl;
+            return -1;
         }
     }
     return count;
@@ -881,20 +851,9 @@ int32_t bitnet_token_to_str(bitnet_context_t ctx, int32_t token, char* buf, int3
         }
     }
 
-    // Convert BPE symbols (Ġ -> space, Ċ -> newline)
-    std::string decoded = "";
-    for (size_t i = 0; i < raw_str.size(); ) {
-        if (i + 1 < raw_str.size() && (uint8_t)raw_str[i] == 0xc4 && (uint8_t)raw_str[i + 1] == 0xa0) {
-            decoded += ' ';
-            i += 2;
-        } else if (i + 1 < raw_str.size() && (uint8_t)raw_str[i] == 0xc4 && (uint8_t)raw_str[i + 1] == 0x8a) {
-            decoded += '\n';
-            i += 2;
-        } else {
-            decoded += raw_str[i];
-            i++;
-        }
-    }
+    // byte-level symbols back to bytes; a token outside the alphabet (an added special token) is its own text
+    std::string decoded;
+    if (!byte_level_decode(raw_str, decoded)) decoded = raw_str;
 
     int32_t copied = (int32_t)std::min((size_t)buf_len - 1, decoded.length());
     std::memcpy(buf, decoded.data(), copied);
@@ -1123,18 +1082,7 @@ static void multi_head_attention(float* out, const float* q, const BitNetKVCache
 }
 
 static void forward_swiglu(float* out, const float* ffn_norm, const BitNetLayerWeights& lay, 
-                           const BitNetConfig& cfg, void* vk_engine, bool use_gpu,
-                           float* gate, float* up) {
-#if defined(GGML_USE_VULKAN)
-    if (use_gpu && vk_engine) {
-        auto* engine = static_cast<ameva::core::VulkanBitNetEngine*>(vk_engine);
-        engine->DispatchFullFFN(lay.gpu_offset_w_gate, lay.gpu_offset_w_up, lay.gpu_offset_w_down,
-                                lay.gpu_offset_ffn_sub_norm,
-                                ffn_norm, out, cfg.n_ffn, cfg.n_embd, cfg.norm_eps, 1.0f);
-        return;
-    }
-#endif
-
+                           const BitNetConfig& cfg, float* gate, float* up) {
     std::vector<int8_t> x_q8(cfg.n_embd);
     float dequant = quantize_activation_int8(x_q8.data(), ffn_norm, cfg.n_embd);
 
@@ -1189,52 +1137,44 @@ int32_t bitnet_eval(bitnet_context_t ctx, const int32_t* tokens, int32_t n_token
     uint32_t q_dim = cfg.n_embd;
     uint32_t kv_dim = cfg.n_kv_heads * cfg.head_dim;
 
+    // --vocab-slice N: the LM head covers the first N tokens only, the others get -1e9 (CPU and GPU alike)
+    const uint32_t active_vocab = (ctx->params.vocab_slice > 0 && (uint32_t)ctx->params.vocab_slice < cfg.n_vocab)
+                                      ? (uint32_t)ctx->params.vocab_slice : cfg.n_vocab;
+
     for (int32_t t = 0; t < n_tokens; ++t) {
         int32_t token = tokens[t];
         size_t pos = ctx->kv_cache.current_pos;
         if (pos >= cfg.n_ctx) {
-            pos = cfg.n_ctx - 1; // Window clamp
+            // writing over the last cache row would change every later result without notice
+            std::cerr << "[termux-bitnet ERROR] context full: position " << pos << " >= n_ctx " << cfg.n_ctx << std::endl;
+            return -3;
         }
 
         // 1. Token Embedding Lookup
         lookup_embedding(x.data(), ctx->embd_weight, ctx->embd_type, token, cfg.n_embd);
 
-        int32_t offloaded_layers = (ctx->vk_engine != nullptr) ? std::min(ctx->n_gpu_layers, (int32_t)cfg.n_layers) : 0;
+        const bool last_token = (t == n_tokens - 1);
+        int32_t offloaded_layers = (ctx->gpu_engine != nullptr) ? std::min(ctx->n_gpu_layers, (int32_t)cfg.n_layers) : 0;
+        bool logits_on_gpu = false;
 
-        // 2. GPU Full-Pipeline On-Chain Token Execution (Single Driver Queue Submission for all offloaded layers!)
+        // 2. GPU layers on the AMUDA runtime: one command batch per token (with the LM head when every layer is there)
         if (offloaded_layers > 0) {
-#if defined(GGML_USE_VULKAN)
-            auto* engine = static_cast<ameva::core::VulkanBitNetEngine*>(ctx->vk_engine);
-            std::vector<ameva::core::LayerGpuOffsets> gpu_offsets(offloaded_layers);
-            for (int32_t l = 0; l < offloaded_layers; ++l) {
-                const auto& lay = ctx->layers[l];
-                gpu_offsets[l].offset_attn_norm = lay.gpu_offset_attn_norm;
-                gpu_offsets[l].offset_wq = lay.gpu_offset_wq;
-                gpu_offsets[l].offset_wk = lay.gpu_offset_wk;
-                gpu_offsets[l].offset_wv = lay.gpu_offset_wv;
-                gpu_offsets[l].offset_attn_sub_norm = lay.gpu_offset_attn_sub_norm;
-                gpu_offsets[l].offset_wo = lay.gpu_offset_wo;
-                gpu_offsets[l].offset_ffn_norm = lay.gpu_offset_ffn_norm;
-                gpu_offsets[l].offset_w_gate = lay.gpu_offset_w_gate;
-                gpu_offsets[l].offset_w_up = lay.gpu_offset_w_up;
-                gpu_offsets[l].offset_ffn_sub_norm = lay.gpu_offset_ffn_sub_norm;
-                gpu_offsets[l].offset_w_down = lay.gpu_offset_w_down;
-
-                gpu_offsets[l].scale_wq = lay.scale_wq;
-                gpu_offsets[l].scale_wk = lay.scale_wk;
-                gpu_offsets[l].scale_wv = lay.scale_wv;
-                gpu_offsets[l].scale_wo = lay.scale_wo;
-                gpu_offsets[l].scale_w_gate = lay.scale_w_gate;
-                gpu_offsets[l].scale_w_up = lay.scale_w_up;
-                gpu_offsets[l].scale_w_down = lay.scale_w_down;
+#if defined(AC_BITNET_GPU)
+            auto* engine = static_cast<ameva::core::AcBitNetEngine*>(ctx->gpu_engine);
+            const bool all_layers = offloaded_layers == (int32_t)cfg.n_layers;
+            logits_on_gpu = all_layers && last_token;
+            try {
+                engine->EvalToken((uint32_t)pos, x.data(), all_layers ? nullptr : x.data(),
+                                  logits_on_gpu ? ctx->logits.data() : nullptr,
+                                  (uint32_t)std::max<int32_t>(0, ctx->params.chunk_layers));
+            } catch (const std::exception& e) {
+                std::cerr << "[termux-bitnet FATAL FAIL-FAST] GPU token execution failed at position " << pos << ": "
+                          << e.what() << std::endl;
+                return -2;
             }
-
-            engine->DispatchFullTokenChain((uint32_t)pos, x.data(), x.data(),
-                                           gpu_offsets.data(), (uint32_t)offloaded_layers,
-                                           q_dim, kv_dim, cfg.n_embd, cfg.n_ffn,
-                                           cfg.head_dim, cfg.n_heads, cfg.n_kv_heads,
-                                           cfg.rope_theta, cfg.norm_eps, 1.0f,
-                                           (uint32_t)ctx->params.chunk_layers);
+            if (logits_on_gpu && active_vocab < cfg.n_vocab) {
+                std::fill(ctx->logits.begin() + active_vocab, ctx->logits.end(), -1e9f);
+            }
 #endif
         }
 
@@ -1292,7 +1232,7 @@ int32_t bitnet_eval(bitnet_context_t ctx, const int32_t* tokens, int32_t n_token
 
             // 3.6 FFN RMSNorm & SwiGLU FFN (with Sub-LayerNorm)
             rms_norm(x_norm.data(), x.data(), lay.ffn_norm, lay.ffn_norm_type, cfg.n_embd, cfg.norm_eps);
-            forward_swiglu(ffn_out.data(), x_norm.data(), lay, cfg, nullptr, false, ffn_gate.data(), ffn_up.data());
+            forward_swiglu(ffn_out.data(), x_norm.data(), lay, cfg, ffn_gate.data(), ffn_up.data());
 
             float ffn_n = 0.0f;
             for (uint32_t i = 0; i < cfg.n_embd; ++i) ffn_n += ffn_out[i] * ffn_out[i];
@@ -1312,30 +1252,32 @@ int32_t bitnet_eval(bitnet_context_t ctx, const int32_t* tokens, int32_t n_token
         }
 
         // 3. Final RMSNorm & LM Head Projection (Evaluated on last sequence token)
-        if (t == n_tokens - 1) {
+        if (last_token && !logits_on_gpu) {
             rms_norm(x_norm.data(), x.data(), ctx->output_norm, ctx->output_norm_type, cfg.n_embd, cfg.norm_eps);
-            {
+            if (ctx->params.verbose) {
                 float xn = 0.0f;
                 for (uint32_t i = 0; i < cfg.n_embd; ++i) xn += x_norm[i] * x_norm[i];
-                if (ctx->params.verbose) {
-                    std::cout << "[DEBUG FINAL NORM] final_x_norm=" << std::sqrt(xn) << ", first 4 vals=[" << x_norm[0] << ", " << x_norm[1] << ", " << x_norm[2] << ", " << x_norm[3] << "]" << std::endl;
-                }
+                std::cout << "[DEBUG FINAL NORM] final_x_norm=" << std::sqrt(xn) << ", first 4 vals=[" << x_norm[0] << ", " << x_norm[1] << ", " << x_norm[2] << ", " << x_norm[3] << "]" << std::endl;
             }
-#if defined(GGML_USE_VULKAN)
-            uint32_t active_vocab = (ctx->params.vocab_slice > 0 && (uint32_t)ctx->params.vocab_slice < cfg.n_vocab) ? (uint32_t)ctx->params.vocab_slice : cfg.n_vocab;
-            if (ctx->vk_engine && static_cast<ameva::core::VulkanBitNetEngine*>(ctx->vk_engine)->HasLMHead()) {
-                static_cast<ameva::core::VulkanBitNetEngine*>(ctx->vk_engine)->DispatchLMHead(
-                    x_norm.data(), ctx->logits.data(), active_vocab, cfg.n_embd);
-                for (size_t i = active_vocab; i < cfg.n_vocab; ++i) {
-                    ctx->logits[i] = -1e9f;
+#if defined(AC_BITNET_GPU)
+            if (ctx->gpu_engine) {
+                try {
+                    static_cast<ameva::core::AcBitNetEngine*>(ctx->gpu_engine)->LMHead(x_norm.data(), ctx->logits.data());
+                } catch (const std::exception& e) {
+                    std::cerr << "[termux-bitnet FATAL FAIL-FAST] GPU LM head failed: " << e.what() << std::endl;
+                    return -2;
                 }
             } else
 #endif
             {
                 float final_dequant = quantize_activation_int8(q8_buf.data(), x_norm.data(), cfg.n_embd);
-                bitnet_gemv(ctx->logits.data(), ctx->output_weight, ctx->output_weight_type, 
-                            q8_buf.data(), x_norm.data(), final_dequant, cfg.n_embd, cfg.n_vocab, ctx->params.n_threads);
+                bitnet_gemv(ctx->logits.data(), ctx->output_weight, ctx->output_weight_type,
+                            q8_buf.data(), x_norm.data(), final_dequant, cfg.n_embd, active_vocab, 1.0f,
+                            ctx->params.n_threads);
             }
+            if (active_vocab < cfg.n_vocab) std::fill(ctx->logits.begin() + active_vocab, ctx->logits.end(), -1e9f);
+        }
+        if (last_token) {
             if (ctx->params.verbose) {
                 float max_l = -1e9f, min_l = 1e9f;
                 for (size_t i = 0; i < cfg.n_vocab; ++i) {
@@ -1361,6 +1303,21 @@ int32_t bitnet_eval(bitnet_context_t ctx, const int32_t* tokens, int32_t n_token
     }
 
     return 0;
+}
+
+const float* bitnet_get_logits(bitnet_context_t ctx, int32_t* n_vocab) {
+    if (!ctx || !ctx->is_initialized) return nullptr;
+    std::lock_guard<std::recursive_mutex> lock(ctx->ctx_mutex);
+    if (n_vocab) *n_vocab = (int32_t)ctx->logits.size();
+    return ctx->logits.data();
+}
+
+void bitnet_reset(bitnet_context_t ctx) {
+    if (!ctx) return;
+    std::lock_guard<std::recursive_mutex> lock(ctx->ctx_mutex);
+    ctx->kv_cache.reset();
+    ctx->context_tokens.clear();
+    ctx->token_frequencies.clear();
 }
 
 int32_t bitnet_sample(bitnet_context_t ctx) {
@@ -1498,7 +1455,10 @@ int32_t bitnet_generate_stream(bitnet_context_t ctx, const char* prompt, int32_t
 
     ctx->metrics.prompt_tokens = n_prompt;
     auto t_start_prompt = std::chrono::high_resolution_clock::now();
-    bitnet_eval(ctx, prompt_tokens.data(), n_prompt);
+    if (bitnet_eval(ctx, prompt_tokens.data(), n_prompt) != 0) {
+        std::cerr << "[termux-bitnet ERROR] bitnet_generate_stream: prompt evaluation failed" << std::endl;
+        return -1;
+    }
     auto t_end_prompt = std::chrono::high_resolution_clock::now();
     ctx->metrics.prompt_eval_ms = std::chrono::duration<double, std::milli>(t_end_prompt - t_start_prompt).count();
 
@@ -1531,7 +1491,11 @@ int32_t bitnet_generate_stream(bitnet_context_t ctx, const char* prompt, int32_t
             if (!keep_going) break;
         }
 
-        bitnet_eval(ctx, &next_tok, 1);
+        if (bitnet_eval(ctx, &next_tok, 1) != 0) {
+            std::cerr << "[termux-bitnet ERROR] bitnet_generate_stream: evaluation of generated token "
+                      << generated_count << " failed" << std::endl;
+            return -1;
+        }
     }
 
     auto t_end_eval = std::chrono::high_resolution_clock::now();
@@ -1567,10 +1531,10 @@ void bitnet_get_hardware_info(char* buf, int32_t buf_len) {
 #else
     ss << "Generic Scalar Mode";
 #endif
-#if defined(GGML_USE_VULKAN)
-    ss << " | VULKAN = 1";
+#if defined(AC_BITNET_GPU)
+    ss << " | AMUDA GPU (ac_runtime Vulkan) = 1";
 #else
-    ss << " | VULKAN = 0";
+    ss << " | AMUDA GPU = 0";
 #endif
     ss << " | QK_I2_S = 128 (Interleaved 32-stride)";
 

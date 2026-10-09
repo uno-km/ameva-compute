@@ -29,7 +29,7 @@ BITNET_API void bitnet_raw_vec_dot_i2_s(int32_t n, float* s, const void* vx, con
 }
 
 BITNET_API bool bitnet_has_vulkan(void) {
-#if defined(GGML_USE_VULKAN)
+#if defined(AC_BITNET_GPU)
     return true;
 #else
     return false;

@@ -1,80 +1,84 @@
 #version 450
-
+/**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
 // ============================================================================
-// AMUDA Kernel: BitNet 1.58-bit (i2_s) GEMV
-// Ported from termux-bitnet runtime_gpu for AMUDA ac_runtime API
+// AMUDA Kernel: BitNet 1.58-bit (i2_s) GEMV on int8 activations
+// Ported from termux-bitnet runtime_gpu for the AMUDA ac_runtime API (adapters/bitnet, ac_bitnet_engine.cpp)
 // ============================================================================
-// Encoding: 2-bit centered ternary {-1, 0, +1} → stored as {0, 1, 2}
-// Packing: 4 weights per byte, 16 weights per uint32, 128 weights per 32 bytes
-// Layout: 32-way 4-stride interleaved (lane processes 4 weights per block)
-// Reduction: 5-stage shared memory parallel tree (32 → 1)
+// Encoding: 2-bit code c per weight, value c - 1 (0 -> -1, 1 -> 0, 2 -> +1; code 3, which the i2_s quantizer does not
+// emit, gives +2 as in the CPU kernel ggml_vec_dot_i2_i8_s of adapters/bitnet/src/cpu/ggml_bitnet_mad.cpp).
+// Packing: 128 weights per 32-byte block; byte k of a block holds the weights k, 32 + k, 64 + k and 96 + k of the
+// block in bits 7-6, 5-4, 3-2 and 1-0. A row of in_dim weights is in_dim / 4 bytes.
+// Activations: int8 values packed four per uint (element j in byte j % 4 of word j / 4), with their dequantization
+// factor in act[0] (bitnet_norm_q8.comp), as quantize_activation_int8 of the CPU path makes them.
+// Result: y[r] = float(sum_j (c_rj - 1) * q_j) * (act_dequant * weight_scale). The integer sum is exact in any order,
+// so y equals the CPU result bit for bit when the activations and their factor are the same.
+// Work split: a workgroup computes 4 rows; the 32 lanes of a row each take one weight word (16 weights) per step.
+// -DACCUM: y[r] += result (the residual connections after the output and down projections).
 // ============================================================================
 
 layout(local_size_x = 32, local_size_y = 4, local_size_z = 1) in;
 
-// Binding 0: Packed 2-bit ternary weights
-layout(std430, set = 0, binding = 0) readonly buffer WeightBuffer {
+// Binding 0: packed 2-bit ternary weights of this matrix (bound from the matrix start)
+layout(std430, binding = 0) readonly buffer WeightBuffer {
     uint raw_weights[];
 };
 
-// Binding 1: Input activation vector (FP32)
-layout(std430, set = 0, binding = 1) readonly buffer ActivationBuffer {
-    float activations[];
+// Binding 1: int8 activations, four per word
+layout(std430, binding = 1) readonly buffer ActivationBuffer {
+    uint activations[];
 };
 
-// Binding 2: Output dot-product vector (FP32)
-layout(std430, set = 0, binding = 2) writeonly buffer OutputBuffer {
+// Binding 2: output vector
+layout(std430, binding = 2) buffer OutputBuffer {
     float output_vec[];
 };
 
-layout(push_constant) uniform PushConstants {
-    uint in_dim;              // Input dimension N (must be multiple of 128)
-    uint out_dim;             // Output dimension M (number of output rows)
-    float dequant_scale;      // Dequantization scale factor
-    uint weight_offset_bytes; // Byte offset into weight buffer (multiple of 4)
-    uint output_offset_words; // Word offset into output buffer
+// Binding 3: activation dequantization factor (act[0], float bits) written by bitnet_norm_q8
+layout(std430, binding = 3) readonly buffer ActScaleBuffer {
+    uint act[];
 };
 
-shared float row_shared_sum[4][32];
+layout(push_constant) uniform PushConstants {
+    uint in_dim;              // Input dimension N (multiple of 128)
+    uint out_dim;             // Output dimension M (number of output rows)
+    uint weight_scale_bits;   // per-tensor i2_s scale (float bits)
+    uint output_offset_words; // first output element (the V projection writes its cache row in place)
+};
+
+shared int row_shared_sum[4][32];
 
 void main() {
     uint local_lane = gl_LocalInvocationID.x;  // 0..31
     uint local_row  = gl_LocalInvocationID.y;  // 0..3
     uint global_row = gl_WorkGroupID.x * 4 + local_row;
 
-    float acc = 0.0;
+    int acc = 0;
 
     if (global_row < out_dim) {
-        uint num_blocks = in_dim / 128;
-        uint base_word = weight_offset_bytes / 4u;
-        uint row_word_base = base_word + global_row * (num_blocks * 8);
+        uint row_words = in_dim / 16u;
+        uint row_base = global_row * row_words;
 
-        for (uint b = 0; b < num_blocks; ++b) {
-            uint block_col_base = b * 128;
-
-            // Each lane reads 1 byte (4 weights) from a 32-byte block
-            uint word_idx = row_word_base + (b * 8) + (local_lane / 4);
-            uint byte_shift = (local_lane % 4) * 8;
-            uint packed_word = raw_weights[word_idx];
-            uint byte_val = (packed_word >> byte_shift) & 0xFFu;
-
-            // Unpack 4 ternary weights: 2-bit each, centered (val - 1)
-            float w0 = float((byte_val >> 6) & 0x03u) - 1.0;
-            float w1 = float((byte_val >> 4) & 0x03u) - 1.0;
-            float w2 = float((byte_val >> 2) & 0x03u) - 1.0;
-            float w3 = float(byte_val & 0x03u) - 1.0;
-
-            // 32-stride interleaved activation reads
-            float x0 = activations[block_col_base + 0 * 32 + local_lane];
-            float x1 = activations[block_col_base + 1 * 32 + local_lane];
-            float x2 = activations[block_col_base + 2 * 32 + local_lane];
-            float x3 = activations[block_col_base + 3 * 32 + local_lane];
-
-            acc += (w0 * x0) + (w1 * x1) + (w2 * x2) + (w3 * x3);
+        for (uint w = local_lane; w < row_words; w += 32u) {
+            uint packed_word = raw_weights[row_base + w];
+            // word w of the row is word (w % 8) of block w / 8: bytes k = 4 (w % 8) + 0..3 of that block, whose
+            // activations of group g are the four int8 at block * 128 + g * 32 + 4 (w % 8), i.e. one word
+            uint act_base = (w / 8u) * 32u + (w % 8u);
+            for (uint g = 0u; g < 4u; ++g) {
+                uint a = activations[act_base + g * 8u];
+                uint codes = (packed_word >> (6u - 2u * g)) & 0x03030303u;
+                for (uint k = 0u; k < 4u; ++k) {
+                    int wv = int((codes >> (8u * k)) & 0x3u) - 1;
+                    int xv = bitfieldExtract(int(a), int(8u * k), 8);
+                    acc += wv * xv;
+                }
+            }
         }
     }
 
-    // 5-stage parallel tree reduction (32 lanes → 1)
+    // 5-stage parallel tree reduction (32 lanes -> 1)
     row_shared_sum[local_row][local_lane] = acc;
     barrier();
 
@@ -86,10 +90,18 @@ void main() {
     barrier();
     if (local_lane < 2)  { row_shared_sum[local_row][local_lane] += row_shared_sum[local_row][local_lane + 2];  }
     barrier();
-    if (local_lane < 1)  { row_shared_sum[local_row][local_lane] += row_shared_sum[local_row][local_lane + 1];  }
 
-    // Master lane writes dequantized result
+    // Master lane writes the dequantized result: the same two roundings as the CPU path
     if (local_lane == 0 && global_row < out_dim) {
-        output_vec[output_offset_words + global_row] = row_shared_sum[local_row][0] * dequant_scale;
+        int sum = row_shared_sum[local_row][0] + row_shared_sum[local_row][1];
+        float total_scale = uintBitsToFloat(act[0]) * uintBitsToFloat(weight_scale_bits);
+        precise float r = float(sum) * total_scale;
+#ifdef ACCUM
+        // the CPU path rounds the projection before the residual add: no multiply-add contraction
+        precise float o = output_vec[output_offset_words + global_row] + r;
+        output_vec[output_offset_words + global_row] = o;
+#else
+        output_vec[output_offset_words + global_row] = r;
+#endif
     }
 }

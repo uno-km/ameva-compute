@@ -89,10 +89,10 @@ int main(int argc, char** argv) {
             if (dev_arg == "cpu") {
                 params.n_gpu_layers = 0;
             } else if (dev_arg == "gpu" || dev_arg == "vulkan") {
-                if (params.n_gpu_layers == 0) params.n_gpu_layers = 33;
+                if (params.n_gpu_layers == 0) params.n_gpu_layers = 9999; // every layer
             } else if (dev_arg == "auto") {
-#if defined(GGML_USE_VULKAN)
-                if (params.n_gpu_layers == 0) params.n_gpu_layers = 33;
+#if defined(AC_BITNET_GPU)
+                if (params.n_gpu_layers == 0) params.n_gpu_layers = 9999; // every layer
 #else
                 params.n_gpu_layers = 0;
 #endif
@@ -217,8 +217,13 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "[Response]: " << std::flush;
-    bitnet_generate_stream(ctx, full_prompt.c_str(), n_predict, stream_print_cb, nullptr);
+    const int32_t generated = bitnet_generate_stream(ctx, full_prompt.c_str(), n_predict, stream_print_cb, nullptr);
     std::cout << std::endl;
+    if (generated < 0) {
+        std::cerr << "[FATAL] generation failed (see the error above)" << std::endl;
+        bitnet_free(ctx);
+        return 11;
+    }
 
     double p_eval_ms = 0.0, eval_ms = 0.0, tps = 0.0;
     bitnet_get_perf_stats(ctx, &p_eval_ms, &eval_ms, &tps);

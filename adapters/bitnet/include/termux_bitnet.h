@@ -121,6 +121,20 @@ BITNET_API int32_t bitnet_token_to_str(bitnet_context_t ctx, int32_t token, char
 BITNET_API int32_t bitnet_eval(bitnet_context_t ctx, const int32_t* tokens, int32_t n_tokens);
 
 /**
+ * @brief Logits of the last token of the last bitnet_eval call (n_vocab floats, valid until the next call).
+ * @param ctx Context handle.
+ * @param n_vocab Output: number of logits (may be NULL).
+ * @return Pointer to the logits, or NULL when ctx is not initialized.
+ */
+BITNET_API const float* bitnet_get_logits(bitnet_context_t ctx, int32_t* n_vocab);
+
+/**
+ * @brief Forget the evaluated tokens (KV cache position 0); the next bitnet_eval starts a new sequence.
+ * @param ctx Context handle.
+ */
+BITNET_API void bitnet_reset(bitnet_context_t ctx);
+
+/**
  * @brief Sample the next token from current logits using configured temperature & top_p.
  * @param ctx Context handle.
  * @return Sampled token ID.
@@ -134,13 +148,13 @@ BITNET_API int32_t bitnet_sample(bitnet_context_t ctx);
  * @param max_new_tokens Maximum number of tokens to generate.
  * @param callback Callback invoked on each generated token piece.
  * @param user_data User-defined pointer passed to callback.
- * @return Total number of tokens generated.
+ * @return Total number of tokens generated, or -1 when an evaluation failed (the cause is printed to stderr).
  */
 BITNET_API int32_t bitnet_generate_stream(bitnet_context_t ctx, const char* prompt, int32_t max_new_tokens, bitnet_stream_cb callback, void* user_data);
 
 /**
- * @brief Check whether native core engine was compiled with Vulkan GPU support.
- * @return true if GGML_USE_VULKAN is enabled, false otherwise.
+ * @brief Check whether the native core was built with the AMUDA GPU engine (ac_runtime, Vulkan).
+ * @return true if AC_BITNET_GPU is enabled, false otherwise.
  */
 BITNET_API bool bitnet_has_vulkan(void);
 

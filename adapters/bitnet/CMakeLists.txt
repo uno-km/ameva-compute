@@ -17,53 +17,34 @@ endif()
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/quirks
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include
 )
 
-set(BITNET_GPU_SOURCES
-    src/core/vulkan_loader.cpp
-    src/core/vulkan_bitnet_engine.cpp
-    src/quirks/gpu_quirks.cpp
+# CPU path and the AMUDA GPU engine (src/core/ac_bitnet_engine.cpp on ac_runtime; kernels from src/shaders through
+# scripts/build_bitnet_kernels.py into src/core/bitnet_kernels_spv.h). On a Termux device:
+# scripts/termux/build_bitnet_adapter.sh.
+set(BITNET_SOURCES
     src/cpu/ggml_bitnet_mad.cpp
     src/cpu/llama_bitnet_core.cpp
     src/cpu/c_api.cpp
+    src/core/ac_bitnet_engine.cpp
 )
 
-# Detect Vulkan library
-if(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Android" OR EXISTS "/system/lib64/libvulkan.so")
-    find_library(VULKAN_LIB vulkan PATHS /data/data/com.termux/files/usr/lib /system/lib64 /vendor/lib64)
-    if(NOT VULKAN_LIB)
-        set(VULKAN_LIB "vulkan")
-    endif()
-    set(BITNET_EXTRA_LIBS ${VULKAN_LIB} dl m pthread)
-elseif(UNIX)
-    find_library(VULKAN_LIB vulkan)
-    set(BITNET_EXTRA_LIBS ${VULKAN_LIB} dl m pthread)
-else()
-    set(BITNET_EXTRA_LIBS)
-endif()
-
-# Build Private Shared Library (libac_bitnet.so)
-add_library(ac_adapter_bitnet SHARED ${BITNET_GPU_SOURCES})
-set_target_properties(ac_adapter_bitnet PROPERTIES 
+add_library(ac_adapter_bitnet SHARED ${BITNET_SOURCES})
+set_target_properties(ac_adapter_bitnet PROPERTIES
     OUTPUT_NAME "ac_bitnet"
     SOVERSION 1
     VERSION 1.0.0
 )
-if(BITNET_EXTRA_LIBS)
-    target_link_libraries(ac_adapter_bitnet PRIVATE ${BITNET_EXTRA_LIBS})
+target_compile_definitions(ac_adapter_bitnet PRIVATE AC_BITNET_GPU)
+if(NOT MSVC)
+    target_compile_options(ac_adapter_bitnet PRIVATE -ffp-contract=off)
 endif()
+target_link_libraries(ac_adapter_bitnet PRIVATE ac_runtime)
 
-# Build Standalone CLI Hardware Probe
-add_executable(ac_probe_vulkan_gemv
-    src/cli/probe_vulkan_gemv.cpp
-    src/core/vulkan_loader.cpp
-    src/core/vulkan_bitnet_engine.cpp
-    src/quirks/gpu_quirks.cpp
-)
-if(BITNET_EXTRA_LIBS)
-    target_link_libraries(ac_probe_vulkan_gemv PRIVATE ${BITNET_EXTRA_LIBS})
-endif()
+add_executable(ac_bitnet_cli src/cpu/main.cpp)
+target_compile_definitions(ac_bitnet_cli PRIVATE AC_BITNET_GPU)
+target_link_libraries(ac_bitnet_cli PRIVATE ac_adapter_bitnet)
+
+add_executable(ac_bitnet_parity src/cli/ac_bitnet_parity.cpp)
+target_link_libraries(ac_bitnet_parity PRIVATE ac_adapter_bitnet)

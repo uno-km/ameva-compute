@@ -39,6 +39,7 @@ struct BitNetVocab {
     int32_t eos_id = 2;
     int32_t pad_id = 0;
     int32_t unk_id = 0;
+    std::string model;      // tokenizer.ggml.model ("gpt2": byte-level BPE)
 
     BitNetVocab() {
         for (int i = 0; i < 256; ++i) byte_to_id[i] = -1;
@@ -174,7 +175,7 @@ struct bitnet_context {
 
     // GPU Acceleration Engine
     int32_t n_gpu_layers = 0;
-    void* vk_engine = nullptr; // Opaque pointer to ameva::core::VulkanBitNetEngine
+    void* gpu_engine = nullptr; // ameva::core::AcBitNetEngine (AMUDA ac_runtime), set when -ngl > 0
 };
 
 // Forward declaration of kernel functions

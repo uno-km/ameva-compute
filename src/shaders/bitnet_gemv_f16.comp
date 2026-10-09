@@ -1,0 +1,48 @@
+#version 450
+/**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
+// ============================================================================
+// AMUDA Kernel: f16-weight GEMV on f32 activations, the BitNet LM head (adapters/bitnet, ac_bitnet_engine.cpp)
+// ============================================================================
+// y[out_offset + r] = sum_c f16(W[r][c]) * x[c] for the rows of one weight slice (rows of n_in f16, n_in even).
+// The f16 values go through unpackHalf2x16. A workgroup computes 4 rows; the 32 lanes of a row each take one word
+// (two weights) per step.
+// ============================================================================
+
+layout(local_size_x = 32, local_size_y = 4, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer WeightBuffer { uint wts[]; };
+layout(std430, binding = 1) readonly buffer XBuffer { float x[]; };
+layout(std430, binding = 2) writeonly buffer OutBuffer { float y[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_in;
+    uint n_rows;
+    uint out_offset;
+};
+
+shared float red[4][32];
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint lrow = gl_LocalInvocationID.y;
+    uint row = gl_WorkGroupID.x * 4u + lrow;
+    float acc = 0.0;
+    if (row < n_rows) {
+        uint words = n_in / 2u;
+        uint base = row * words;
+        for (uint w = lane; w < words; w += 32u) {
+            vec2 f = unpackHalf2x16(wts[base + w]);
+            acc += f.x * x[2u * w] + f.y * x[2u * w + 1u];
+        }
+    }
+    red[lrow][lane] = acc;
+    barrier();
+    for (uint s = 16u; s > 0u; s >>= 1u) {
+        if (lane < s) red[lrow][lane] += red[lrow][lane + s];
+        barrier();
+    }
+    if (lane == 0u && row < n_rows) y[out_offset + row] = red[lrow][0];
+}

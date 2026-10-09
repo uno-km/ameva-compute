@@ -1,0 +1,103 @@
+#version 450
+/**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ */
+// ============================================================================
+// AMUDA Kernel: BitNet activation stage before an i2_s projection (adapters/bitnet, ac_bitnet_engine.cpp)
+// ============================================================================
+// h = a (mode 0), relu(a)^2 * b (mode 1, BitNet b1.58 FFN), silu(a) * b (mode 2, Falcon-E / Falcon3 FFN)
+// y = rms_norm(h) * w when do_norm, h otherwise (rms_norm of the CPU path: h * (1 / sqrt(mean(h^2) + eps)) * w)
+// q = int8 absmax quantization of y (quantize_activation_int8 of the CPU path: scale 127 / max(|y|, 1e-7), rounding
+//     half away from zero, clamp to +-127), four per word; act[0] = 1 / scale.
+// One workgroup. Every invocation owns the words t, t + 256, ... (four elements each) in all three passes, so no
+// invocation reads an element another one wrote. dim is a multiple of 4.
+// ============================================================================
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer ABuffer { float a[]; };   // x, attention output, or FFN gate
+layout(std430, binding = 1) readonly buffer BBuffer { float b[]; };   // FFN up (modes 1 and 2)
+layout(std430, binding = 2) readonly buffer WBuffer { float w[]; };   // norm weight (do_norm)
+layout(std430, binding = 3) buffer YBuffer { float y[]; };            // the f32 activations (also read by the LM head)
+layout(std430, binding = 4) writeonly buffer QBuffer { uint q[]; };   // int8 activations, four per word
+layout(std430, binding = 5) writeonly buffer SBuffer { uint act[]; }; // act[0]: dequantization factor (float bits)
+
+layout(push_constant) uniform PushConstants {
+    uint dim;
+    uint eps_bits;
+    uint mode;
+    uint do_norm;
+};
+
+shared float red[256];
+
+float activation(uint i) {
+    if (mode == 0u) return a[i];
+    float g = a[i];
+    if (mode == 1u) {
+        float r = g > 0.0 ? g : 0.0;
+        return (r * r) * b[i];
+    }
+    return (g / (1.0 + exp(-g))) * b[i];
+}
+
+void main() {
+    uint t = gl_LocalInvocationID.x;
+    uint words = dim / 4u;
+
+    // pass 1: h and the sum of its squares
+    float ss = 0.0;
+    for (uint wi = t; wi < words; wi += 256u) {
+        for (uint k = 0u; k < 4u; ++k) {
+            uint i = wi * 4u + k;
+            float h = activation(i);
+            y[i] = h;
+            ss += h * h;
+        }
+    }
+    red[t] = ss;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (t < s) red[t] += red[t + s];
+        barrier();
+    }
+    float scale = 1.0 / sqrt(red[0] / float(dim) + uintBitsToFloat(eps_bits));
+    barrier();
+
+    // pass 2: normalized values and their absolute maximum
+    float amax = 0.0;
+    for (uint wi = t; wi < words; wi += 256u) {
+        for (uint k = 0u; k < 4u; ++k) {
+            uint i = wi * 4u + k;
+            float v = y[i];
+            if (do_norm != 0u) {
+                precise float n = (v * scale) * w[i];
+                v = n;
+                y[i] = v;
+            }
+            amax = max(amax, abs(v));
+        }
+    }
+    red[t] = amax;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (t < s) red[t] = max(red[t], red[t + s]);
+        barrier();
+    }
+    float qs = 127.0 / max(red[0], 1e-7);
+
+    // pass 3: int8 quantization
+    for (uint wi = t; wi < words; wi += 256u) {
+        uint packed = 0u;
+        for (uint k = 0u; k < 4u; ++k) {
+            precise float v = y[wi * 4u + k] * qs;
+            float r = trunc(v);
+            if (abs(v - r) >= 0.5) r += sign(v);
+            int iv = clamp(int(r), -127, 127);
+            packed |= (uint(iv) & 0xFFu) << (8u * k);
+        }
+        q[wi] = packed;
+    }
+    if (t == 0u) act[0] = floatBitsToUint(1.0 / qs);
+}
