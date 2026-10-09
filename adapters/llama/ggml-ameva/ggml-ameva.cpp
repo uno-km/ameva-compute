@@ -169,8 +169,16 @@ void ameva_audit_decline(const struct ggml_tensor* op, const char* why) {
         GGML_ABORT("ggml-ameva: AMEVA_STRICT must be 0 or 1 (got \"%s\")", e);
     }();
     if (strict) {
-        GGML_ABORT("ggml-ameva: AMEVA_STRICT=1 and %s (%s, %s) is declined: %s (FAIL-FAST, no other backend takes it)",
-                   on ? on : "?", op->name, tn ? tn : "?", why);
+        char shapes[256] = "";
+        int n = 0;
+        for (int i = 0; i < 2 && op->src[i] && n < (int)sizeof(shapes); ++i) {
+            const struct ggml_tensor* s = op->src[i];
+            n += snprintf(shapes + n, sizeof(shapes) - n, " src%d=%s[%lld,%lld,%lld,%lld]nb1=%zu", i,
+                          ggml_type_name(s->type), (long long)s->ne[0], (long long)s->ne[1], (long long)s->ne[2],
+                          (long long)s->ne[3], s->nb[1]);
+        }
+        GGML_ABORT("ggml-ameva: AMEVA_STRICT=1 and %s (%s, %s) is declined: %s;%s (FAIL-FAST, no other backend takes it)",
+                   on ? on : "?", op->name, tn ? tn : "?", why, shapes);
     }
     std::lock_guard<std::mutex> lock(s_decline_mutex);
     for (int i = 0; i < s_n_declines; ++i) {
