@@ -149,7 +149,7 @@ NEVER use blocking sleep polling loops on remote devices (e.g. `until ! pgrep ..
 Such loops hang indefinitely when child shells linger or processes fail-fast in 0.1s.
 Always enforce the 3-step robust execution pattern:
 1. Launch with timeout & completion sentinel: `nohup bash -c 'timeout 180s COMMAND > run.log 2>&1; echo $? > run.done' > /dev/null 2>&1 &`
-2. Immediate 2-second crash detection: `sleep 2; kill -0 $PID 2>/dev/null || cat run.log`
+2. Initial 10-second crash detection (allow model load / warm-up): `sleep 10; kill -0 $PID 2>/dev/null || cat run.log`
 3. Non-blocking completion check: `test -f run.done && cat run.done || echo STILL_RUNNING`
 - relevant numerical error
 - failure reason
