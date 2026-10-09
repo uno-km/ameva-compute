@@ -1,7 +1,7 @@
 # Current Engineering Checkpoint
 
 **Timestamp**: 2026-10-09T21:40:00+09:00
-**Branch**: `perf/opencl-mali` (local commits ahead of origin/perf/opencl-mali, not pushed)
+**Branch**: `perf/opencl-mali` (pushed to origin/perf/opencl-mali up to 8744045, clean sync)
 **Goal**: Stage 3, BitNet b1.58 on the AMUDA runtime (Stage 1 Diffusion and Stage 2 STT closed).
 
 ### Completed
@@ -21,7 +21,7 @@
 2. Mali GEMV is ALU-bound (S21 32.6 ms / 498 MB): OpenCL `arm_dot` path for BitNet.
 3. LM head 626 MB f16 per token (S25 16.9, S21 22.9, S20 35.9 ms): near bandwidth; smaller head = product decision.
 4. Tokenizer is greedy longest match, not BPE merges (prompts may split differently from llama.cpp).
-5. Push of perf/opencl-mali awaits the user.
+5. Branch `perf/opencl-mali` pushed to origin (12 commits, clean sync).
 
 ### Commands
 - Build (S25): `bash scripts/termux/build_bitnet_adapter.sh --kernels --out DIR`; run with `LD_LIBRARY_PATH=DIR`.
