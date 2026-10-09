@@ -150,9 +150,40 @@ VK_ONLY = ([("conv_%s_%s" % (w, st), "conv", wd + sd)
 LICENSE_HEADER = ["/**", " * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.",
                   " * SPDX-License-Identifier: Apache-2.0 OR Commercial-License", " */"]
 
-# FLASH_ATTN_EXT tiles: (DMAX, BQ, BK). 128 invocations per workgroup; shared memory per workgroup:
-# 64: 14.5 KiB, 128: 27.4 KiB, 256: 25.7 KiB
-FA_VARIANTS = [(64, 16, 32), (128, 16, 32), (256, 8, 16)]
+# FLASH_ATTN_EXT tiles: (DMAX, BQ, BK, RPI rows per invocation, DUNROLL head-loop steps per iteration), 128 invocations
+# per workgroup. The host takes, among the variants with the smallest DMAX that fits, the first whose BQ does not exceed
+# the tile rows (query positions x heads of a KV group), else the one with the fewest (token generation).
+#   (64, 32, 16, 2, 1)  15.3 KiB shared  prompts and encoders. SigLIP-base (1024 x 1024, d 64) GPU time per dispatch
+#                       against (64, 16, 32, 1, 1): Adreno 830 22.3 / 38.3 ms, Adreno 650 112.9 / 135.1 ms, Mali-G78
+#                       126.5 / 126.8 ms, Mali-G68 (A53) 163.6 ms / not measured; (64, 64, 16, 2, 1) was faster on the
+#                       Adreno 830 only (19.8 ms) and slower elsewhere (160-240 ms), a fully unrolled head loop with
+#                       RPI 2 doubled the time (86.8 ms) (2026-10-09, docs/design/vision-siglip-ameva.md).
+#   (64, 16, 32, 1, 1)  15.0 KiB  token generation (a few rows per KV head; key splits)
+#   (128, 16, 32, 1, 1) 27.0 KiB, (256, 8, 16, 1, 1) 25.3 KiB: not re-measured with RPI > 1.
+# AMEVA_FA_VARIANT=<index> forces one variant (experiment). AMEVA_FA_VARIANTS="D:BQ:BK:RPI:DUNROLL,..." replaces the
+# list for an experiment build; the header then says so.
+FA_VARIANTS = [(64, 32, 16, 2, 1), (64, 16, 32, 1, 1), (128, 16, 32, 1, 1), (256, 8, 16, 1, 1)]
+
+
+def fa_variants():
+    e = os.environ.get("AMEVA_FA_VARIANTS", "")
+    if not e:
+        return FA_VARIANTS, False
+    out = []
+    for item in e.split(","):
+        v = tuple(int(x) for x in item.split(":"))
+        if len(v) != 5:
+            fail("AMEVA_FA_VARIANTS item %r is not D:BQ:BK:RPI:DUNROLL" % item)
+        out.append(v)
+    return out, True
+
+
+def fa_check(dmax, bq, bk, rpi, dunroll):
+    tpr = 128 * rpi // bq if bq else 0
+    if (bq % rpi or 128 * rpi % bq or not tpr or bk % tpr or (dmax // 4) % tpr or (dmax // 4) % dunroll
+            or bq * (dmax // 4) * 16 + bk * (dmax // 4 + 1) * 16 + bq * bk * 4 + bq * tpr * 4 + 8 > 32768):
+        fail("flash_attn variant (%d, %d, %d, %d, %d) does not tile 128 invocations within 32 KiB of shared memory"
+             % (dmax, bq, bk, rpi, dunroll))
 
 
 def run(cmd):
@@ -438,15 +469,20 @@ def main():
         fbind, fpush, flocal = source_info(fsrc)
         if fpush > 128:
             fail("flash_attn: %d push-constant bytes exceed the runtime limit of 128" % fpush)
-        for dmax, bq, bk in FA_VARIANTS:
-            spv = os.path.join(tmp, "fa_d%d.spv" % dmax)
-            data, rsize = compile_module(args, fsrc, ["DMAX=%du" % dmax, "BQ=%du" % bq, "BK=%du" % bk], spv, cl["fa"])
+        fa_list, fa_experiment = fa_variants()
+        for dmax, bq, bk, rpi, dunroll in fa_list:
+            fa_check(dmax, bq, bk, rpi, dunroll)
+            tag = "d%d_q%d_k%d_r%d_u%d" % (dmax, bq, bk, rpi, dunroll)
+            spv = os.path.join(tmp, "fa_%s.spv" % tag)
+            data, rsize = compile_module(args, fsrc, ["DMAX=%du" % dmax, "BQ=%du" % bq, "BK=%du" % bk, "RPI=%du" % rpi,
+                                                      "DUNROLL=%du" % dunroll], spv, cl["fa"])
             if rsize is not None and rsize != fpush:
                 fail("ameva_flash_attn d%d: reflection says %d push-constant bytes, source %d" % (dmax, rsize, fpush))
-            var = "kAmevaFa_d%d" % dmax
+            var = "kAmevaFa_%s" % tag
             emit_array(lines, var, data)
-            fa.append((dmax, bq, bk, var, len(data), hashlib.sha256(data).hexdigest()))
-            print("fa  dmax=%-3d bq=%-2d bk=%-2d %6d bytes sha256=%s" % (dmax, bq, bk, len(data), fa[-1][5]))
+            fa.append((dmax, bq, bk, rpi, dunroll, var, len(data), hashlib.sha256(data).hexdigest()))
+            print("fa  dmax=%-3d bq=%-2d bk=%-2d rpi=%d dunroll=%-2d %6d bytes sha256=%s%s"
+                  % (dmax, bq, bk, rpi, dunroll, len(data), fa[-1][7], " (AMEVA_FA_VARIANTS experiment)" if fa_experiment else ""))
         for op, stem, defines in [(o, o, []) for o in OPS] + OPS_DEFINED:
             src = os.path.join(SHADERS, "ameva_%s.comp" % stem)
             nbind, npush, nlocal = source_info(src)
@@ -570,11 +606,15 @@ def main():
               "    uint32_t dmax;           /* largest head size (D and DV) the variant takes */",
               "    uint32_t bq;             /* rows (query position x head) per workgroup */",
               "    uint32_t bk;             /* keys per block */",
+              "    uint32_t rpi;            /* rows per invocation */",
+              "    uint32_t dunroll;        /* head-loop vec4 steps per iteration */",
               "    const uint32_t* spirv;", "    size_t spirv_bytes;", "    const char* spirv_sha256;",
               "} AmevaFaVariant;", "",
               "static const AmevaFaVariant kAmevaFaVariants[] = {"]
-    for dmax, bq, bk, var, nbytes, sha in fa:
-        lines.append('    { %du, %du, %du, %s, %du, "%s" },' % (dmax, bq, bk, var, nbytes, sha))
+    if fa_experiment:
+        lines.append("/* experiment build: flash-attention variants from AMEVA_FA_VARIANTS=%s */" % os.environ["AMEVA_FA_VARIANTS"])
+    for dmax, bq, bk, rpi, dunroll, var, nbytes, sha in fa:
+        lines.append('    { %du, %du, %du, %du, %du, %s, %du, "%s" },' % (dmax, bq, bk, rpi, dunroll, var, nbytes, sha))
     lines += ["};", "#define AMEVA_FA_VARIANT_COUNT %d" % len(fa),
               "#define AMEVA_FA_BINDINGS %d" % fbind,
               "#define AMEVA_FA_PUSH_CONSTANT_BYTES %d" % fpush,

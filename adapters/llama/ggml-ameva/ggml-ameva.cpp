@@ -778,23 +778,57 @@ static AcKernel* ameva_mmvq_kernel(int idx) {
 }
 
 static AcKernel* ameva_fa_kernel(int idx) {
-    static char names[AMEVA_FA_VARIANT_COUNT][40];
+    static char names[AMEVA_FA_VARIANT_COUNT][64];
     std::lock_guard<std::mutex> lock(s_mutex);
     if (!s_fa[idx] && s_ctx) {
         const AmevaFaVariant& v = kAmevaFaVariants[idx];
-        snprintf(names[idx], sizeof(names[idx]), "ameva_flash_attn_d%u", v.dmax);
+        snprintf(names[idx], sizeof(names[idx]), "ameva_flash_attn_d%u_q%u_k%u_r%u_u%u", v.dmax, v.bq, v.bk, v.rpi,
+                 v.dunroll);
         s_fa[idx] = ameva_make_kernel(names[idx], v.spirv, v.spirv_bytes, v.spirv_sha256, AMEVA_FA_BINDINGS,
                                       AMEVA_FA_PUSH_CONSTANT_BYTES, AMEVA_FA_LOCAL_SIZE_X, kAmevaClFa[idx]);
     }
     return s_fa[idx];
 }
 
-// smallest flash-attention variant that takes head sizes D and DV
-static int ameva_fa_find(uint32_t d, uint32_t dv) {
-    for (int i = 0; i < AMEVA_FA_VARIANT_COUNT; ++i) {
-        if (d <= kAmevaFaVariants[i].dmax && dv <= kAmevaFaVariants[i].dmax) return i;
+// flash-attention variant for head sizes D and DV and `rows` tile rows (query positions x heads of a KV group): of the
+// variants with the smallest DMAX that takes D and DV, the first (kAmevaFaVariants order) whose BQ does not exceed
+// rows, otherwise the one with the fewest rows per tile (token generation has only the G heads of a group per KV head).
+// rows = 0 asks only whether some variant takes the head sizes. AMEVA_FA_VARIANT=<index> (experiment, unset: off)
+// forces entry <index> for every head size it takes; a head size it does not take ends the process.
+static int ameva_fa_find(uint32_t d, uint32_t dv, uint64_t rows) {
+    static const int forced = [] {
+        const char* e = getenv("AMEVA_FA_VARIANT");
+        if (!e || !*e) return -1;
+        char* end = nullptr;
+        const long v = strtol(e, &end, 10);
+        if (!end || *end || v < 0 || v >= AMEVA_FA_VARIANT_COUNT) {
+            GGML_ABORT("ggml-ameva: AMEVA_FA_VARIANT must be an index below %d (got \"%s\")", AMEVA_FA_VARIANT_COUNT, e);
+        }
+        const AmevaFaVariant& f = kAmevaFaVariants[v];
+        fprintf(stderr, "ggml-ameva: AMEVA_FA_VARIANT=%ld: flash attention dmax=%u bq=%u bk=%u rpi=%u dunroll=%u\n", v,
+                f.dmax, f.bq, f.bk, f.rpi, f.dunroll);
+        return (int)v;
+    }();
+    if (forced >= 0) {
+        if (d > kAmevaFaVariants[forced].dmax || dv > kAmevaFaVariants[forced].dmax) {
+            GGML_ABORT("ggml-ameva: AMEVA_FA_VARIANT=%d takes head sizes up to %u, the graph has %u / %u", forced,
+                       kAmevaFaVariants[forced].dmax, d, dv);
+        }
+        return forced;
     }
-    return -1;
+    uint32_t dmin = UINT32_MAX;
+    for (int i = 0; i < AMEVA_FA_VARIANT_COUNT; ++i) {
+        const AmevaFaVariant& f = kAmevaFaVariants[i];
+        if (d <= f.dmax && dv <= f.dmax) dmin = std::min(dmin, f.dmax);
+    }
+    int fewest = -1;
+    for (int i = 0; i < AMEVA_FA_VARIANT_COUNT; ++i) {
+        const AmevaFaVariant& f = kAmevaFaVariants[i];
+        if (f.dmax != dmin) continue;
+        if (f.bq <= rows) return i;
+        if (fewest < 0 || f.bq < kAmevaFaVariants[fewest].bq) fewest = i;
+    }
+    return fewest;
 }
 
 static AcKernel* ameva_op_kernel(AmevaOpKernelId id) {
@@ -1713,7 +1747,7 @@ const char* ameva_op_unsupported_reason(const struct ggml_tensor* op) {
             if ((is_kvq(k) && q->ne[0] % 32) || (is_kvq(v) && v->ne[0] % 32))
                 return "flash_attn quantized K/V head size not a multiple of 32";
             if (m && !is_f16(m)) return "flash_attn mask not f16";
-            if (q->ne[0] != k->ne[0] || ameva_fa_find((uint32_t)q->ne[0], (uint32_t)v->ne[0]) < 0)
+            if (q->ne[0] != k->ne[0] || ameva_fa_find((uint32_t)q->ne[0], (uint32_t)v->ne[0], 0) < 0)
                 return "head size above 256";
             if (q->ne[0] % 4 || v->ne[0] % 4) return "head size not a multiple of 4";
             if (q->ne[3] != 1 || k->ne[3] != 1 || v->ne[3] != 1 || (m && m->ne[3] != 1)) return "multiple sequences";
@@ -3805,6 +3839,11 @@ static const char* enc_cpy(AmevaRecorder& rec, const struct ggml_tensor* node) {
 // without splits each KV head's cache is walked by one workgroup; with splits the keys are spread over workgroups and
 // ameva_fa_combine merges them. Split when the tiles alone give fewer than 16 workgroups and the cache has at least two
 // splits. AMEVA_FA_SPLIT_KEYS=<keys> (a multiple of 64, or 0 = never split) overrides the 256 keys per split.
+// tile rows of a FLASH_ATTN_EXT node: query positions x heads of one KV group
+static uint64_t ameva_fa_rows(const struct ggml_tensor* node) {
+    return (uint64_t)node->src[0]->ne[1] * (uint64_t)(node->src[0]->ne[2] / node->src[1]->ne[2]);
+}
+
 static uint32_t ameva_fa_split_keys(const struct ggml_tensor* node, uint32_t* n_split) {
     static const uint32_t forced = [] {
         const char* e = getenv("AMEVA_FA_SPLIT_KEYS");
@@ -3818,7 +3857,7 @@ static uint32_t ameva_fa_split_keys(const struct ggml_tensor* node, uint32_t* n_
     }();
     *n_split = 1;
     const struct ggml_tensor *q = node->src[0], *k = node->src[1], *v = node->src[2];
-    const int fi = ameva_fa_find((uint32_t)q->ne[0], (uint32_t)v->ne[0]);
+    const int fi = ameva_fa_find((uint32_t)q->ne[0], (uint32_t)v->ne[0], ameva_fa_rows(node));
     if (forced == 0 || fi < 0) return 0;
     const uint64_t n_head = (uint64_t)q->ne[2], n_head_kv = (uint64_t)k->ne[2], n_kv = (uint64_t)k->ne[1];
     const uint64_t tiles = ((uint64_t)q->ne[1] * (n_head / n_head_kv) + kAmevaFaVariants[fi].bq - 1) /
@@ -3841,7 +3880,7 @@ static uint64_t ameva_fa_scratch_bytes(const struct ggml_tensor* node) {
 
 static const char* enc_flash_attn(AmevaRecorder& rec, const struct ggml_tensor* node) {
     const struct ggml_tensor *q = node->src[0], *k = node->src[1], *v = node->src[2], *m = node->src[3];
-    const int fi = ameva_fa_find((uint32_t)q->ne[0], (uint32_t)v->ne[0]);
+    const int fi = ameva_fa_find((uint32_t)q->ne[0], (uint32_t)v->ne[0], ameva_fa_rows(node));
     AcKernel* kernel = fi >= 0 ? ameva_fa_kernel(fi) : nullptr;
     if (!kernel) return "no ameva_flash_attn kernel";
     const AmevaFaVariant& fv = kAmevaFaVariants[fi];
