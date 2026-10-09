@@ -1,7 +1,7 @@
 # Current Engineering Checkpoint
 
 **Timestamp**: 2026-10-10T00:00:00+09:00
-**Branch**: `perf/opencl-mali` (origin at a1d4a12; ebccab6, 61896f7 and this checkpoint not pushed)
+**Branch**: `perf/opencl-mali` (pushed to origin/perf/opencl-mali, clean sync)
 **Goal**: Stage 4, vision encoder (SigLIP, llama.cpp mtmd / clip.cpp) on ggml-ameva (Stages 1-3 closed).
 
 ### Completed
@@ -21,7 +21,7 @@
 1. Mali FA 25-40 GFLOP/s (S21 126 ms/layer, half the encode): Mali tile or OpenCL-specific kernel.
 2. termux-vision wiring: `GGML_BACKEND_PATH`, `MTMD_BACKEND_DEVICE=AMEVA0`, drop `--no-mmproj-offload`; bundle with this plugin.
 3. Per-device FA choice ((64,64,16,2) is 11 % faster on Adreno 830 only); DMAX 128 prompt tile unmeasured.
-4. Moondream2 not on the fleet (no downloads); SmolVLM's SigLIP used. Push of the branch awaits approval.
+4. Moondream2 not on fleet; SmolVLM SigLIP used. Branch pushed to origin.
 
 ### Commands
 - S25 build tree ~/abi-lab/src-vis, out ~/abi-lab/out-vis: `bash vis_rebuild.sh` (kernels + plugin), `bash vis_tool.sh` (tool).
