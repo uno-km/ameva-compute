@@ -27,7 +27,11 @@ layout(push_constant) uniform PushConstants {
     uint d_off, d_s1;
 } pc;
 
-#ifdef F16
+#ifdef F16_A
+// -DF16_A: src0 (a) is f16, src1 (b) and dst are f32. a_off/a_s1 in f16 elements; b/d offsets in f32 elements.
+#define LD_A(i) AMEVA_LOAD_F16(a, i)
+#define LD_B(i) uintBitsToFloat(b[i])
+#elif defined(F16)
 #define LD_A(i) AMEVA_LOAD_F16(a, i)
 #define LD_B(i) AMEVA_LOAD_F16(b, i)
 #ifdef F16_UNPACK

@@ -1282,13 +1282,32 @@ static const char* mul_mat_dense_f16_reason(const struct ggml_tensor* op) {
     return nullptr;
 }
 
+// MUL_MAT of an f16 weight matrix × an f32 activation matrix into f32: shaders/ameva_mm.comp -DF16_A.
+// Covers the whisper mel-filterbank product [K=n_fft/2+1, N=n_mels] (f16) × STFT magnitudes (f32) where K is not a
+// multiple of 32 and the qmm path does not apply.  One matrix, every tensor inside one binding.
+static const char* mul_mat_dense_f16a_reason(const struct ggml_tensor* op) {
+    const struct ggml_tensor *a = op->src[0], *b = op->src[1];
+    if (!a || !b) return "missing source";
+    if (!is_f16(a) || !is_f32(b) || !is_f32(op)) return "f16a MUL_MAT requires f16 src0, f32 src1/dst";
+    if (a->ne[0] == 0) return "MUL_MAT with an empty source";
+    if (a->ne[2] != 1 || a->ne[3] != 1 || b->ne[2] != 1 || b->ne[3] != 1) return "batched (ne2/ne3 > 1)";
+    if (a->ne[0] != b->ne[0] || op->ne[0] != a->ne[1] || op->ne[1] != b->ne[1]) return "shape mismatch";
+    if (!rows_contiguous(a) || !rows_contiguous(b) || !rows_contiguous(op)) return "rows not contiguous";
+    if (!fits_kernel_indexing(a) || !fits_kernel_indexing(b) || !fits_kernel_indexing(op)) return "exceeds 32-bit indexing";
+    if (!fits_binding(a) || !fits_binding(b) || !fits_binding(op)) return "tensor exceeds a buffer binding";
+    return nullptr;
+}
+
 // MUL_MAT: the shapes of ameva_qmv / ameva_qmm (mul_mat_qmm_reason) or, for f32 x f32, any shape (ameva_mm), or
-// f16 x f16 (ameva_mm -DF16).
+// f16 x f16 (ameva_mm -DF16), or f16 x f32 (ameva_mm -DF16_A, for the mel-filterbank with non-32-aligned K).
 static const char* mul_mat_reason(const struct ggml_tensor* op) {
     const char* why = mul_mat_qmm_reason(op);
     if (!why) return nullptr;
     const struct ggml_tensor* src0 = op->src[0];
-    if (src0 && is_f16(src0) && is_f16(op->src[1]) && !ameva_repacked_base(src0)) return mul_mat_dense_f16_reason(op);
+    if (src0 && is_f16(src0) && !ameva_repacked_base(src0)) {
+        if (is_f16(op->src[1])) return mul_mat_dense_f16_reason(op);
+        if (is_f32(op->src[1])) return mul_mat_dense_f16a_reason(op);
+    }
     if (!src0 || !is_f32(src0) || ameva_repacked_base(src0)) return why;
     return mul_mat_dense_reason(op);
 }
@@ -3124,15 +3143,18 @@ static void ameva_qmv_layout_report(void) {
 // dispatch per matrix of dimensions 2 and 3 and per chunk of result rows of at most kDispatchMac multiply-accumulates.
 static const char* enc_mul_mat_dense(AmevaRecorder& rec, const struct ggml_tensor* node) {
     const struct ggml_tensor *a = node->src[0], *b = node->src[1];
+    // f16a: src0 f16, src1 f32 (e.g. whisper mel filterbank with K not a multiple of 32).
+    const bool f16a = is_f16(a) && is_f32(b);
     // f16 x f16 -> f32 (mul_mat_dense_f16_reason): one matrix, every tensor inside one binding.
-    const bool f16 = is_f16(a);
-    const uint32_t es = f16 ? 2 : 4;
+    const bool f16 = is_f16(a) && !f16a;
+    const uint32_t es_a = (f16 || f16a) ? 2 : 4;
+    const uint32_t es_b = 4; // src1 is always f32 in enc_mul_mat_dense
     // a tensor above one binding is bound per matrix (mul_mat_dense_reason)
     const bool wa = fits_binding(a), wb = fits_binding(b), wd = fits_binding(node);
-    if (f16 && (!wa || !wb || !wd)) return "f16 MUL_MAT above one buffer binding";
+    if ((f16 || f16a) && (!wa || !wb || !wd)) return "f16/f16a MUL_MAT above one buffer binding";
     AmevaBind ba = {}, bb = {}, bd = {};
-    const char* e = wa ? ameva_bind(a, es, &ba) : nullptr;
-    if (!e && wb) e = ameva_bind(b, es, &bb);
+    const char* e = wa ? ameva_bind(a, es_a, &ba) : nullptr;
+    if (!e && wb) e = ameva_bind(b, es_b, &bb);
     if (!e && wd) e = ameva_bind(node, 4, &bd);
     if (e) return e;
     const uint32_t K = (uint32_t)a->ne[0], N = (uint32_t)a->ne[1], M = (uint32_t)b->ne[1];
@@ -3144,9 +3166,16 @@ static const char* enc_mul_mat_dense(AmevaRecorder& rec, const struct ggml_tenso
     // them did not come back), so the work estimate that sizes dispatches and submissions counts it as 32.
     const bool words = f16 && ba.elem % 2 == 0 && bb.elem % 2 == 0 && (N == 1 || sa % 2 == 0) && (M == 1 || sb % 2 == 0);
     const bool builtin = words && ggml_backend_ameva_get_conv_f16_decoder() == 1;
-    const double cost = !f16 || builtin ? 1.0 : 32.0;
-    AcKernel* kernel = ameva_op_kernel(!f16 ? AMEVA_K_MM : builtin ? AMEVA_K_MM_F16WU : words ? AMEVA_K_MM_F16W : AMEVA_K_MM_F16);
-    if (!kernel) return f16 ? "no ameva_mm_f16 kernel" : "no ameva_mm kernel";
+    // f16a: exact decoder for f16 src0 (no word-pair optimization; each element loaded individually)
+    const double cost = (!f16 && !f16a) || builtin ? 1.0 : 32.0;
+    AcKernel* kernel;
+    if (f16a) {
+        kernel = ameva_op_kernel(AMEVA_K_MM_F16A);
+        if (!kernel) return "no ameva_mm_f16a kernel";
+    } else {
+        kernel = ameva_op_kernel(!f16 ? AMEVA_K_MM : builtin ? AMEVA_K_MM_F16WU : words ? AMEVA_K_MM_F16W : AMEVA_K_MM_F16);
+        if (!kernel) return f16 ? "no ameva_mm_f16 kernel" : "no ameva_mm kernel";
+    }
     const uint32_t mc_max =
         (uint32_t)std::max<double>(1.0, std::min<double>((double)M, kDispatchMac / ((double)N * (double)K * cost)));
     // the rows a dispatch writes, for the hazard tracking: exact when the result's rows lie at one stride, else the
