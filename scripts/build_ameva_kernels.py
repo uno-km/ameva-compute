@@ -117,7 +117,7 @@ QMV_ABLATE = os.environ.get("AMEVA_BUILD_QMV_ABLATE", "")
 
 # op kernel families, in the order of enum AmevaOpKernelId
 OPS = ["binary", "unary", "glu", "rms_norm", "rope", "set_rows", "get_rows", "cpy", "fa_combine", "quant_a8",
-       "act_fq", "quant_a8b", "upscale", "pad", "soft_max", "mm"]
+       "act_fq", "quant_a8b", "upscale", "pad", "soft_max", "mm", "norm"]
 # op kernels compiled from one source with defines, appended to enum AmevaOpKernelId: (kernel name, source, defines)
 OPS_DEFINED = [("set_rows_q8_0", "set_rows_q", ["QTYPE_Q8_0"]), ("set_rows_q4_0", "set_rows_q", ["QTYPE_Q4_0"]),
                ("quant_a8u", "quant_a8", ["EMU"]), ("rope_f16", "rope", ["F16"]),
@@ -144,7 +144,7 @@ VK_ONLY = ([("conv_%s_%s" % (w, st), "conv", wd + sd)
            [("conv_%s_%s_acc" % (w, st), "conv", wd + sd + ["ACCUM"])
             for w, wd in (("f16", ["TYPE_F16"]), ("f16u", ["TYPE_F16", "F16_UNPACK"]), ("f32", ["TYPE_F32"]))
             for st, sd in (("s", []), ("v", ["STAGE_VEC4"]))] +
-           [("norm", "norm", []), ("timestep_embd", "timestep_embd", [])])
+           [("timestep_embd", "timestep_embd", [])])
 
 # the licence header of the generated files (kept identical to the other sources of the repository)
 LICENSE_HEADER = ["/**", " * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.",

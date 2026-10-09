@@ -437,6 +437,10 @@ def translate(src):
     a preprocessed AMEVA compute shader"""
     src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
     src = re.sub(r"//[^\n]*", "", src)
+    # GLSL precise (no multiply-add contraction of that value): OpenCL C has only the program-wide FP_CONTRACT pragma,
+    # which keeps every operation of the kernel rounded on its own
+    precise = re.search(r"\bprecise\b", src) is not None
+    src = re.sub(r"\bprecise\s+", "", src)
     kept = []
     for line in src.splitlines():
         s = line.strip()
@@ -636,6 +640,8 @@ def translate(src):
             out.append("%s %s(%s) {%s}" % (f.ret, f.name, ", ".join((ctx_decl if f.needs_ctx else []) + params), body))
     text = "\n".join(o for o in out if o) + "\n"
     text = re.sub(r"\n[ \t]*\n+", "\n", text)
+    if precise:
+        text = "#pragma OPENCL FP_CONTRACT OFF\n" + text
     return text, len(buffers), 4 * len(push_members or []), local, uses_ranges
 
 

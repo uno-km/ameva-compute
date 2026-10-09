@@ -1620,7 +1620,6 @@ const char* ameva_op_unsupported_reason(const struct ggml_tensor* op) {
         }
         case GGML_OP_NORM: {
             // rows of ne0 (ggml_norm): shaders/ameva_norm.comp
-            if (ameva_backend_is_opencl()) return "norm kernel has no OpenCL C translation";
             const struct ggml_tensor* a = op->src[0];
             if (!is_f32(a) || !is_f32(op) || !ggml_are_same_shape(a, op)) return "norm on non-f32";
             if (!rows_contiguous(a) || !rows_contiguous(op)) return "rows not contiguous";
@@ -4185,6 +4184,77 @@ static const char* ameva_conv_f16_check(bool* builtin_ok, uint32_t* mismatches, 
     return nullptr;
 }
 
+// The same check on the OpenCL backend, which has no ameva_conv: ameva_mm -DF16 -DF16_WORDS -DF16_UNPACK multiplies the
+// 64 x 32 f16 weights by an f16 identity (32 x 32), so result (m, n) is weight (n, m) alone (a x 1 plus terms of 0).
+static const char* ameva_mm_f16_check(bool* builtin_ok, uint32_t* mismatches, uint32_t* first_half) {
+    AcKernel* kernel = ameva_op_kernel(AMEVA_K_MM_F16WU);
+    if (!kernel) return "no ameva_mm_f16wu kernel";
+    AcBuffer* bufs[3] = { nullptr, nullptr, nullptr }; // weights 64 x 32 f16, identity 32 x 32 f16, dst 32 x 64 f32
+    const size_t sizes[3] = { 4096, 2048, 8192 };
+    const char* err = nullptr;
+    for (int i = 0; i < 3 && !err; ++i) {
+        AcBufferDesc bdesc = { AC_ABI_VERSION, sizeof(AcBufferDesc), sizes[i], AC_BUFFER_USAGE_STORAGE, 0 };
+        if (ac_runtime_buffer_create(s_ctx, &bdesc, &bufs[i]) != AC_SUCCESS) {
+            bufs[i] = nullptr;
+            err = "buffer allocation failed";
+        } else {
+            ameva_increment_buffer_create_count();
+        }
+    }
+    std::vector<uint16_t> ident(32 * 32, 0);
+    for (int c = 0; c < 32; ++c) ident[c + 32 * c] = 0x3C00u; // 1.0
+    std::vector<float> out(32 * 64);
+    if (!err && ac_runtime_buffer_write(bufs[1], 0, ident.data(), sizes[1]) != AC_SUCCESS) err = "identity write failed";
+    *mismatches = 0;
+    *first_half = 0;
+    for (int round = 0; round < 2 && !err; ++round) {
+        std::vector<uint16_t> w(2048);
+        for (uint32_t t = 0; t < 2048; ++t) {
+            w[t] = round == 0 ? (uint16_t)(t < 1024 ? t : (0x8000u | (t - 1024)))                  // zeros and subnormals
+                              : (uint16_t)((0x0400u + t * 15u) | ((t & 1u) ? 0x8000u : 0u));        // normal values
+        }
+        if (ac_runtime_buffer_write(bufs[0], 0, w.data(), sizes[0]) != AC_SUCCESS ||
+            ac_runtime_buffer_fill(bufs[2], 0, sizes[2], 0xFF) != AC_SUCCESS) {
+            err = "weight write failed";
+            break;
+        }
+        // M 32, K 32, N 64; a rows of 32 f16 at 0, b rows of 32 f16 at 0, dst rows of 64 f32 at 0
+        const uint32_t pc[9] = { 32, 32, 64, 0, 32, 0, 32, 0, 64 };
+        const AcBufferBinding bind[3] = { { bufs[0], 0, sizes[0] }, { bufs[1], 0, sizes[1] }, { bufs[2], 0, sizes[2] } };
+        const AcBatchDesc bd = { AC_ABI_VERSION, sizeof(AcBatchDesc), 4, AC_BATCH_FLAG_EXPLICIT_BARRIERS };
+        AcCommandBatch* batch = nullptr;
+        if (ac_runtime_batch_begin_ex(s_ctx, &bd, &batch) != AC_SUCCESS) {
+            err = "batch begin failed";
+            break;
+        }
+        AcEvent* ev = nullptr;
+        AcResult r = ac_runtime_batch_dispatch_bindings(batch, kernel, bind, 3, pc, sizeof(pc), ameva_grid_1d(64 * 32, 64));
+        if (r == AC_SUCCESS) r = ac_runtime_batch_submit(batch, &ev);
+        if (r == AC_SUCCESS) r = ac_runtime_event_wait(ev, 30000000000ull);
+        if (ev) ac_runtime_event_destroy(ev);
+        ac_runtime_batch_destroy(batch);
+        if (r != AC_SUCCESS || ac_runtime_buffer_read(bufs[2], 0, out.data(), sizes[2]) != AC_SUCCESS) {
+            err = "dispatch failed";
+            break;
+        }
+        for (uint32_t t = 0; t < 2048; ++t) {
+            const float want = ggml_fp16_to_fp32((ggml_fp16_t)w[t]);
+            const float got = out[(t % 32) * 64 + t / 32]; // weight row n = t / 32, column k = t % 32 -> dst (k, n)
+            const bool same = (w[t] & 0x7FFFu) == 0 ? got == 0.0f : fbits(got) == fbits(want);
+            if (!same && (*mismatches)++ == 0) *first_half = w[t];
+        }
+    }
+    for (AcBuffer* b : bufs) {
+        if (b) {
+            ac_runtime_buffer_destroy(b);
+            ameva_increment_buffer_destroy_count();
+        }
+    }
+    if (err) return err;
+    *builtin_ok = *mismatches == 0;
+    return nullptr;
+}
+
 // Decides the f16 decoder of this process (see above). Called before a graph with an f16 convolution is recorded.
 static const char* ameva_conv_f16_prepare(void) {
     if (s_conv_f16_decoder.load() >= 0) return nullptr;
@@ -4199,7 +4269,8 @@ static const char* ameva_conv_f16_prepare(void) {
     }
     bool ok = false;
     uint32_t bad = 0, first = 0;
-    if (const char* err = ameva_conv_f16_check(&ok, &bad, &first)) return err;
+    if (const char* err = ameva_backend_is_opencl() ? ameva_mm_f16_check(&ok, &bad, &first)
+                                                    : ameva_conv_f16_check(&ok, &bad, &first)) return err;
     s_conv_f16_decoder.store(ok ? 1 : 0);
     if (ok) {
         fprintf(stderr, "ggml-ameva: f16 convolution weights through the built-in conversion (4096 values checked on "
@@ -4675,7 +4746,7 @@ static const char* enc_soft_max(AmevaRecorder& rec, const struct ggml_tensor* no
 static const char* enc_norm(AmevaRecorder& rec, const struct ggml_tensor* node) {
     const struct ggml_tensor* a = node->src[0];
     if (tensors_overlap(node, a) && !tensors_alias(node, a)) return "norm result overlaps its source";
-    AcKernel* kernel = ameva_vk_kernel(AMEVA_VK_NORM);
+    AcKernel* kernel = ameva_op_kernel(AMEVA_K_NORM);
     if (!kernel) return "no ameva_norm kernel";
     AmevaBind ba, bd;
     const char* e = ameva_bind(a, 4, &ba);
