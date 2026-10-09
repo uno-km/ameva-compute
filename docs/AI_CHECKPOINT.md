@@ -1,7 +1,7 @@
 # Current Engineering Checkpoint
 
 **Timestamp**: 2026-10-09T21:40:00+09:00
-**Branch**: `perf/opencl-mali` (local, 10 commits ahead of origin; not pushed)
+**Branch**: `perf/opencl-mali` (local commits ahead of origin/perf/opencl-mali, not pushed)
 **Goal**: Stage 3, BitNet b1.58 on the AMUDA runtime (Stage 1 Diffusion and Stage 2 STT closed).
 
 ### Completed
