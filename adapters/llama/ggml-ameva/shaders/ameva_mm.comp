@@ -27,13 +27,14 @@ layout(push_constant) uniform PushConstants {
     uint d_off, d_s1;
 } pc;
 
+#if defined(F16) || defined(F16_A)
 #ifdef F16_A
-// -DF16_A: src0 (a) is f16, src1 (b) and dst are f32. a_off/a_s1 in f16 elements; b/d offsets in f32 elements.
 #define LD_A(i) AMEVA_LOAD_F16(a, i)
 #define LD_B(i) uintBitsToFloat(b[i])
-#elif defined(F16)
+#else
 #define LD_A(i) AMEVA_LOAD_F16(a, i)
 #define LD_B(i) AMEVA_LOAD_F16(b, i)
+#endif
 #ifdef F16_UNPACK
 #define LD_H2(arr, w) unpackHalf2x16((arr)[w])
 #else
@@ -53,7 +54,14 @@ void main() {
     const uint bb = pc.b_off + m * pc.b_s1;
     vec4 acc = vec4(0.0);
     uint k = 0u;
-#ifdef F16_WORDS
+#if defined(F16_WORDS) && defined(F16_A)
+    const uint aw = ab >> 1u;
+    for (; k + 4u <= pc.K; k += 4u) {
+        const uint i = k >> 1u;
+        acc += vec4(LD_H2(a, aw + i), LD_H2(a, aw + i + 1u)) *
+               vec4(LD_B(bb + k), LD_B(bb + k + 1u), LD_B(bb + k + 2u), LD_B(bb + k + 3u));
+    }
+#elif defined(F16_WORDS)
     const uint aw = ab >> 1u, bw = bb >> 1u;
     for (; k + 4u <= pc.K; k += 4u) {
         const uint i = k >> 1u;

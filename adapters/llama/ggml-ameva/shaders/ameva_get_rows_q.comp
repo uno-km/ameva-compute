@@ -23,6 +23,8 @@ layout(push_constant) uniform PushConstants {
     uint ne11, ne12; // batch dims
     uint a_off;      // byte offset of src0 from binding start (= ameva_bind(a, 2).elem * 2)
     uint a_nb1;      // row stride in bytes (a->nb[1])
+    uint a_nb2;      // matrix strides in bytes (a->nb[2], a->nb[3]): idx batch (i11, i12) reads matrix (i11, i12)
+    uint a_nb3;
     uint i_off;      // idx i32 element offset from binding start
     uint i_s0;       // idx i32 stride for dim 0
     uint i_s1;       // idx i32 stride for dim 1
@@ -62,26 +64,28 @@ void main() {
         return;
     }
 
-    const uint row_base = pc.a_off + uint(row) * pc.a_nb1;
+    const uint row_base = pc.a_off + uint(row) * pc.a_nb1 + i11 * pc.a_nb2 + i12 * pc.a_nb3;
     const uint block    = c / 32u;
     const uint e        = c & 31u;
     float val;
 
+    // ggml's q4_0 / q5_0 blocks (dequantize_row_q4_0 / _q5_0): byte qs[j] holds element j in its low nibble and
+    // element j + 16 in its high nibble; q5_0's 32-bit qh holds the fifth bit of element e at bit e
 #if defined(Q4_0)
-    // q4_0 block: [delta:f16(2), qs[16]:4-bit-pairs(16)] = 18 bytes/block
+    // q4_0 block: [delta:f16(2), qs[16](16)] = 18 bytes/block
     const uint boff  = row_base + block * 18u;
     const float delta = ameva_h2f(a_read_u16(boff));
-    const uint qs    = a_read_byte(boff + 2u + (e >> 1u));
-    const uint q4    = (e & 1u) == 0u ? (qs & 0xFu) : (qs >> 4u);
+    const uint qs    = a_read_byte(boff + 2u + (e & 15u));
+    const uint q4    = e < 16u ? (qs & 0xFu) : (qs >> 4u);
     val = delta * (float(q4) - 8.0);
 
 #elif defined(Q5_0)
-    // q5_0 block: [delta:f16(2), qh[4]:high-bits(4), qs[16]:low-4-bits(16)] = 22 bytes/block
+    // q5_0 block: [delta:f16(2), qh[4](4), qs[16](16)] = 22 bytes/block
     const uint boff  = row_base + block * 22u;
     const float delta = ameva_h2f(a_read_u16(boff));
     const uint qh    = (a_read_byte(boff + 2u + (e >> 3u)) >> (e & 7u)) & 1u;
-    const uint qs    = a_read_byte(boff + 6u + (e >> 1u));
-    const uint ql    = (e & 1u) == 0u ? (qs & 0xFu) : (qs >> 4u);
+    const uint qs    = a_read_byte(boff + 6u + (e & 15u));
+    const uint ql    = e < 16u ? (qs & 0xFu) : (qs >> 4u);
     val = delta * (float(ql | (qh << 4u)) - 16.0);
 
 #else

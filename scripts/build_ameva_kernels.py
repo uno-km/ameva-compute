@@ -123,7 +123,8 @@ OPS_DEFINED = [("set_rows_q8_0", "set_rows_q", ["QTYPE_Q8_0"]), ("set_rows_q4_0"
                ("quant_a8u", "quant_a8", ["EMU"]), ("rope_f16", "rope", ["F16"]),
                ("binary_f16", "binary", ["F16"]), ("im2col", "im2col", []), ("mm_f16", "mm", ["F16"]),
                ("mm_f16w", "mm", ["F16", "F16_WORDS"]), ("mm_f16wu", "mm", ["F16", "F16_WORDS", "F16_UNPACK"]),
-               ("mm_f16a", "mm", ["F16_A"]),
+               ("mm_f16a", "mm", ["F16_A"]), ("mm_f16aw", "mm", ["F16_A", "F16_WORDS"]),
+               ("mm_f16awu", "mm", ["F16_A", "F16_WORDS", "F16_UNPACK"]),
                ("get_rows_q4_0", "get_rows_q", ["Q4_0"]), ("get_rows_q5_0", "get_rows_q", ["Q5_0"])]
 
 # Kernels built as SPIR-V only, in the order of enum AmevaVkKernelId: (kernel name, source, defines).
