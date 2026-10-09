@@ -1219,12 +1219,10 @@ static const char* mul_mat_qmm_reason(const struct ggml_tensor* op) {
         if (K % 32 != 0 || K % (int64_t)v.block_elems != 0) return "K not a multiple of the block size";
         if (ggml_row_size(src0->type, K) != (size_t)(K / v.block_elems) * v.block_bytes) return "block layout mismatch";
     }
-    // Row-padded weights (GGUF alignment padding between rows, nb[1] > ggml_row_size) are stored contiguously
-    // in the AMEVA buffer by set_tensor. All kernels address weight rows via ggml_row_size (the contiguous
-    // stride), so accepting element-contiguous (rows_contiguous) tensors here is correct.
-    if (!rows_contiguous(src0)) return "weights element-stride != 1";
-    // Batched qmm (whisper conv: weight [K, N, ne2] x im2col [K, M, ne2] for each of ne2 filter positions).
-    // src0 may broadcast over src1's batches (ggml_can_mul_mat invariant: src1->ne[i] % src0->ne[i] == 0).
+    // the kernels address weight rows at ggml_row_size(type, K) and matrices at N rows: a strided view (a permuted
+    // K of attention) goes to ameva_mm, which takes row and matrix strides
+    if (!ggml_is_contiguous(src0)) return "weights not contiguous";
+    // several matrices: src0 may repeat over src1's (ggml_can_mul_mat: src1->ne[i] % src0->ne[i] == 0)
     const int64_t b2 = src1->ne[2], b3 = src1->ne[3];
     if (src0->ne[2] > b2 || src0->ne[3] > b3) return "src0 batch larger than src1";
     if (b2 % src0->ne[2] != 0 || b3 % src0->ne[3] != 0) return "batch not broadcast-compatible";
@@ -3352,14 +3350,11 @@ static const char* enc_mul_mat(AmevaRecorder& rec, const struct ggml_tensor* nod
     // activation/output rows per dispatch: at most kDispatchMac multiply-accumulates and one binding for the rows of
     // src1 and of dst it touches; whole 8-row tiles when the 8-column kernel runs
     const uint64_t rows_fit = std::max<uint64_t>(1, std::min<uint64_t>(span / ((uint64_t)s1 * 4), span / ((uint64_t)sd * 4)));
-    // Batched qmm: src0 may broadcast over src1's ne[2]/ne[3] batches (ggml_can_mul_mat; e.g. whisper conv with
-    // weight [K, N, filter_size] x im2col [K, M, filter_size]). src0 data is stored contiguously (set_tensor strips
-    // GGUF inter-row and inter-batch padding), so its batch stride is N * row_bytes regardless of nb[2].
+    // several matrices: src0 (contiguous, mul_mat_qmm_reason) repeats over r2 x r3 consecutive matrices of src1
     const int64_t r2 = src1->ne[2] / src0->ne[2], r3 = src1->ne[3] / src0->ne[3];
     for (int64_t i3 = 0; i3 < src1->ne[3]; i3++) {
     for (int64_t i2 = 0; i2 < src1->ne[2]; i2++) {
-    // src0 uses contiguous batch stride (N * row_bytes per batch regardless of nb[2])
-    const uint64_t s0_batch_off = ((i2 / r2) + (i3 / r3) * (uint64_t)src0->ne[2]) * (uint64_t)N * row_bytes;
+    const uint64_t s0_batch_off = (uint64_t)(i2 / r2) * src0->nb[2] + (uint64_t)(i3 / r3) * src0->nb[3];
     const uint64_t s1_batch_off = (uint64_t)i2 * src1->nb[2] + (uint64_t)i3 * src1->nb[3];
     const uint64_t d_batch_off  = (uint64_t)i2 * node->nb[2]  + (uint64_t)i3 * node->nb[3];
     for (uint32_t n0 = 0; n0 < N; n0 += rows_per_slice) {
