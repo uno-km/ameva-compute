@@ -1921,8 +1921,18 @@ struct AmevaRange {
 // prompt as one 4 s submission never completed), so the batch is flushed to the queue once the recorded work reaches
 // kFlushMac multiply-accumulates or kFlushDispatches dispatches; one dispatch never exceeds kDispatchMac (large
 // MUL_MATs and attention are split). Flushing early also lets the GPU start while the rest is recorded.
-static const double kFlushMac = 4e9;
-static const double kDispatchMac = 4e9;
+// AMEVA_FLUSH_MAC / AMEVA_DISPATCH_MAC=<multiply-accumulates> (experiment): replace the two budgets
+static double ameva_env_mac(const char* name, double def) {
+    const char* e = getenv(name);
+    if (!e || !*e) return def;
+    char* end = nullptr;
+    const double v = strtod(e, &end);
+    if (!end || *end || !(v >= 1e6 && v <= 1e12)) GGML_ABORT("ggml-ameva: %s must be 1e6..1e12 (got \"%s\")", name, e);
+    fprintf(stderr, "ggml-ameva: %s=%.3g (experiment)\n", name, v);
+    return v;
+}
+static const double kFlushMac = ameva_env_mac("AMEVA_FLUSH_MAC", 4e9);
+static const double kDispatchMac = ameva_env_mac("AMEVA_DISPATCH_MAC", 4e9);
 static const uint32_t kFlushDispatches = 128;
 
 struct AmevaRecorder {
@@ -3209,7 +3219,11 @@ static const char* enc_mul_mat_dense(AmevaRecorder& rec, const struct ggml_tenso
                          (a->ne[3] == 1 || st(a, 3) % 2 == 0);
     const bool words = (f16 && a_words && bb.elem % 2 == 0 && (M == 1 || sb % 2 == 0)) || (f16a && a_words);
     const bool builtin = words && ggml_backend_ameva_get_conv_f16_decoder() == 1;
-    const double cost = !(f16 || f16a) || builtin ? 1.0 : 32.0;
+    // ameva_mm runs at 0.4e9 (Mali-G68 MP4) to 1.4e9 (Adreno 650) products per second on the whisper conv stem
+    // (2026-10-09), far below the tiled kernels kDispatchMac and kFlushMac are sized for: its 7.4e9-product conv in
+    // two submissions never completed on the S20 (the driver resets a submission that runs for seconds). Each product
+    // counts as 32 in the dispatch and submission budgets, 128 through the exact f16 decoder.
+    const double cost = (f16 || f16a) && !builtin ? 128.0 : 32.0;
     AcKernel* kernel = ameva_op_kernel(f16a ? (builtin ? AMEVA_K_MM_F16AWU : words ? AMEVA_K_MM_F16AW : AMEVA_K_MM_F16A)
                                        : !f16 ? AMEVA_K_MM
                                        : builtin ? AMEVA_K_MM_F16WU : words ? AMEVA_K_MM_F16W : AMEVA_K_MM_F16);
