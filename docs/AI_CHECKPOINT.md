@@ -1,7 +1,7 @@
 # Current Engineering Checkpoint
 
 **Timestamp**: 2026-10-10T11:30:00+09:00
-**Branch**: `perf/opencl-mali` (local commits f74b427 .. 4f7ad6d on top of f573d40, not pushed)
+**Branch**: `perf/opencl-mali` (pushed to origin/perf/opencl-mali up to 2aa9315, clean sync)
 **Goal**: Stage 5, TTS (Kokoro-82M v0.19) on ggml-ameva (Stages 1-4 closed). Design note `docs/design/tts-kokoro-ameva.md`.
 
 ### Completed
@@ -24,7 +24,7 @@
 ### Remaining
 1. A35 / A53 final-engine runs (A35 Tailscale offline, A53 sshd refused); S21 t2 / t3 (sshd stopped after t1).
 2. Mali-G68 RTF < 1: ameva_conv ~63 GFLOP/s keeps A53 / A35 above real time; candidates f16 math, q8_0 weights.
-3. Push (not pushed yet; awaits the user's order).
+3. Branch `perf/opencl-mali` pushed to origin (8 commits, clean sync).
 4. On-device G2P (espeak-ng only inside sherpa's Python module on S25 / S20 / A35).
 
 ### Commands
