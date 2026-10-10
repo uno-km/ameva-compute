@@ -11,6 +11,7 @@
 #include <vector>
 #include <new>
 #include <unordered_map>
+#include <algorithm>
 
 static uint64_t get_time_ns(void) {
     struct timespec ts;
@@ -34,6 +35,14 @@ const uint32_t kDescStoragePerPool = 256 * 8;
 const uint32_t kDescUniformPerPool = 256;
 /* above this many sets the cache is emptied, but only when nothing is recording or in flight */
 const size_t kDescCacheTrimThreshold = 16384;
+
+/* Capacity for n elements, grown geometrically. reserve(n) alone allocates exactly n, so reserving size() + k before
+ * every k pushes reallocates and copies the whole vector each time: quadratic in the dispatches of one batch (a
+ * 19000-dispatch graph spent about 100 us per dispatch here). */
+template <class V>
+void reserve_geometric(V& v, size_t n) {
+    if (v.capacity() < n) v.reserve(std::max(n, 2 * v.capacity()));
+}
 
 template <class H>
 uint64_t handle_bits(H h) {
@@ -739,7 +748,7 @@ static AcResult batch_record(AcVkCommandBatch* b, AcVkKernel* kernel, AcVkBuffer
     }
     try {
         b->sub->kernels.push_back(kernel);
-        b->sub->buffers.reserve(b->sub->buffers.size() + count);
+        reserve_geometric(b->sub->buffers, b->sub->buffers.size() + count);
     } catch (...) {
         if (ev) {
             b->sub->refs--;
@@ -1062,7 +1071,7 @@ AcResult ac_vk_batch_flush(AcVkCommandBatch* batch) {
     if (s->state != SUB_RECORDING) return AC_ERR_INVALID_ARGUMENT;
     if (batch->dispatch_count == batch->dispatches_at_flush) return AC_SUCCESS; // nothing new to send
     try {
-        s->flushed.reserve(s->flushed.size() + 1);
+        reserve_geometric(s->flushed, s->flushed.size() + 1);
     } catch (...) {
         return AC_ERR_OUT_OF_HOST_MEMORY;
     }
