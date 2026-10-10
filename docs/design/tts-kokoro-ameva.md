@@ -78,7 +78,8 @@ utterance, so tiny F0 differences shift later samples; spectra and F0 are the ga
 
 | device (ssh cores, GPU) | engine | AMEVA0 F16 ms, RTF (t1 7.55 s) | t3 26.05 s RTF | log-spectral dB (floor) | F0 rel (floor) | CPU F32 ms |
 |---|---|---|---|---|---|---|
-| S25 (0-1,4-5, Adreno 830) | early (no fusions) | 1651, 0.219 | 0.220 (after the runtime fix) | 1.48 (2.99) | 1.1e-4 (1.9e-3) | 14615 |
+| S25 (0-1,4-5, Adreno 830, kgsl max 832 MHz) | final | 1313, 0.174 | 0.176 (t2: 0.177) | 1.49 (3.16) | 1.1e-4 (2.0e-3) | 9290 |
+| S21 (0-7, Mali-G78 at 858 MHz) | final | 3194, 0.423 | open (sshd stopped after t1) | 1.48 (3.16) | 1.1e-4 (2.0e-3) | 5978 |
 | S20 (0-7, Adreno 650 at 441 MHz) | final | 6017, 0.797 | 0.788 (t2 3.67 s: 0.803) | 1.49 (3.16) | 1.1e-4 (2.0e-3) | 16850 |
 | A53 (0-2, Mali-G68) | v3 (before conv linears / FA) | 12596, 1.668 | - | 1.49 (2.99) | invalid (readback bug, fixed) | 80396 |
 
@@ -87,9 +88,17 @@ t3 (446 phonemes, 26.05 s, S20, final engine): AMEVA0 F16 20535 ms, log-spectral
 F0 1.0e-6. Over 26 s the f16 weights move the waveform phase (CPU and GPU alike); against the onnxruntime reference
 the AMEVA0 F16 WAV has log-mel distance 1.14 dB (t2: 0.31 dB, t1: 0.49 dB).
 
+t3 on the S25 (final engine): AMEVA0 F16 4588 ms (RTF 0.176), log-spectral 3.14 dB (floor 3.52), F0 1.4e-4, durations
+equal (the CPU F16 run flipped one token again). The S25's early engine (no fusions, linears as MUL_MAT) was 1651 ms
+(RTF 0.219) on t1.
+
+The t1 WAVs of the S25, S21 and S20 against the onnxruntime reference WAV (16-bit): log-mel distance 0.492 / 0.482 /
+0.487 dB, correlation 0.9997; against the reference's float output 0.63 dB on each (the 16-bit rounding of the device
+WAV alone accounts for about 0.2 dB). S25 against S21: SNR 34.8 dB, log-mel 0.16 dB.
+
 All runs: every node on AMEVA0, durations equal to the reference's for every token, RESULT PASS, WAV headers 16-bit
-PCM mono 24 kHz with the expected length. The S21, A35 and S25 left the network during the session (Tailscale offline)
-and the A53's sshd stopped mid-run; their final-engine runs are open.
+PCM mono 24 kHz with the expected length. Open: the A35 (Tailscale offline) and the A53 (sshd refuses connections)
+final-engine runs, and the S21's t2 / t3 (its sshd stopped after the t1 run).
 
 CPU product baseline (sherpa-onnx int8, 4 threads, text to WAV, S20): 10.49 s for 6.50 s of audio, RTF 1.61.
 
@@ -98,8 +107,7 @@ rest element-wise ops, GROUP_NORM and the LSTM steps (about 10 us per small disp
 
 ## 5. Next, by measured value
 
-1. Final-engine runs on the S25 (expected below RTF 0.2: the fusions and the 1x1-conv linears removed about 25 % of the
-   S20 time), S21, A35 and A53.
+1. Final-engine runs on the A35 and A53 (Mali-G68), S21 t2 / t3.
 2. Mali: the convolution kernel reaches about 63 GFLOP/s on the Mali-G68 (`ameva_conv.comp` notes), so the A53 / A35
    stay above real time on convolutions alone; candidates are f16 arithmetic in ameva_conv and q8_0 conv weights
    (10 % on G68 per the kernel notes).

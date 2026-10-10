@@ -1,7 +1,7 @@
 # Current Engineering Checkpoint
 
-**Timestamp**: 2026-10-10T10:30:00+09:00
-**Branch**: `perf/opencl-mali` (local commits f74b427, 2f1a7e2, 5bb49d7 on top of f573d40)
+**Timestamp**: 2026-10-10T11:30:00+09:00
+**Branch**: `perf/opencl-mali` (local commits f74b427 .. 4f7ad6d on top of f573d40, not pushed)
 **Goal**: Stage 5, TTS (Kokoro-82M v0.19) on ggml-ameva (Stages 1-4 closed). Design note `docs/design/tts-kokoro-ameva.md`.
 
 ### Completed
@@ -15,15 +15,16 @@
 - Implementation vs onnxruntime float reference (PC): CPU F32 SNR 36.2 dB, log-mel 0.125 dB, F0 rel 1.0e-6.
 - S20 final engine: AMEVA0 F16 6017 ms RTF 0.797 (t2 0.803, t3 26 s 0.788), log-spectral 1.49 dB vs floor 3.16,
   F0 1.1e-4 vs floor 2.0e-3, AMEVA0 F32 F0 1.0e-6; CPU F32 16.9 s; sherpa int8 CPU product RTF 1.61. t1, t3 PASS.
-- S25 early engine RTF 0.219 (t3 0.220 after the runtime fix); A53 v3 RTF 1.668 (CPU F32 80 s). Both PASS on audio.
-- test-backend-ops new ops: S25 41/41, A53 106/106, S20 104/104.
+- S25 final engine (cores 0-1,4-5): t1 1313 ms RTF 0.174, t2 0.177, t3 0.176; LSD / F0 within gate; PASS x3.
+- S21 final engine (Mali-G78 858 MHz): t1 3194 ms RTF 0.423 (CPU F16 0.631), PASS.
+- A53 v3 RTF 1.668 (CPU F32 80 s), PASS on audio. t1 WAVs S25 / S21 / S20 vs ORT WAV: log-mel 0.49 dB each.
+- test-backend-ops new ops: S25 41/41 (final plugin), A53 106/106, S20 104/104.
+- `4f7ad6d` kernel headers regenerated with glslang 16.3.0; S21 and S25 output byte-identical.
 
 ### Remaining
-1. Final-engine runs on S25 (target RTF < 0.2), S21, A35, A53: S25 / S21 / A35 went offline in Tailscale, A53 sshd
-   stopped (connection refused) during the session.
-2. Mali RTF < 1: ameva_conv ~63 GFLOP/s on G68 keeps A53 / A35 above real time; candidates f16 math, q8_0 weights.
-3. Kernel headers in 2f1a7e2 were generated on the S20 (glslang 16.6.0); the fleet convention is 16.3.0 (S25 / S21):
-   regenerate there and recommit before pushing. Then push (not pushed yet).
+1. A35 / A53 final-engine runs (A35 Tailscale offline, A53 sshd refused); S21 t2 / t3 (sshd stopped after t1).
+2. Mali-G68 RTF < 1: ameva_conv ~63 GFLOP/s keeps A53 / A35 above real time; candidates f16 math, q8_0 weights.
+3. Push (not pushed yet; awaits the user's order).
 4. On-device G2P (espeak-ng only inside sherpa's Python module on S25 / S20 / A35).
 
 ### Commands
