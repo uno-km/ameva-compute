@@ -22,7 +22,9 @@
 1. Final-engine runs on S25 (target RTF < 0.2), S21, A35, A53: S25 / S21 / A35 went offline in Tailscale, A53 sshd
    stopped (connection refused) during the session.
 2. Mali RTF < 1: ameva_conv ~63 GFLOP/s on G68 keeps A53 / A35 above real time; candidates f16 math, q8_0 weights.
-3. On-device G2P (espeak-ng only inside sherpa's Python module on S25 / S20 / A35). Push of the three commits.
+3. Kernel headers in 2f1a7e2 were generated on the S20 (glslang 16.6.0); the fleet convention is 16.3.0 (S25 / S21):
+   regenerate there and recommit before pushing. Then push (not pushed yet).
+4. On-device G2P (espeak-ng only inside sherpa's Python module on S25 / S20 / A35).
 
 ### Commands
 - Build (S25 / A53; S20 builds only the tool): `GGML_DIR=<b8471 ggml> bash tts_build.sh SRC OUT all|kernels|plugin|tool`.
