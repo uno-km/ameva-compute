@@ -1,0 +1,34 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// AMEVA SNAKE, f32: y = x + ia[c] * sin(x * a[c])^2 per element, c the index along dimension 2 (the channel of a
+// [W, H, C, B] tensor), as one dispatch for the five nodes MUL(x, a) -> SIN -> SQR -> MUL(., ia) -> ADD(., x) that
+// a vocoder's Snake activation is written as (graph-engine fusion AMEVA_FUSE_SNAKE). Every product and the sum are
+// rounded as the separate kernels round them (precise: no contraction into fused multiply-adds) and the sine is
+// ameva_sincos as in ameva_unary; the driver compiles that function once per kernel, so the two paths are expected,
+// not guaranteed, to agree in every bit. x and y contiguous.
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+
+layout(std430, binding = 0) readonly buffer X { float x[]; };
+layout(std430, binding = 1) readonly buffer AL { float al[]; };
+layout(std430, binding = 2) readonly buffer IA { float ia[]; };
+layout(std430, binding = 3) writeonly buffer D { float d[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n, plane, channels;  // elements, elements per channel plane (ne0 * ne1), channels (ne2)
+    uint x_off, a_off, ia_off, d_off;
+} pc;
+
+void main() {
+    const uint i = ameva_linear_id();
+    if (i >= pc.n) return;
+    const uint c = (i / pc.plane) % pc.channels;
+    const float v = x[pc.x_off + i];
+    precise float t = v * al[pc.a_off + c];
+    const float s = ameva_sincos(t).x;
+    precise float q = s * s;
+    precise float m = q * ia[pc.ia_off + c];
+    precise float y = m + v;
+    d[pc.d_off + i] = y;
+}

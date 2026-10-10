@@ -1171,12 +1171,23 @@ static bool fits_binding_rows(const struct ggml_tensor* t) {
     return t && span && rows_linear(t) && (size_t)t->nb[1] <= span && ggml_row_size(t->type, t->ne[0]) <= span;
 }
 
+// op code of shaders/ameva_unary.comp for an element-wise node: GGML_OP_UNARY by its unary op, and the element-wise
+// ops ggml keeps as ops of their own (SQR, SQRT, SIN, COS, LEAKY_RELU); -1 when the kernel has none
 static int unary_code(const struct ggml_tensor* op) {
+    switch (op->op) {
+        case GGML_OP_SQR: return 9;
+        case GGML_OP_SQRT: return 10;
+        case GGML_OP_SIN: return 13;
+        case GGML_OP_COS: return 14;
+        case GGML_OP_LEAKY_RELU: return 15;
+        case GGML_OP_UNARY: break;
+        default: return -1;
+    }
     const char* n = ggml_unary_op_name(ggml_get_unary_op(op));
     if (!n) return -1;
     static const char* const names[] = {"TANH", "SILU", "GELU", "GELU_ERF", "GELU_QUICK", "RELU", "SIGMOID",
-                                        "NEG", "SQR", "SQRT", "EXP", "ABS"};
-    static const int codes[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+                                        "NEG", "EXP", "ABS", "SGN", "STEP", "FLOOR"};
+    static const int codes[] = {1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 16, 17, 18};
     for (size_t i = 0; i < sizeof(codes) / sizeof(codes[0]); ++i) {
         if (strcmp(n, names[i]) == 0) return codes[i];
     }
@@ -1620,9 +1631,14 @@ const char* ameva_op_unsupported_reason(const struct ggml_tensor* op) {
             return nullptr;
         }
         case GGML_OP_SCALE:
-        case GGML_OP_UNARY: {
+        case GGML_OP_UNARY:
+        case GGML_OP_SQR:
+        case GGML_OP_SQRT:
+        case GGML_OP_SIN:
+        case GGML_OP_COS:
+        case GGML_OP_LEAKY_RELU: {
             const struct ggml_tensor* a = op->src[0];
-            if (op->op == GGML_OP_UNARY && unary_code(op) < 0) return "unary op has no ameva kernel";
+            if (op->op != GGML_OP_SCALE && unary_code(op) < 0) return "unary op has no ameva kernel";
             if (!is_f32(a) || !is_f32(op) || !ggml_are_same_shape(a, op)) return "unary op on non-f32 or reshaping";
             if (!rows_contiguous(a) || !rows_contiguous(op)) return "rows not contiguous";
             // larger than one binding: processed in row chunks (e.g. the logits of a 256k vocabulary and a 256-token
@@ -1778,11 +1794,21 @@ const char* ameva_op_unsupported_reason(const struct ggml_tensor* op) {
             // accepted when both give the same index for every i of every axis, so the result equals the CPU's:
             // always so for a whole factor (i < 2^24: the float quotient cannot round up to the next integer),
             // checked index by index otherwise.
+            // Bilinear without flags (half-pixel centers) on dimensions 0 and 1: ggml-cpu's formula (see
+            // shaders/ameva_upscale.comp), dimensions 2 and 3 unscaled, inside one binding.
             const struct ggml_tensor* a = op->src[0];
-            if (((const int32_t*)op->op_params)[0] != (int32_t)GGML_SCALE_MODE_NEAREST)
-                return "upscale mode other than nearest without flags";
+            const int32_t mode = ((const int32_t*)op->op_params)[0];
+            if (mode != (int32_t)GGML_SCALE_MODE_NEAREST && mode != (int32_t)GGML_SCALE_MODE_BILINEAR)
+                return "upscale mode other than nearest or bilinear without flags";
             if (!is_f32(a) || !is_f32(op)) return "upscale on non-f32";
             if (!fits_kernel_indexing(a) || !fits_kernel_indexing(op)) return "exceeds 32-bit indexing";
+            if (mode == (int32_t)GGML_SCALE_MODE_BILINEAR) {
+                if (op->ne[2] != a->ne[2] || op->ne[3] != a->ne[3]) return "bilinear upscale of dimension 2 or 3";
+                if (!fits_binding(a) || !fits_binding(op)) return "bilinear upscale above one buffer binding";
+                if (ggml_nelements(a) == 0) return "upscale of an empty tensor";
+                if (a->ne[0] > INT32_MAX || a->ne[1] > INT32_MAX) return "exceeds 32-bit indexing";
+                return nullptr;
+            }
             if (!fits_binding(a) || !fits_binding(op)) {
                 uint64_t planes = 0; // above one binding: windows of planes
                 if (const char* why = upscale_windows_reason(op, &planes)) return why;
@@ -1847,6 +1873,15 @@ const char* ameva_op_unsupported_reason(const struct ggml_tensor* op) {
             if ((uint64_t)(OW - 1) * (uint64_t)prm[0] + (uint64_t)(KW - 1) * (uint64_t)prm[4] > (uint64_t)INT32_MAX ||
                 (two_d && (uint64_t)(OH - 1) * (uint64_t)prm[1] + (uint64_t)(KH - 1) * (uint64_t)prm[5] > (uint64_t)INT32_MAX))
                 return "exceeds 32-bit indexing";
+            return nullptr;
+        }
+        case GGML_OP_CUMSUM: {
+            // shaders/ameva_cumsum.comp: one invocation per row, the CPU's sequential order along dimension 0
+            const struct ggml_tensor* a = op->src[0];
+            if (!is_f32(a) || !is_f32(op) || !ggml_are_same_shape(a, op)) return "cumsum on non-f32";
+            if (!rows_contiguous(a) || !rows_contiguous(op)) return "rows not contiguous";
+            if (!fits_binding(a) || !fits_binding(op)) return "tensor exceeds a buffer binding";
+            if (!fits_kernel_indexing(a) || !fits_kernel_indexing(op)) return "exceeds 32-bit indexing";
             return nullptr;
         }
         case GGML_OP_REPEAT: {
@@ -3580,6 +3615,7 @@ static const char* enc_unary(AmevaRecorder& rec, const struct ggml_tensor* node)
         p1 = fbits(op_param_f32(node, 1));
     } else {
         op = (uint32_t)unary_code(node);
+        if (node->op == GGML_OP_LEAKY_RELU) p0 = fbits(op_param_f32(node, 0)); // negative slope
     }
     AmevaBind ba, bd;
     const char* e = nullptr;
@@ -3953,7 +3989,7 @@ static const char* enc_flash_attn(AmevaRecorder& rec, const struct ggml_tensor* 
     return nullptr;
 }
 
-// Graph-engine fusion of adjacent node pairs (AMEVA_FUSE=0 disables it). The fused dispatch computes node i+1 as well
+// Graph-engine fusion of adjacent node pairs (AMEVA_FUSE=0 disables it; chains: ameva_find_chain). The fused dispatch computes node i+1 as well
 // and still writes node i's output ("write-through"), so the result stays correct whoever else reads node i (the
 // backend sees one split of the graph, so other uses of an intermediate cannot be ruled out). Pairs:
 //   RMS_NORM -> MUL by a one-row weight            ameva_rms_norm with mul
@@ -3976,7 +4012,8 @@ enum AmevaFuseKind {
     AMEVA_FUSE_RMS_MUL,
     AMEVA_FUSE_MM_EPILOGUE,
     AMEVA_FUSE_CONV_BIAS,
-    AMEVA_FUSE_NORM_CHAIN
+    AMEVA_FUSE_NORM_CHAIN,
+    AMEVA_FUSE_SNAKE
 };
 
 // The nodes after a GROUP_NORM that shaders/ameva_cnorm.comp computes with it. flags: 1 MUL by the per-channel
@@ -3988,7 +4025,8 @@ struct AmevaNormChain {
 
 struct AmevaFusion {
     AmevaFuseKind kind = AMEVA_FUSE_NONE;
-    const struct ggml_tensor* w = nullptr;          // RMS_MUL: norm weight; CONV_BIAS: the bias
+    const struct ggml_tensor* w = nullptr;          // RMS_MUL: norm weight; CONV_BIAS: the bias; SNAKE: alpha
+    const struct ggml_tensor* w2 = nullptr;         // SNAKE: 1 / alpha
     AmevaEpilogue ep = { 0, nullptr, nullptr };     // MM_EPILOGUE
     AmevaNormChain chain = { 0, nullptr, nullptr }; // NORM_CHAIN
     int last = -1;    // index of the last node the dispatches of the first one compute
@@ -4091,6 +4129,33 @@ static AmevaFusion ameva_find_chain(struct ggml_cgraph* cgraph, int i, int n_nod
             f.last = j;
             f.absorbed = 1;
         }
+        return f;
+    }
+    if (n0->op == GGML_OP_MUL) {
+        // Snake, x + ia * sin(x * a)^2 with per-channel a and ia, written as MUL(x, a) and then in place on it SIN,
+        // SQR, MUL(., ia), ADD(., x) (the in-place nodes alias the first, as for the chains above)
+        const struct ggml_tensor* x = n0->src[0];
+        if (!is_f32(x) || !is_f32(n0) || !ggml_are_same_shape(x, n0) || !ggml_is_contiguous(x) ||
+            !ggml_is_contiguous(n0) || !is_f32_channel_vector(n0->src[1], C) || tensors_overlap(n0, n0->src[1]) ||
+            tensors_overlap(n0, x) || !fits_binding(x) || !fits_binding(n0) || !fits_kernel_indexing(n0))
+            return f;
+        static const enum ggml_op seq[4] = { GGML_OP_SIN, GGML_OP_SQR, GGML_OP_MUL, GGML_OP_ADD };
+        const struct ggml_tensor* cur = n0;
+        int at = i;
+        for (int k = 0; k < 4; ++k) {
+            const int j = ameva_next_work_node(cgraph, at, n_nodes);
+            const struct ggml_tensor* n = j < 0 ? nullptr : ggml_graph_node(cgraph, j);
+            if (!n || n->op != seq[k] || !chain_link(n0, cur, n)) return f;
+            if (k == 2 && (!is_f32_channel_vector(n->src[1], C) || tensors_overlap(n0, n->src[1]))) return f;
+            if (k == 3 && n->src[1] != x) return f;
+            if (k == 2) f.w2 = n->src[1];
+            cur = n;
+            at = j;
+        }
+        f.kind = AMEVA_FUSE_SNAKE;
+        f.w = n0->src[1];
+        f.last = at;
+        f.absorbed = 4;
         return f;
     }
     if (n0->op != GGML_OP_GROUP_NORM) return f;
@@ -4586,11 +4651,52 @@ static const char* enc_group_norm(AmevaRecorder& rec, const struct ggml_tensor* 
     return nullptr;
 }
 
-// UPSCALE (nearest): shaders/ameva_upscale.comp, one invocation per element of the result.
+// CUMSUM: shaders/ameva_cumsum.comp, one invocation per row.
+static const char* enc_cumsum(AmevaRecorder& rec, const struct ggml_tensor* node) {
+    const struct ggml_tensor* a = node->src[0];
+    AcKernel* kernel = ameva_op_kernel(AMEVA_K_CUMSUM);
+    if (!kernel) return "no ameva_cumsum kernel";
+    AmevaBind ba, bd;
+    const char* e = ameva_bind(a, 4, &ba);
+    if (!e) e = ameva_bind(node, 4, &bd);
+    if (e) return e;
+    const uint32_t pc[12] = { (uint32_t)node->ne[0], (uint32_t)node->ne[1], (uint32_t)node->ne[2], (uint32_t)node->ne[3],
+                              ba.elem, st(a, 1), st(a, 2), st(a, 3), bd.elem, st(node, 1), st(node, 2), st(node, 3) };
+    const AcBufferBinding bind[2] = { ba.b, bd.b };
+    return ameva_record(rec, kernel, &ba, 1, &bd, 1, bind, 2, pc, sizeof(pc), ameva_grid_1d(ggml_nrows(node), 64),
+                        (double)ggml_nelements(node));
+}
+
+// SNAKE (AMEVA_FUSE_SNAKE): shaders/ameva_snake.comp computes the chain MUL(x, a) .. ADD(., x) that starts at node
+// and ends at last (which aliases node) in one dispatch.
+static const char* enc_snake(AmevaRecorder& rec, const struct ggml_tensor* node, const struct ggml_tensor* last,
+                             const struct ggml_tensor* a, const struct ggml_tensor* ia) {
+    const struct ggml_tensor* x = node->src[0];
+    AcKernel* kernel = ameva_op_kernel(AMEVA_K_SNAKE);
+    if (!kernel) return "no ameva_snake kernel";
+    AmevaBind bx, ba, bi, bd;
+    const char* e = ameva_bind(x, 4, &bx);
+    if (!e) e = ameva_bind(a, 4, &ba);
+    if (!e) e = ameva_bind(ia, 4, &bi);
+    if (!e) e = ameva_bind(last, 4, &bd);
+    if (e) return e;
+    const uint32_t pc[7] = { (uint32_t)ggml_nelements(node), (uint32_t)(node->ne[0] * node->ne[1]), (uint32_t)node->ne[2],
+                             bx.elem, ba.elem, bi.elem, bd.elem };
+    const AcBufferBinding bind[4] = { bx.b, ba.b, bi.b, bd.b };
+    const AmevaBind reads[3] = { bx, ba, bi };
+    return ameva_record(rec, kernel, reads, 3, &bd, 1, bind, 4, pc, sizeof(pc), ameva_grid_1d(ggml_nelements(node), 256),
+                        5.0 * (double)ggml_nelements(node));
+}
+
+// UPSCALE (nearest, or bilinear on dimensions 0 and 1): shaders/ameva_upscale.comp, one invocation per element of
+// the result.
 static const char* enc_upscale(AmevaRecorder& rec, const struct ggml_tensor* node) {
     const struct ggml_tensor* a = node->src[0];
     AcKernel* kernel = ameva_op_kernel(AMEVA_K_UPSCALE);
     if (!kernel) return "no ameva_upscale kernel";
+    const uint32_t mode = ((const int32_t*)node->op_params)[0] == (int32_t)GGML_SCALE_MODE_BILINEAR ? 1u : 0u;
+    // scale factors as ggml-cpu computes them, (float)d_ne / a_ne
+    const uint32_t sf0 = fbits((float)node->ne[0] / a->ne[0]), sf1 = fbits((float)node->ne[1] / a->ne[1]);
     AmevaBind ba, bd;
     if (!fits_binding(a) || !fits_binding(node)) {
         // windows of planes (upscale_windows_reason): the op on views of `cc` planes of one index of dimension 3
@@ -4602,10 +4708,10 @@ static const char* enc_upscale(AmevaRecorder& rec, const struct ggml_tensor* nod
                 const char* e = ameva_bind_span(a, c0 * a->nb[2] + i3 * a->nb[3], window_bytes(a, cc), 4, &ba);
                 if (!e) e = ameva_bind_span(node, c0 * node->nb[2] + i3 * node->nb[3], window_bytes(node, cc), 4, &bd);
                 if (e) return e;
-                const uint32_t pc[18] = { (uint32_t)node->ne[0], (uint32_t)node->ne[1], (uint32_t)cc, 1u,
+                const uint32_t pc[21] = { (uint32_t)node->ne[0], (uint32_t)node->ne[1], (uint32_t)cc, 1u,
                                           (uint32_t)a->ne[0], (uint32_t)a->ne[1], (uint32_t)cc, 1u,
                                           ba.elem, st(a, 0), st(a, 1), st(a, 2), 0u,
-                                          bd.elem, st(node, 0), st(node, 1), st(node, 2), 0u };
+                                          bd.elem, st(node, 0), st(node, 1), st(node, 2), 0u, mode, sf0, sf1 };
                 const AcBufferBinding bind[2] = { ba.b, bd.b };
                 const uint64_t n = (uint64_t)node->ne[0] * (uint64_t)node->ne[1] * cc;
                 e = ameva_record(rec, kernel, &ba, 1, &bd, 1, bind, 2, pc, sizeof(pc), ameva_grid_1d(n, 256), (double)n);
@@ -4618,10 +4724,10 @@ static const char* enc_upscale(AmevaRecorder& rec, const struct ggml_tensor* nod
     const char* e = ameva_bind(a, 4, &ba);
     if (!e) e = ameva_bind(node, 4, &bd);
     if (e) return e;
-    const uint32_t pc[18] = { (uint32_t)node->ne[0], (uint32_t)node->ne[1], (uint32_t)node->ne[2], (uint32_t)node->ne[3],
+    const uint32_t pc[21] = { (uint32_t)node->ne[0], (uint32_t)node->ne[1], (uint32_t)node->ne[2], (uint32_t)node->ne[3],
                               (uint32_t)a->ne[0], (uint32_t)a->ne[1], (uint32_t)a->ne[2], (uint32_t)a->ne[3],
                               ba.elem, st(a, 0), st(a, 1), st(a, 2), st(a, 3),
-                              bd.elem, st(node, 0), st(node, 1), st(node, 2), st(node, 3) };
+                              bd.elem, st(node, 0), st(node, 1), st(node, 2), st(node, 3), mode, sf0, sf1 };
     const AcBufferBinding bind[2] = { ba.b, bd.b };
     return ameva_record(rec, kernel, &ba, 1, &bd, 1, bind, 2, pc, sizeof(pc), ameva_grid_1d(ggml_nelements(node), 256),
                         (double)ggml_nelements(node));
@@ -4829,7 +4935,13 @@ static const char* ameva_encode(AmevaRecorder& rec, const struct ggml_tensor* no
         case GGML_OP_MUL:
         case GGML_OP_DIV: return enc_binary(rec, node);
         case GGML_OP_SCALE:
-        case GGML_OP_UNARY: return enc_unary(rec, node);
+        case GGML_OP_UNARY:
+        case GGML_OP_SQR:
+        case GGML_OP_SQRT:
+        case GGML_OP_SIN:
+        case GGML_OP_COS:
+        case GGML_OP_LEAKY_RELU: return enc_unary(rec, node);
+        case GGML_OP_CUMSUM: return enc_cumsum(rec, node);
         case GGML_OP_GLU: return enc_glu(rec, node);
         case GGML_OP_RMS_NORM: return enc_rms_norm(rec, node);
         case GGML_OP_ROPE: return enc_rope(rec, node);
@@ -5051,7 +5163,7 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
         const uint64_t te = ameva_now_ns(), kc0 = g_prof_kcreate_ns.load(std::memory_order_relaxed);
         AmevaFusion fz;
         if (ameva_fuse_enabled() && i + 1 < n_nodes) {
-            if (node->op == GGML_OP_CONV_2D || node->op == GGML_OP_GROUP_NORM) {
+            if (node->op == GGML_OP_CONV_2D || node->op == GGML_OP_GROUP_NORM || node->op == GGML_OP_MUL) {
                 fz = ameva_find_chain(cgraph, i, n_nodes);
             } else {
                 fz = ameva_find_fusion(node, ggml_graph_node(cgraph, i + 1));
@@ -5063,6 +5175,7 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
                                   : fz.kind == AMEVA_FUSE_MM_EPILOGUE ? enc_mul_mat(rec, node, &fz.ep)
                                   : fz.kind == AMEVA_FUSE_CONV_BIAS ? enc_conv_2d(rec, node, fz.w)
                                   : fz.kind == AMEVA_FUSE_NORM_CHAIN ? enc_group_norm(rec, node, &fz.chain)
+                                  : fz.kind == AMEVA_FUSE_SNAKE ? enc_snake(rec, node, ggml_graph_node(cgraph, fz.last), fz.w, fz.w2)
                                                                      : ameva_encode(rec, node);
         if (node->op >= 0 && node->op < GGML_OP_COUNT) {
             const uint64_t kc = g_prof_kcreate_ns.load(std::memory_order_relaxed) - kc0;

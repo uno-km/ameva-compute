@@ -441,7 +441,8 @@ const char* ameva_abi_check(void) {
             {GGML_OP_CONV_2D, "CONV_2D"}, {GGML_OP_GROUP_NORM, "GROUP_NORM"}, {GGML_OP_UPSCALE, "UPSCALE"},
             {GGML_OP_PAD, "PAD"}, {GGML_OP_CONCAT, "CONCAT"}, {GGML_OP_SOFT_MAX, "SOFT_MAX"},
             {GGML_OP_NORM, "NORM"}, {GGML_OP_TIMESTEP_EMBEDDING, "TIMESTEP_EMBEDDING"},
-            {GGML_OP_REPEAT, "REPEAT"}, {GGML_OP_IM2COL, "IM2COL"}};
+            {GGML_OP_REPEAT, "REPEAT"}, {GGML_OP_IM2COL, "IM2COL"}, {GGML_OP_SQR, "SQR"}, {GGML_OP_SQRT, "SQRT"},
+            {GGML_OP_SIN, "SIN"}, {GGML_OP_COS, "COS"}, {GGML_OP_LEAKY_RELU, "LEAKY_RELU"}, {GGML_OP_CUMSUM, "CUMSUM"}};
         static const struct { enum ggml_type type; const char* name; } kTypes[] = {
             {GGML_TYPE_F32, "f32"}, {GGML_TYPE_F16, "f16"}, {GGML_TYPE_I32, "i32"}, {GGML_TYPE_I64, "i64"},
             {GGML_TYPE_Q5_0, "q5_0"}, {GGML_TYPE_Q4_K, "q4_K"}};

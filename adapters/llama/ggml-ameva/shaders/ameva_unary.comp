@@ -2,9 +2,14 @@
 #extension GL_GOOGLE_include_directive : require
 // AMEVA element-wise f32 ops, same shape in and out, dimension 0 contiguous.
 //   op: 0 SCALE (x*s + b)   1 TANH   2 SILU   3 GELU (tanh form)   4 GELU_ERF   5 GELU_QUICK
-//       6 RELU   7 SIGMOID   8 NEG   9 SQR   10 SQRT   11 EXP   12 ABS
+//       6 RELU   7 SIGMOID   8 NEG   9 SQR   10 SQRT   11 EXP   12 ABS   13 SIN   14 COS
+//       15 LEAKY_RELU (p0: negative slope)   16 SGN   17 STEP   18 FLOOR
 // The formulas are ggml's (ggml-cpu vec.h / unary-ops.cpp) evaluated in f32. ggml's CPU GELU goes through an f16
 // lookup table (GGML_GELU_FP16); this kernel evaluates the formula itself, so the two differ at f16 resolution.
+// SIN / COS do not use the GLSL built-ins, whose precision the Vulkan specification bounds only on [-pi, pi]
+// (absolute 2^-11): ameva_sincos (ameva_common.glsl, fused three-part reduction by pi/2 and Cephes' polynomials),
+// which stays within about 1e-7 of libm's sinf / cosf (ggml-cpu) also for the 1e5..1e6 radian phases of a harmonic
+// source.
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 #include "ameva_common.glsl"
@@ -51,6 +56,12 @@ void main() {
         case 9u: r = x * x; break;
         case 10u: r = sqrt(x); break;
         case 11u: r = exp(x); break;
+        case 13u: r = ameva_sincos(x).x; break;
+        case 14u: r = ameva_sincos(x).y; break;
+        case 15u: r = max(x, 0.0) + uintBitsToFloat(pc.p0) * min(x, 0.0); break;
+        case 16u: r = x > 0.0 ? 1.0 : (x < 0.0 ? -1.0 : 0.0); break;
+        case 17u: r = x > 0.0 ? 1.0 : 0.0; break;
+        case 18u: r = floor(x); break;
         default: r = abs(x); break;
     }
     d[pc.d_off + i0 + i1 * pc.d_s1 + i2 * pc.d_s2 + i3 * pc.d_s3] = floatBitsToUint(r);

@@ -1,10 +1,18 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
-// AMEVA UPSCALE, nearest, f32: element (i0, i1, i2, i3) of the result is element (i0 * a_ne0 / d_ne0, ...) of the
-// source, on each axis the integer form of ggml's index i / ((float)d_ne / a_ne)
-// (ggml_compute_forward_upscale_f32, GGML_SCALE_MODE_NEAREST without flags). The host accepts a node only when the
-// two forms give the same index for every i of every axis, so the result equals the CPU's in every bit; the words
-// are copied without a float conversion. Any strides.
+// AMEVA UPSCALE, f32.
+// mode 0, nearest: element (i0, i1, i2, i3) of the result is element (i0 * a_ne0 / d_ne0, ...) of the source, on
+// each axis the integer form of ggml's index i / ((float)d_ne / a_ne) (ggml_compute_forward_upscale_f32,
+// GGML_SCALE_MODE_NEAREST without flags). The host accepts a node only when the two forms give the same index for
+// every i of every axis, so the result equals the CPU's in every bit; the words are copied without a float
+// conversion.
+// mode 1, bilinear without flags (half-pixel centers, PyTorch / ONNX "linear" with align_corners = false) on
+// dimensions 0 and 1, ggml-cpu's formula: x = (i0 + 0.5) / sf0 - 0.5 with sf0 = (float)d_ne0 / a_ne0 (passed as
+// bits, computed by the host as the CPU does), x0 = floor(x) and x0 + 1 clamped to the source, dx = x - x0 clamped
+// to [0, 1], the same along dimension 1, value a (1-dx)(1-dy) + b dx (1-dy) + c (1-dx) dy + d dx dy. Dimensions 2
+// and 3 are not scaled in this mode (host check). The division and the clamped weights follow the CPU; a GPU
+// division is not always correctly rounded, so a weight can differ by an ulp.
+// Any strides.
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 #include "ameva_common.glsl"
@@ -17,8 +25,13 @@ layout(push_constant) uniform PushConstants {
     uint a_ne0, a_ne1, a_ne2, a_ne3;
     uint a_off, a_s0, a_s1, a_s2;
     uint a_s3, d_off, d_s0, d_s1;
-    uint d_s2, d_s3;
+    uint d_s2, d_s3, mode, sf0;
+    uint sf1;
 } pc;
+
+float src_at(uint x, uint y, uint base) {
+    return uintBitsToFloat(a[base + x * pc.a_s0 + y * pc.a_s1]);
+}
 
 void main() {
     const uint k = ameva_linear_id();
@@ -30,7 +43,24 @@ void main() {
     t /= pc.d_ne1;
     const uint i2 = t % pc.d_ne2;
     const uint i3 = t / pc.d_ne2;
-    const uint si = pc.a_off + (i0 * pc.a_ne0 / pc.d_ne0) * pc.a_s0 + (i1 * pc.a_ne1 / pc.d_ne1) * pc.a_s1 +
-                    (i2 * pc.a_ne2 / pc.d_ne2) * pc.a_s2 + (i3 * pc.a_ne3 / pc.d_ne3) * pc.a_s3;
-    d[pc.d_off + i0 * pc.d_s0 + i1 * pc.d_s1 + i2 * pc.d_s2 + i3 * pc.d_s3] = a[si];
+    const uint di = pc.d_off + i0 * pc.d_s0 + i1 * pc.d_s1 + i2 * pc.d_s2 + i3 * pc.d_s3;
+    if (pc.mode == 0u) {
+        const uint si = pc.a_off + (i0 * pc.a_ne0 / pc.d_ne0) * pc.a_s0 + (i1 * pc.a_ne1 / pc.d_ne1) * pc.a_s1 +
+                        (i2 * pc.a_ne2 / pc.d_ne2) * pc.a_s2 + (i3 * pc.a_ne3 / pc.d_ne3) * pc.a_s3;
+        d[di] = a[si];
+        return;
+    }
+    const uint base = pc.a_off + i2 * pc.a_s2 + i3 * pc.a_s3;
+    precise float y = (float(i1) + 0.5) / uintBitsToFloat(pc.sf1) - 0.5;
+    precise float x = (float(i0) + 0.5) / uintBitsToFloat(pc.sf0) - 0.5;
+    const int ny = int(pc.a_ne1) - 1, nx = int(pc.a_ne0) - 1;
+    const int fy = int(floor(y)), fx = int(floor(x));
+    const int y0 = clamp(fy, 0, ny), y1 = clamp(fy + 1, 0, ny);
+    const int x0 = clamp(fx, 0, nx), x1 = clamp(fx + 1, 0, nx);
+    precise float dy = clamp(y - float(y0), 0.0, 1.0);
+    precise float dx = clamp(x - float(x0), 0.0, 1.0);
+    const float va = src_at(uint(x0), uint(y0), base), vb = src_at(uint(x1), uint(y0), base);
+    const float vc = src_at(uint(x0), uint(y1), base), vd = src_at(uint(x1), uint(y1), base);
+    precise float v = va * (1.0 - dx) * (1.0 - dy) + vb * dx * (1.0 - dy) + vc * (1.0 - dx) * dy + vd * dx * dy;
+    d[di] = floatBitsToUint(v);
 }
