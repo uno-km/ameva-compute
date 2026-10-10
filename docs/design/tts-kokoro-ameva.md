@@ -79,8 +79,13 @@ utterance, so tiny F0 differences shift later samples; spectra and F0 are the ga
 | device (ssh cores, GPU) | engine | AMEVA0 F16 ms, RTF (t1 7.55 s) | t3 26.05 s RTF | log-spectral dB (floor) | F0 rel (floor) | CPU F32 ms |
 |---|---|---|---|---|---|---|
 | S25 (0-1,4-5, Adreno 830) | early (no fusions) | 1651, 0.219 | 0.220 (after the runtime fix) | 1.48 (2.99) | 1.1e-4 (1.9e-3) | 14615 |
-| S20 (0-7, Adreno 650 at 441 MHz) | final | 6017, 0.797 | 0.826 (before FA) | 1.49 (3.16) | 1.1e-4 (2.0e-3) | 16850 |
+| S20 (0-7, Adreno 650 at 441 MHz) | final | 6017, 0.797 | 0.788 (t2 3.67 s: 0.803) | 1.49 (3.16) | 1.1e-4 (2.0e-3) | 16850 |
 | A53 (0-2, Mali-G68) | v3 (before conv linears / FA) | 12596, 1.668 | - | 1.49 (2.99) | invalid (readback bug, fixed) | 80396 |
+
+t3 (446 phonemes, 26.05 s, S20, final engine): AMEVA0 F16 20535 ms, log-spectral 3.14 dB (floor 3.52), F0 relative
+1.4e-4 (floor 1.8e-3), durations equal for every token (the CPU F16 run flipped one); AMEVA0 F32 SNR 28.7 dB, 1.00 dB,
+F0 1.0e-6. Over 26 s the f16 weights move the waveform phase (CPU and GPU alike); against the onnxruntime reference
+the AMEVA0 F16 WAV has log-mel distance 1.14 dB (t2: 0.31 dB, t1: 0.49 dB).
 
 All runs: every node on AMEVA0, durations equal to the reference's for every token, RESULT PASS, WAV headers 16-bit
 PCM mono 24 kHz with the expected length. The S21, A35 and S25 left the network during the session (Tailscale offline)

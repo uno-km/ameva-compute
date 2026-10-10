@@ -13,8 +13,8 @@
 
 ### Verified (t1 = 117 tokens, 7.55 s; WAV only, never played)
 - Implementation vs onnxruntime float reference (PC): CPU F32 SNR 36.2 dB, log-mel 0.125 dB, F0 rel 1.0e-6.
-- S20 final engine: AMEVA0 F16 6017 ms RTF 0.797 (t3 26 s: 0.826 before FA), log-spectral 1.49 dB vs floor 3.16,
-  F0 1.1e-4 vs floor 2.0e-3, AMEVA0 F32 F0 1.0e-6; CPU F32 16.9 s; sherpa int8 CPU product RTF 1.61. PASS.
+- S20 final engine: AMEVA0 F16 6017 ms RTF 0.797 (t2 0.803, t3 26 s 0.788), log-spectral 1.49 dB vs floor 3.16,
+  F0 1.1e-4 vs floor 2.0e-3, AMEVA0 F32 F0 1.0e-6; CPU F32 16.9 s; sherpa int8 CPU product RTF 1.61. t1, t3 PASS.
 - S25 early engine RTF 0.219 (t3 0.220 after the runtime fix); A53 v3 RTF 1.668 (CPU F32 80 s). Both PASS on audio.
 - test-backend-ops new ops: S25 41/41, A53 106/106, S20 104/104.
 
