@@ -29,7 +29,7 @@
   that change was not committed.
 
 ### Next / Remaining
-1. Research note AOSF-TR-2026-MALI-DRIVER-04 published in uno-km (`cbbdf03`, docs/research_papers/).
+1. Paper AOSF-TR-2026-MALI-DRIVER-04 live on uno-km docs & Labs Post #74 (`3750638`).
 2. Release of the 084d513 backend is the user's call. BitNet PR #633: frozen by user decision 2026-10-11.
 3. Lab cleanup: only this session's scratch removed; rel27x/rel280/rel-2.8.1/iso staging copies (~3.3 GB per phone) await the user.
 
