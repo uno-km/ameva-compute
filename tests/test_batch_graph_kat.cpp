@@ -6,12 +6,14 @@
 //               separated from the next by an explicit barrier. x[1000] must equal x[0] rotated by 1000 mod 64.
 //   CACHE       the same batch recorded again: every descriptor set comes from the context cache.
 //   OWNERSHIP   batch destroyed before its completion event, and the reverse order: both complete and release.
+//   MEMORY      30000 dispatches flushed every 128: exact result, and process RSS grows by less than 48 MiB.
 //   VALIDATION  misaligned offset, out-of-range binding, unknown flag, capacity overflow, barrier after submit.
 //   LIFETIME    a context with a live event refuses destruction; after release it is destroyed.
 // Exit status 0 only if every check passed; each line reports a measured value.
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <vector>
@@ -72,6 +74,19 @@ static AcResult record_chain(Rig& rig, AcCommandBatch* batch, uint32_t flush_eve
         }
     }
     return AC_SUCCESS;
+}
+
+// resident set size of this process in KiB (Mali kbase GPU memory is counted in it); -1 where /proc is unavailable
+static long rss_kib() {
+    FILE* f = fopen("/proc/self/status", "r");
+    if (!f) return -1;
+    char line[256];
+    long kib = -1;
+    while (fgets(line, sizeof(line), f)) {
+        if (!strncmp(line, "VmRSS:", 6)) kib = atol(line + 6);
+    }
+    fclose(f);
+    return kib;
 }
 
 // x[kSteps] must be x[0] rotated by kSteps; every intermediate step written
@@ -216,6 +231,46 @@ int main() {
     ac_runtime_batch_destroy(batch);
     printf("OWNERSHIP event_first destroy=%d\n", (int)db);
     EXPECT(db == AC_SUCCESS, "event-first release order");
+
+    // ---- MEMORY: a long graph cut into submissions holds bounded driver memory. A command buffer keeps its driver
+    // memory until it is reset or freed (Mali-G68: about 100 KB per dispatch, 3 GB for 30000 dispatches before the
+    // runtime recorded completed flushed command buffers again), so RSS must not grow with the length of the graph.
+    // The chain ping-pongs between slots 0 and 1 and ends in slot 0: x0 rotated by kMemSteps.
+    {
+        const uint32_t kMemSteps = 30000, kMemFlush = 128, kMemMark = 2000;
+        AcBatchDesc md = {AC_ABI_VERSION, sizeof(AcBatchDesc), kMemSteps, AC_BATCH_FLAG_EXPLICIT_BARRIERS | AC_BATCH_FLAG_TIMESTAMPS};
+        REQUIRE_AC(ac_runtime_batch_begin_ex(rig.ctx, &md, &batch));
+        long rss_mark = -1, rss_end = -1;
+        for (uint32_t k = 0; k < kMemSteps; ++k) {
+            const AcBufferBinding b[3] = {
+                {rig.w, 0, (uint64_t)kDim * kDim * sizeof(float)},
+                {rig.x, (uint64_t)(k % 2) * rig.stride, (uint64_t)kDim * sizeof(float)},
+                {rig.x, (uint64_t)((k + 1) % 2) * rig.stride, (uint64_t)kDim * sizeof(float)},
+            };
+            REQUIRE_AC(ac_runtime_batch_dispatch_bindings(batch, rig.kernel, b, 3, kPc, sizeof(kPc), {kDim / 4, 1, 1}));
+            REQUIRE_AC(ac_runtime_batch_barrier(batch));
+            if ((k + 1) % kMemFlush == 0) REQUIRE_AC(ac_runtime_batch_flush(batch));
+            if (k + 1 == kMemMark) rss_mark = rss_kib();
+        }
+        rss_end = rss_kib();
+        REQUIRE_AC(ac_runtime_batch_get_stats(batch, &st));
+        REQUIRE_AC(ac_runtime_batch_submit(batch, &ev));
+        REQUIRE_AC(ac_runtime_event_wait(ev, 60000000000ull));
+        REQUIRE_AC(ac_runtime_event_destroy(ev));
+        ac_runtime_batch_destroy(batch);
+        REQUIRE_AC(ac_runtime_buffer_invalidate(rig.x, 0, 2 * rig.stride));
+        uint32_t mmis = 0;
+        for (uint32_t i = 0; i < kDim; ++i) {
+            if (xp[i] != x0[(i + kDim - (kMemSteps % kDim)) % kDim]) ++mmis;
+        }
+        const bool rss_known = rss_mark >= 0 && rss_end >= 0;
+        const double growth_mib = rss_known ? (double)(rss_end - rss_mark) / 1024.0 : 0.0;
+        printf("MEMORY dispatches=%u flushes=%u final_mismatches=%u rss_growth_MiB=%.1f (dispatch %u -> %u)%s\n",
+               st.dispatches, st.flushes, mmis, growth_mib, kMemMark, kMemSteps,
+               rss_known ? "" : " RSS unavailable: growth gate not applied");
+        EXPECT(st.dispatches == kMemSteps && mmis == 0, "long flushed chain result");
+        EXPECT(!rss_known || growth_mib < 48.0, "RSS grew %.1f MiB over %u dispatches", growth_mib, kMemSteps - kMemMark);
+    }
 
     // ---- VALIDATION ----
     AcBatchDesc small = {AC_ABI_VERSION, sizeof(AcBatchDesc), 1, AC_BATCH_FLAG_EXPLICIT_BARRIERS};
