@@ -9,9 +9,9 @@
 #   --kernels    regenerate adapters/bitnet/src/core/bitnet_kernels_spv.h first (glslangValidator and spirv-val,
 #                pkg install glslang spirv-tools)
 #
-# Output: DIR/libac_runtime.so.2, DIR/libac_bitnet.so, DIR/ac-bitnet-cli, DIR/ac_bitnet_parity. Run them with
-# LD_LIBRARY_PATH=DIR first: the Termux clang driver puts $PREFIX/lib in front of -rpath, so a libac_runtime.so.2 left
-# there by another installation would otherwise be bound.
+# Output: DIR/libac_runtime.so.2, DIR/libac_bitnet.so, DIR/ac-bitnet-cli, DIR/ac_bitnet_parity, DIR/ac_bitnet_sample.
+# Run them with LD_LIBRARY_PATH=DIR first: the Termux clang driver puts $PREFIX/lib in front of -rpath, so a
+# libac_runtime.so.2 left there by another installation would otherwise be bound.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="$ROOT/build-bitnet" KERNELS=0
@@ -57,4 +57,6 @@ echo "[build_bitnet_adapter] libac_bitnet.so"
 clang++ $CXXFLAGS -o "$OUT/ac-bitnet-cli" "$A/src/cpu/main.cpp" "$OUT/libac_bitnet.so" -Wl,-rpath,'$ORIGIN'
 # shellcheck disable=SC2086
 clang++ $CXXFLAGS -o "$OUT/ac_bitnet_parity" "$A/src/cli/ac_bitnet_parity.cpp" "$OUT/libac_bitnet.so" -Wl,-rpath,'$ORIGIN'
-echo "[build_bitnet_adapter] ac-bitnet-cli ac_bitnet_parity -> $OUT"
+# shellcheck disable=SC2086
+clang++ $CXXFLAGS -o "$OUT/ac_bitnet_sample" "$A/src/cli/ac_bitnet_sample.cpp" "$OUT/libac_bitnet.so" -Wl,-rpath,'$ORIGIN'
+echo "[build_bitnet_adapter] ac-bitnet-cli ac_bitnet_parity ac_bitnet_sample -> $OUT"
