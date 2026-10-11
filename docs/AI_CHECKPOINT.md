@@ -1,7 +1,7 @@
 # Current Engineering Checkpoint
 
 **Timestamp**: 2026-10-11T16:30:00+09:00
-**Branch**: `perf/opencl-mali` (working tree: `ac_vk_dispatch.cpp`, `test_batch_graph_kat.cpp` modified, not committed)
+**Branch**: `perf/opencl-mali` (fix committed and pushed as `084d513`)
 **Goal**: Stage 5 Kokoro TTS t3 OOM on Mali (resolved, see below); BitNet upstream PR #633 pending user decision.
 
 ### Completed
@@ -25,8 +25,8 @@
 - Without `--ref-model` the parity tool's floor is 0 (CPU f16 vs itself), so its gate cannot pass an f16 GPU run.
 
 ### Next / Remaining
-1. Commit / push the runtime fix (awaiting user), then rebuild the bundle backend (`build_runtime_backend.sh` runs the KAT).
-2. Upstream microsoft/BitNet PR #633 (outward-facing, awaiting user confirmation).
+1. Rebuild the bundle backend with `084d513` (`build_runtime_backend.sh` runs the KAT); release is the user's call.
+2. Upstream microsoft/BitNet PR #633: user decided 2026-10-11 "not now".
 
 ### Commands
 - Batch KAT: `scripts/termux/build_runtime_backend.sh` (or lab: build runtime + `tests/test_batch_graph_kat.cpp`)
