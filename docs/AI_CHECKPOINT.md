@@ -1,6 +1,6 @@
 # Current Engineering Checkpoint
 
-**Timestamp**: 2026-10-11T18:40:00+09:00
+**Timestamp**: 2026-10-11T19:30:00+09:00
 **Branch**: `perf/opencl-mali` (fix committed and pushed as `084d513`)
 **Goal**: seal the Mali t3 fix (official backend build, one-model t3 < 1.0 GiB), research note AOSF-TR-2026-MALI-DRIVER-04.
 
@@ -20,8 +20,8 @@
 - S25 t2 timing old vs new runtime, alternated: 651.9-656.4 ms both (no measurable change).
 
 ### Open
-- `ameva_tts_parity --gpu-only` no longer loads the CPU model copy (`--ref-model` with it is rejected). One-model t3
-  peak RSS: S21 920 MiB (official 084d513 artifacts); A35 / A53 not yet measured (phones unreachable 2026-10-11 evening).
+- `ameva_tts_parity --gpu-only` no longer loads the CPU model copy (`f56b917`). One-model t3 peak RSS with the
+  official 084d513 artifacts: A35 883, A53 862, S21 920 MiB (all < 1.0 GiB).
 - Official backend build of 084d513 on the S21 (bundle v2.8.1): libggml-ameva.so 6b953c49..., libac_runtime.so.2
   84d973f2...; QMM check 516/516, batch KATs incl. MEMORY, AMEVA0 registration. Not published.
 - Without `--ref-model` the parity tool's floor is 0 (CPU f16 vs itself), so its gate cannot pass an f16 GPU run.
@@ -29,7 +29,7 @@
   that change was not committed.
 
 ### Next / Remaining
-1. A35 / A53: one-model t3 with the official artifacts (scratchpad seal-artifacts), fill the paper's two cells.
+1. Research note AOSF-TR-2026-MALI-DRIVER-04 published in uno-km (`cbbdf03`, docs/research_papers/).
 2. Release of the 084d513 backend is the user's call. BitNet PR #633: frozen by user decision 2026-10-11.
 3. Lab cleanup: only this session's scratch removed; rel27x/rel280/rel-2.8.1/iso staging copies (~3.3 GB per phone) await the user.
 
