@@ -1,8 +1,8 @@
 # Current Engineering Checkpoint
 
-**Timestamp**: 2026-10-11T16:30:00+09:00
+**Timestamp**: 2026-10-11T18:40:00+09:00
 **Branch**: `perf/opencl-mali` (fix committed and pushed as `084d513`)
-**Goal**: Stage 5 Kokoro TTS t3 OOM on Mali (resolved, see below); BitNet upstream PR #633 pending user decision.
+**Goal**: seal the Mali t3 fix (official backend build, one-model t3 < 1.0 GiB), research note AOSF-TR-2026-MALI-DRIVER-04.
 
 ### Completed
 - `ac_bitnet_sample` on all 5 phones (temp 1.0/1.5, top-1 prob ~94.4 %, distinct sampled texts).
@@ -20,13 +20,18 @@
 - S25 t2 timing old vs new runtime, alternated: 651.9-656.4 ms both (no measurable change).
 
 ### Open
-- "< 1.0 GB peak" is not met as stated: gpu-only t3 peaks 1.02-1.08 GiB with two resident models (an unused CPU copy
-  included by the parity tool); the AMEVA-side remainder was not decomposed.
+- `ameva_tts_parity --gpu-only` no longer loads the CPU model copy (`--ref-model` with it is rejected). One-model t3
+  peak RSS: S21 920 MiB (official 084d513 artifacts); A35 / A53 not yet measured (phones unreachable 2026-10-11 evening).
+- Official backend build of 084d513 on the S21 (bundle v2.8.1): libggml-ameva.so 6b953c49..., libac_runtime.so.2
+  84d973f2...; QMM check 516/516, batch KATs incl. MEMORY, AMEVA0 registration. Not published.
 - Without `--ref-model` the parity tool's floor is 0 (CPU f16 vs itself), so its gate cannot pass an f16 GPU run.
+- tools/build_pages.py injects duplicate shared assets into uno-km docs/benchmarks.html (already loaded at lines 8-10);
+  that change was not committed.
 
 ### Next / Remaining
-1. Rebuild the bundle backend with `084d513` (`build_runtime_backend.sh` runs the KAT); release is the user's call.
-2. Upstream microsoft/BitNet PR #633: user decided 2026-10-11 "not now".
+1. A35 / A53: one-model t3 with the official artifacts (scratchpad seal-artifacts), fill the paper's two cells.
+2. Release of the 084d513 backend is the user's call. BitNet PR #633: frozen by user decision 2026-10-11.
+3. Lab cleanup: only this session's scratch removed; rel27x/rel280/rel-2.8.1/iso staging copies (~3.3 GB per phone) await the user.
 
 ### Commands
 - Batch KAT: `scripts/termux/build_runtime_backend.sh` (or lab: build runtime + `tests/test_batch_graph_kat.cpp`)

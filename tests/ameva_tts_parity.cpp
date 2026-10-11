@@ -256,11 +256,16 @@ int main(int argc, char** argv) {
     printf("phonemes %zu voice %d seed %llu threads %d backend %s (%s)\n", ph.size(), o.voice,
            (unsigned long long)o.seed, o.threads, ggml_backend_name(gpu), ggml_backend_dev_description(adev));
 
+    if (o.gpu_only && o.ref_model) {
+        fprintf(stderr, "--ref-model has no effect with --gpu-only (no comparison runs); give one of them\n");
+        return 2;
+    }
     std::string err;
     struct Loaded { kokoro_model *cpu_m = nullptr, *gpu_m = nullptr; } prod, ref;
-    prod.cpu_m = kokoro_load(o.model, cpu, &err);
-    if (prod.cpu_m) prod.gpu_m = kokoro_load(o.model, gpu, &err);
-    if (!prod.cpu_m || !prod.gpu_m) {
+    // --gpu-only runs the AMEVA model alone: no CPU copy is loaded, so the peak RSS is that of the product path
+    if (!o.gpu_only) prod.cpu_m = kokoro_load(o.model, cpu, &err);
+    if (prod.cpu_m || o.gpu_only) prod.gpu_m = kokoro_load(o.model, gpu, &err);
+    if ((!o.gpu_only && !prod.cpu_m) || !prod.gpu_m) {
         fprintf(stderr, "load %s: %s\n", o.model, err.c_str());
         return 1;
     }
@@ -272,8 +277,8 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
-    const int sr = kokoro_sample_rate(prod.cpu_m);
-    printf("model %s (%s)%s%s\n", o.model, kokoro_weight_type(prod.cpu_m).c_str(), o.ref_model ? ", reference " : "",
+    const int sr = kokoro_sample_rate(prod.gpu_m);
+    printf("model %s (%s)%s%s\n", o.model, kokoro_weight_type(prod.gpu_m).c_str(), o.ref_model ? ", reference " : "",
            o.ref_model ? o.ref_model : "");
 
     kokoro_options opt;
