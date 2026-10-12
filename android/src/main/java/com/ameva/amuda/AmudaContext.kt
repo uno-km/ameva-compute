@@ -23,25 +23,25 @@ class AmudaContext private constructor(private val handle: Long) : AutoCloseable
         @JvmStatic private external fun nativeGetDeviceName(handle: Long): String
         @JvmStatic private external fun nativeGetBackendKind(handle: Long): Int
 
-        @JvmStatic internal external fun nativeBufferCreate(ctxHandle: Long, sizeBytes: Long, usage: Int): Long
-        @JvmStatic internal external fun nativeBufferDestroy(handle: Long)
-        @JvmStatic internal external fun nativeBufferWrite(handle: Long, offset: Long, data: ByteArray)
-        @JvmStatic internal external fun nativeBufferRead(handle: Long, offset: Long, outData: ByteArray)
+        @JvmStatic external fun nativeBufferCreate(ctxHandle: Long, sizeBytes: Long, usage: Int): Long
+        @JvmStatic external fun nativeBufferDestroy(handle: Long)
+        @JvmStatic external fun nativeBufferWrite(handle: Long, offset: Long, data: ByteArray)
+        @JvmStatic external fun nativeBufferRead(handle: Long, offset: Long, outData: ByteArray)
 
-        @JvmStatic internal external fun nativeKernelCreateSpirv(
+        @JvmStatic external fun nativeKernelCreateSpirv(
             ctxHandle: Long, spirv: ByteArray, kernelName: String, entryPoint: String,
             bindingTypes: IntArray, pushConstantSize: Long, localX: Int, localY: Int, localZ: Int,
             expectedSha256Hex: String?
         ): Long
 
-        @JvmStatic internal external fun nativeKernelCreateSource(
+        @JvmStatic external fun nativeKernelCreateSource(
             ctxHandle: Long, source: String, kernelName: String, entryPoint: String,
             bindingTypes: IntArray, pushConstantSize: Long, localX: Int, localY: Int, localZ: Int
         ): Long
 
-        @JvmStatic internal external fun nativeKernelDestroy(handle: Long)
+        @JvmStatic external fun nativeKernelDestroy(handle: Long)
 
-        @JvmStatic internal external fun nativeDispatchBlocking(
+        @JvmStatic external fun nativeDispatchBlocking(
             ctxHandle: Long, kernelHandle: Long, bufferHandles: LongArray, pushConstants: ByteArray?,
             gridX: Int, gridY: Int, gridZ: Int
         )
