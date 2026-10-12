@@ -1,0 +1,61 @@
+name: android-ci
+
+# ameva-android v0.1: builds the debug AAR and the instrumented-test APK via NDK/CMake.
+# This proves the Gradle/NDK cross-compile succeeds; it does NOT prove GPU execution --
+# that requires installing both APKs on a real device (see docs/android_aar_v0_1.md).
+on:
+  push:
+    paths:
+      - "android/**"
+      - "include/**"
+      - "src/backend/**"
+      - "src/runtime/**"
+      - ".github/workflows/android-ci.yml"
+  pull_request:
+    paths:
+      - "android/**"
+      - "include/**"
+      - "src/backend/**"
+      - "src/runtime/**"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Android SDK/NDK components
+        uses: android-actions/setup-android@v3
+
+      - name: Install OpenCL headers (ac_vulkan_core build requirement)
+        run: |
+          if [ ! -f ../include/CL/cl.h ]; then
+            echo "CL/cl.h missing from include/CL -- ac_vulkan_core expects it vendored in-repo." >&2
+            exit 1
+          fi
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Build debug AAR
+        run: gradle assembleDebug --no-daemon
+
+      - name: Build instrumented test APK
+        run: gradle assembleDebugAndroidTest --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ameva-android-debug
+          path: |
+            android/build/outputs/aar/*.aar
+            android/build/outputs/apk/androidTest/debug/*.apk
+          retention-days: 14
