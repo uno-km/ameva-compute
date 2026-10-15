@@ -40,14 +40,16 @@ extern "C" {
 
 JNIEXPORT jlong JNICALL
 Java_com_ameva_amuda_llm_AmevaLlm_nativeLoad(JNIEnv* env, jclass, jstring modelPath,
-                                               jstring backendPluginPath, jint nCtx) {
+                                               jstring backendPluginPath, jstring cacheDir,
+                                               jint nCtx) {
     std::string model = jstringToUtf8(env, modelPath);
     std::string backend = jstringToUtf8(env, backendPluginPath);
+    std::string cache = jstringToUtf8(env, cacheDir);
 
     AmevaLlm* llm = nullptr;
     char errBuf[256] = {0};
-    AmevaLlmStatus status = ameva_llm_load(model.c_str(), backend.c_str(), (uint32_t)nCtx,
-                                            &llm, errBuf, sizeof(errBuf));
+    AmevaLlmStatus status = ameva_llm_load(model.c_str(), backend.c_str(), cache.c_str(),
+                                            (uint32_t)nCtx, &llm, errBuf, sizeof(errBuf));
     if (status != AMEVA_LLM_OK) {
         throwAmudaException(env, status, errBuf);
         return 0;

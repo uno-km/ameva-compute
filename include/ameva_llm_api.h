@@ -54,9 +54,17 @@ typedef enum {
  * @param err_buf_size Size of err_buf.
  * @return AMEVA_LLM_OK on success, an error code otherwise.
  */
+/**
+ * @param cache_dir Per-app-writable directory (Android: Context.filesDir) used to derive the
+ *        AMEVA_PIPELINE_CACHE and AMEVA_QMV_TUNE_FILE paths ggml-ameva otherwise falls back to
+ *        $HOME for -- which does not exist in an app process, silently turning both off (pipeline
+ *        recompilation every cold start, GEMV auto-tuning measurements never kept). NULL/empty
+ *        leaves both off, matching the previous behavior.
+ */
 AmevaLlmStatus ameva_llm_load(
     const char* model_path,
     const char* backend_plugin_path,
+    const char* cache_dir,
     uint32_t n_ctx,
     AmevaLlm** out_llm,
     char* err_buf,

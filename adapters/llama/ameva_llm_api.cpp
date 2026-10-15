@@ -12,6 +12,10 @@
 #include "llama.h"
 #include "ggml-backend.h"
 
+#if defined(__ANDROID__)
+#include <android/log.h>
+#endif
+
 struct AmevaLlm {
     ggml_backend_reg_t backend_reg = nullptr;
     llama_model* model = nullptr;
@@ -24,6 +28,54 @@ namespace {
 void setMsg(char* buf, size_t size, const char* fmt, const char* detail) {
     if (buf == nullptr || size == 0) return;
     std::snprintf(buf, size, fmt, detail != nullptr ? detail : "(no detail)");
+}
+
+#if defined(__ANDROID__)
+// llama.cpp/ggml otherwise log via plain fprintf(stderr, ...), which is not visible anywhere on
+// Android (no console attached, no logcat redirection) -- every past silent "it just failed" here
+// was actually a real, specific diagnostic message with nowhere to go. Route it to logcat instead.
+void androidLogCallback(ggml_log_level level, const char* text, void*) {
+    int prio = ANDROID_LOG_INFO;
+    switch (level) {
+        case GGML_LOG_LEVEL_ERROR: prio = ANDROID_LOG_ERROR; break;
+        case GGML_LOG_LEVEL_WARN:  prio = ANDROID_LOG_WARN; break;
+        case GGML_LOG_LEVEL_DEBUG: prio = ANDROID_LOG_DEBUG; break;
+        default: prio = ANDROID_LOG_INFO; break;
+    }
+    __android_log_write(prio, "ameva_llm", text);
+}
+
+void installLogCallbackOnce() {
+    static bool installed = false;
+    if (!installed) {
+        llama_log_set(androidLogCallback, nullptr);
+        installed = true;
+    }
+}
+#else
+void installLogCallbackOnce() {}
+#endif
+
+// max_tokens can cut generation off mid-codepoint: BPE token boundaries don't align to UTF-8
+// character boundaries, so the last token appended to `result` may be an incomplete trailing
+// multi-byte sequence. JNI's NewStringUTF aborts the whole process on malformed input (confirmed:
+// "JNI DETECTED ERROR ... illegal continuation byte" SIGABRT) rather than failing softly, so this
+// must never be left for the JNI boundary to discover -- trim it here so out_buf is always
+// complete, well-formed UTF-8.
+void trimIncompleteUtf8Tail(std::string& s) {
+    if (s.empty()) return;
+    for (int back = 1; back <= 4 && back <= (int)s.size(); ++back) {
+        unsigned char c = (unsigned char)s[s.size() - back];
+        if ((c & 0xC0) == 0x80) continue; // continuation byte, keep scanning backward
+        int expectedLen;
+        if ((c & 0x80) == 0x00) expectedLen = 1;
+        else if ((c & 0xE0) == 0xC0) expectedLen = 2;
+        else if ((c & 0xF0) == 0xE0) expectedLen = 3;
+        else if ((c & 0xF8) == 0xF0) expectedLen = 4;
+        else { s.erase(s.size() - back); return; } // not a valid lead byte either; drop it
+        if (expectedLen > back) s.erase(s.size() - back); // incomplete sequence
+        return;
+    }
 }
 
 void freeLlm(AmevaLlm* llm) {
@@ -40,6 +92,7 @@ void freeLlm(AmevaLlm* llm) {
 AmevaLlmStatus ameva_llm_load(
     const char* model_path,
     const char* backend_plugin_path,
+    const char* cache_dir,
     uint32_t n_ctx,
     AmevaLlm** out_llm,
     char* err_buf,
@@ -51,6 +104,16 @@ AmevaLlmStatus ameva_llm_load(
         return AMEVA_LLM_ERR_INVALID_ARGUMENT;
     }
 
+    // ggml-ameva falls back to $HOME for both caches, which does not exist in an app process --
+    // point it at the caller's own writable directory instead (Android: Context.filesDir).
+    if (cache_dir != nullptr && cache_dir[0] != '\0') {
+        std::string pipelineCache = std::string(cache_dir) + "/ggml-ameva-pipelines.bin";
+        std::string qmvTune = std::string(cache_dir) + "/ggml-ameva-qmv-tune.txt";
+        setenv("AMEVA_PIPELINE_CACHE", pipelineCache.c_str(), 1);
+        setenv("AMEVA_QMV_TUNE_FILE", qmvTune.c_str(), 1);
+    }
+
+    installLogCallbackOnce();
     llama_backend_init();
 
     auto* llm = new AmevaLlm();
@@ -182,6 +245,7 @@ AmevaLlmStatus ameva_llm_generate(
         return status;
     }
 
+    trimIncompleteUtf8Tail(result);
     std::memcpy(out_buf, result.data(), result.size());
     out_buf[result.size()] = '\0';
     return AMEVA_LLM_OK;

@@ -30,6 +30,17 @@ android {
         }
     }
 
+    // AGP's default (useLegacyPackaging = false) embeds .so files uncompressed inside the APK
+    // zip and never extracts them to disk; ApplicationInfo.nativeLibraryDir then points at an
+    // empty directory. That's fine for libraries only ever opened via System.loadLibrary(), but
+    // ggml_backend_load() takes a raw filesystem path (plain dlopen) for libggml-ameva.so, which
+    // needs an actual extracted file to open. Force legacy extraction so that file exists.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
