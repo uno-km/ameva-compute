@@ -251,6 +251,19 @@ AmevaLlmStatus ameva_llm_generate(
     return AMEVA_LLM_OK;
 }
 
+AmevaLlmStatus ameva_llm_reset(
+    AmevaLlm* llm,
+    char* err_buf,
+    size_t err_buf_size
+) {
+    if (llm == nullptr || llm->ctx == nullptr) {
+        setMsg(err_buf, err_buf_size, "ameva_llm_reset: invalid argument (%s)", "NULL handle");
+        return AMEVA_LLM_ERR_INVALID_ARGUMENT;
+    }
+    llama_memory_clear(llama_get_memory(llm->ctx), /*data=*/true);
+    return AMEVA_LLM_OK;
+}
+
 void ameva_llm_free(AmevaLlm* llm) {
     freeLlm(llm);
 }

@@ -77,6 +77,16 @@ Java_com_ameva_amuda_llm_AmevaLlm_nativeGenerate(JNIEnv* env, jclass, jlong hand
 }
 
 JNIEXPORT void JNICALL
+Java_com_ameva_amuda_llm_AmevaLlm_nativeReset(JNIEnv* env, jclass, jlong handle) {
+    AmevaLlm* llm = (AmevaLlm*)(intptr_t)handle;
+    char errBuf[256] = {0};
+    AmevaLlmStatus status = ameva_llm_reset(llm, errBuf, sizeof(errBuf));
+    if (status != AMEVA_LLM_OK) {
+        throwAmudaException(env, status, errBuf);
+    }
+}
+
+JNIEXPORT void JNICALL
 Java_com_ameva_amuda_llm_AmevaLlm_nativeFree(JNIEnv*, jclass, jlong handle) {
     ameva_llm_free((AmevaLlm*)(intptr_t)handle);
 }

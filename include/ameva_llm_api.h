@@ -93,6 +93,21 @@ AmevaLlmStatus ameva_llm_generate(
     size_t err_buf_size
 );
 
+/**
+ * @brief Clear the KV cache and reset the decode position to 0, keeping the loaded model and
+ *        backend. Use this between independent conversations/summaries instead of
+ *        ameva_llm_free() + ameva_llm_load() -- the model weights (and, on a GPU backend,
+ *        pipeline/tuning state) stay resident, so the next ameva_llm_generate() call starts a
+ *        fresh context without the multi-hundred-ms-to-seconds reload cost.
+ *
+ * @return AMEVA_LLM_OK on success, AMEVA_LLM_ERR_INVALID_ARGUMENT if llm is NULL.
+ */
+AmevaLlmStatus ameva_llm_reset(
+    AmevaLlm* llm,
+    char* err_buf,
+    size_t err_buf_size
+);
+
 /** @brief Release the context, model, and backend registration. Safe to call with NULL. */
 void ameva_llm_free(AmevaLlm* llm);
 

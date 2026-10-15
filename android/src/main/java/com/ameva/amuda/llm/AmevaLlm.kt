@@ -46,6 +46,7 @@ class AmevaLlm private constructor(private val handle: Long) : AutoCloseable {
         @JvmStatic private external fun nativeGenerate(
             handle: Long, prompt: String, maxTokens: Int, temperature: Float, seed: Long, outBufSize: Int
         ): String
+        @JvmStatic private external fun nativeReset(handle: Long)
         @JvmStatic private external fun nativeFree(handle: Long)
     }
 
@@ -56,6 +57,13 @@ class AmevaLlm private constructor(private val handle: Long) : AutoCloseable {
         prompt: String, maxTokens: Int = 128, temperature: Float = 0.8f, seed: Long = 42L,
         outBufSize: Int = 4096
     ): String = nativeGenerate(handle, prompt, maxTokens, temperature, seed, outBufSize)
+
+    /** Clears the KV cache so the next [generate] call starts a fresh conversation/summary,
+     *  without the reload cost of [close] + [load] (model weights and GPU pipeline/tuning state
+     *  stay resident). */
+    fun reset() {
+        nativeReset(handle)
+    }
 
     override fun close() {
         nativeFree(handle)

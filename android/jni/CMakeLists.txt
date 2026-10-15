@@ -110,3 +110,49 @@ target_include_directories(ameva_jni PRIVATE
 
 target_link_libraries(ameva_jni PRIVATE ac_runtime llama ggml ggml-base ${log-lib} vulkan dl m)
 set_target_properties(ameva_jni PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH "$ORIGIN")
+
+# ---------------------------------------------------------------------------------------------
+# v0.3: whisper.cpp (third_party/whisper.cpp, pinned tag v1.8.6 + 2 upstream fixes, commit
+# 610e664b) + the formal AMEVA Vulkan STT backend (adapters/whisper/ggml-backend-ameva.cpp),
+# statically linked -- ameva_backend_register() self-registers from inside whisper.cpp's own
+# whisper_backend_init(), there is no plugin .so to load as there is for the llama path.
+#
+# Built from raw source files against the SAME ggml/ggml-base/ggml-cpu targets llama.cpp already
+# built above -- NOT add_subdirectory(third_party/whisper.cpp), which would pull in whisper's own
+# vendored ggml/ copy (colliding by target name with llama.cpp's) and its own embedded
+# `ac_runtime` STATIC target (colliding with this file's `ac_runtime` SHARED target above).
+# Risk accepted here, not hidden: whisper.cpp's source is pinned a few months before llama.cpp's
+# current ggml revision; this is a compile-time-verifiable bet, not a runtime guess -- if the ggml
+# scheduler/backend API whisper.cpp calls has moved, this target fails to compile, loudly.
+# ---------------------------------------------------------------------------------------------
+set(WHISPER_CPP_SUBMODULE_DIR ${AMEVA_ROOT}/third_party/whisper.cpp)
+if(NOT EXISTS ${WHISPER_CPP_SUBMODULE_DIR}/include/whisper.h)
+    message(FATAL_ERROR "ameva_stt_jni: third_party/whisper.cpp submodule not checked out "
+                        "(run: git submodule update --init third_party/whisper.cpp)")
+endif()
+
+add_library(ameva_stt_jni SHARED
+    ameva_stt_jni.cpp
+    ${AMEVA_ROOT}/adapters/whisper/ameva_stt_api.cpp
+    ${AMEVA_ROOT}/adapters/whisper/ggml-backend-ameva.cpp
+    ${AMEVA_ROOT}/src/runtime/ac_error.cpp
+    ${AMEVA_ROOT}/src/backend/vulkan/ac_vk_context.cpp
+    ${AMEVA_ROOT}/src/backend/vulkan/ac_vk_buffer.cpp
+    ${AMEVA_ROOT}/src/backend/vulkan/ac_vk_pipeline.cpp
+    ${AMEVA_ROOT}/src/backend/vulkan/ac_vk_dispatch.cpp
+    ${AMEVA_ROOT}/src/backend/vulkan/ac_vk_event.cpp
+    ${AMEVA_ROOT}/src/backend/vulkan/ac_vk_loader.cpp
+    ${WHISPER_CPP_SUBMODULE_DIR}/src/whisper.cpp
+)
+
+target_include_directories(ameva_stt_jni PRIVATE
+    ${AMEVA_ROOT}/include
+    ${AMEVA_ROOT}/adapters/whisper
+    ${AMEVA_ROOT}/src/backend/vulkan # ac_vk_sha256.h
+    ${WHISPER_CPP_SUBMODULE_DIR}/include
+    ${WHISPER_CPP_SUBMODULE_DIR}/src
+    ${LLAMA_CPP_SUBMODULE_DIR}/ggml/include
+)
+
+target_link_libraries(ameva_stt_jni PRIVATE ggml ggml-base ggml-cpu vulkan ${log-lib} dl m)
+set_target_properties(ameva_stt_jni PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH "$ORIGIN")
