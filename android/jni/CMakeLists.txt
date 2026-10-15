@@ -117,19 +117,56 @@ set_target_properties(ameva_jni PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE INSTALL
 # statically linked -- ameva_backend_register() self-registers from inside whisper.cpp's own
 # whisper_backend_init(), there is no plugin .so to load as there is for the llama path.
 #
-# Built from raw source files against the SAME ggml/ggml-base/ggml-cpu targets llama.cpp already
-# built above -- NOT add_subdirectory(third_party/whisper.cpp), which would pull in whisper's own
-# vendored ggml/ copy (colliding by target name with llama.cpp's) and its own embedded
-# `ac_runtime` STATIC target (colliding with this file's `ac_runtime` SHARED target above).
-# Risk accepted here, not hidden: whisper.cpp's source is pinned a few months before llama.cpp's
-# current ggml revision; this is a compile-time-verifiable bet, not a runtime guess -- if the ggml
-# scheduler/backend API whisper.cpp calls has moved, this target fails to compile, loudly.
+# ggml-backend-ameva.cpp #includes third_party/whisper.cpp/ggml/src/ggml-backend-impl.h by a
+# hardcoded relative path (not a -I search), so its struct ggml_backend/ggml_backend_i layout
+# assumptions come from WHISPER's pinned ggml, not llama.cpp's. An earlier version of this file
+# linked this target against llama.cpp's ggml/ggml-base/ggml-cpu (built above) to dodge a
+# same-project CMake target-name collision -- that silently builds a backend whose struct offsets
+# don't match the ggml-backend.cpp actually running (two different ggml-backend-impl.h layouts in
+# one process). Confirmed on-device: GGML_ASSERT(device) in whisper_init_state, backend->device
+# NULL for both AMEVA backend instances while CPU's was fine -- i.e. exactly a struct-layout split,
+# not a crash in AMEVA's own code. Fix: build whisper's OWN ggml in a fully separate CMake
+# configure (ExternalProject_Add), so this target's struct layout and its linked ggml-backend.cpp
+# agree -- never reuse llama.cpp's ggml here again.
 # ---------------------------------------------------------------------------------------------
 set(WHISPER_CPP_SUBMODULE_DIR ${AMEVA_ROOT}/third_party/whisper.cpp)
 if(NOT EXISTS ${WHISPER_CPP_SUBMODULE_DIR}/include/whisper.h)
     message(FATAL_ERROR "ameva_stt_jni: third_party/whisper.cpp submodule not checked out "
                         "(run: git submodule update --init third_party/whisper.cpp)")
 endif()
+
+include(ExternalProject)
+set(WHISPER_GGML_PREFIX ${CMAKE_CURRENT_BINARY_DIR}/whisper_ggml)
+set(WHISPER_GGML_LIB_DIR ${WHISPER_GGML_PREFIX}/src/whisper_ggml_ext-build/ggml/src)
+ExternalProject_Add(whisper_ggml_ext
+    SOURCE_DIR ${WHISPER_CPP_SUBMODULE_DIR}
+    PREFIX ${WHISPER_GGML_PREFIX}
+    CMAKE_ARGS
+        -G${CMAKE_GENERATOR}
+        -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
+        -DANDROID_ABI=${ANDROID_ABI}
+        -DANDROID_PLATFORM=${ANDROID_PLATFORM}
+        -DCMAKE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}
+        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+        -DBUILD_SHARED_LIBS=OFF
+        -DGGML_CPU=ON
+        -DWHISPER_BUILD_TESTS=OFF
+        -DWHISPER_BUILD_EXAMPLES=OFF
+        -DWHISPER_BUILD_SERVER=OFF
+    BUILD_COMMAND ${CMAKE_MAKE_PROGRAM} ggml ggml-base ggml-cpu
+    INSTALL_COMMAND ""
+    BUILD_BYPRODUCTS
+        ${WHISPER_GGML_LIB_DIR}/libggml.a
+        ${WHISPER_GGML_LIB_DIR}/libggml-base.a
+        ${WHISPER_GGML_LIB_DIR}/libggml-cpu.a
+)
+
+foreach(_wg_lib ggml ggml-base ggml-cpu)
+    add_library(whisper_${_wg_lib} STATIC IMPORTED)
+    set_target_properties(whisper_${_wg_lib} PROPERTIES
+        IMPORTED_LOCATION ${WHISPER_GGML_LIB_DIR}/lib${_wg_lib}.a)
+    add_dependencies(whisper_${_wg_lib} whisper_ggml_ext)
+endforeach()
 
 add_library(ameva_stt_jni SHARED
     ameva_stt_jni.cpp
@@ -151,8 +188,11 @@ target_include_directories(ameva_stt_jni PRIVATE
     ${AMEVA_ROOT}/src/backend/vulkan # ac_vk_sha256.h
     ${WHISPER_CPP_SUBMODULE_DIR}/include
     ${WHISPER_CPP_SUBMODULE_DIR}/src
-    ${LLAMA_CPP_SUBMODULE_DIR}/ggml/include
+    ${WHISPER_CPP_SUBMODULE_DIR}/ggml/include
 )
 
-target_link_libraries(ameva_stt_jni PRIVATE ggml ggml-base ggml-cpu vulkan ${log-lib} dl m)
+target_compile_definitions(ameva_stt_jni PRIVATE WHISPER_VERSION="v1.8.6-ameva")
+# -fopenmp=libomp: ggml-cpu (whisper's own build) needs the OpenMP runtime at final link time.
+target_link_libraries(ameva_stt_jni PRIVATE
+    whisper_ggml-cpu whisper_ggml-base whisper_ggml vulkan ${log-lib} dl m -fopenmp=libomp)
 set_target_properties(ameva_stt_jni PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH "$ORIGIN")
