@@ -1,0 +1,85 @@
+name: android-release
+
+# Publishes the ameva-android AAR to a GitHub Release. Triggered by pushing a tag like
+# `android-v0.3.0` -- never runs on an ordinary push, so this never auto-publishes.
+#
+# This only attaches the .aar to a GitHub Release (GITHUB_TOKEN, no extra secrets needed) -- it
+# does NOT publish to Maven Central or GitHub Packages. ameva-android has never been published
+# anywhere before this workflow; adding a Maven/Packages target is a separate, later step that
+# needs real credentials and a conscious decision on group/artifact coordinates, not something to
+# wire up silently in the same change that first makes a release possible at all.
+on:
+  push:
+    tags:
+      - "android-v*"
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: android
+    permissions:
+      contents: write # to create the GitHub Release and upload the AAR
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Apply AMEVA patch to third_party/whisper.cpp
+        working-directory: .
+        run: git apply patches/0004-whisper-ameva-full.patch --directory=third_party/whisper.cpp
+
+      # sherpa-onnx v1.13.8 AAR is not committed (~48 MiB); fetched from the upstream release and
+      # sha256-verified. The pinned digest lives in android/scripts/fetch_sherpa_onnx.sh.
+      - name: Fetch sherpa-onnx AAR (sha256-verified)
+        working-directory: .
+        run: bash android/scripts/fetch_sherpa_onnx.sh
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install Android SDK/NDK components
+        uses: android-actions/setup-android@v3
+        with:
+          ndk-version: "26.3.11579264"
+
+      - name: Install OpenCL headers (ac_vulkan_core build requirement)
+        run: |
+          if [ ! -f ../include/CL/cl.h ]; then
+            echo "CL/cl.h missing from include/CL -- ac_vulkan_core expects it vendored in-repo." >&2
+            exit 1
+          fi
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.14.3"
+
+      # Release, not debug: the Debug obj dir carries full symbols (libameva_sd_jni.so alone is
+      # ~65MB unstripped locally); release is what an app should actually ship.
+      - name: Build release AAR
+        run: gradle assembleRelease --no-daemon
+
+      - name: Extract version from tag
+        working-directory: .
+        run: echo "AAR_VERSION=${GITHUB_REF_NAME#android-v}" >> "$GITHUB_ENV"
+
+      - name: Rename AAR with version
+        run: |
+          mkdir -p build/outputs/aar-release
+          cp build/outputs/aar/ameva-android-release.aar \
+             "build/outputs/aar-release/ameva-android-v${AAR_VERSION}.aar"
+          sha256sum "build/outputs/aar-release/ameva-android-v${AAR_VERSION}.aar" \
+            > "build/outputs/aar-release/ameva-android-v${AAR_VERSION}.aar.sha256"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            android/build/outputs/aar-release/ameva-android-v${{ env.AAR_VERSION }}.aar
+            android/build/outputs/aar-release/ameva-android-v${{ env.AAR_VERSION }}.aar.sha256
+          generate_release_notes: true
+          draft: true # a human reviews and publishes -- this workflow never makes the release public on its own

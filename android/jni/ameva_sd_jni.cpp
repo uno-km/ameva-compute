@@ -40,13 +40,16 @@ extern "C" {
 
 JNIEXPORT jlong JNICALL
 Java_com_ameva_amuda_diffusion_AmevaDiffusion_nativeLoad(JNIEnv* env, jclass, jstring modelPath,
-                                                           jstring backendPluginPath, jint nThreads) {
+                                                           jstring backendPluginPath, jstring cacheDir,
+                                                           jint nThreads) {
     std::string model = jstringToUtf8(env, modelPath);
     std::string backendPlugin = jstringToUtf8(env, backendPluginPath);
+    std::string cache = jstringToUtf8(env, cacheDir);
 
     AmevaSd* sd = nullptr;
     char errBuf[256] = {0};
-    AmevaSdStatus status = ameva_sd_load(model.c_str(), backendPlugin.c_str(), (int)nThreads,
+    AmevaSdStatus status = ameva_sd_load(model.c_str(), backendPlugin.c_str(),
+                                          cache.empty() ? nullptr : cache.c_str(), (int)nThreads,
                                           &sd, errBuf, sizeof(errBuf));
     if (status != AMEVA_SD_OK) {
         throwAmudaException(env, status, errBuf);

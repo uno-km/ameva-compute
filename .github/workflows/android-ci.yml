@@ -1,39 +1,72 @@
 name: android-ci
 
-# ameva-android v0.1: builds the debug AAR and the instrumented-test APK via NDK/CMake.
-# This proves the Gradle/NDK cross-compile succeeds; it does NOT prove GPU execution --
-# that requires installing both APKs on a real device (see docs/android_aar_v0_1.md).
+# ameva-android: builds the debug AAR (AmevaLlm, AmevaSpeech, AmevaDiffusion, AmevaModelHub,
+# auto backend-select) and the instrumented-test APK via NDK/CMake. This proves the Gradle/NDK
+# cross-compile succeeds -- it does NOT prove GPU execution or correct model output; that
+# requires installing on a real device (see docs/handover for the fleet verification record).
 on:
   push:
     paths:
       - "android/**"
+      - "adapters/**"
       - "include/**"
       - "src/backend/**"
       - "src/runtime/**"
+      - "patches/**"
+      - "third_party/llama.cpp"
+      - "third_party/whisper.cpp"
+      - "third_party/stable-diffusion.cpp"
       - ".github/workflows/android-ci.yml"
   pull_request:
     paths:
       - "android/**"
+      - "adapters/**"
       - "include/**"
       - "src/backend/**"
       - "src/runtime/**"
+      - "patches/**"
+      - "third_party/llama.cpp"
+      - "third_party/whisper.cpp"
+      - "third_party/stable-diffusion.cpp"
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 90 # stable-diffusion.cpp's own build alone took several minutes locally
     defaults:
       run:
         working-directory: android
     steps:
       - uses: actions/checkout@v4
+        with:
+          # third_party/llama.cpp, third_party/whisper.cpp, third_party/stable-diffusion.cpp
+          # (which itself has a nested ggml + thirdparty/zip submodule) -- a shallow, non-recursive
+          # checkout builds nothing: android/jni/CMakeLists.txt FATAL_ERRORs on the first missing header.
+          submodules: recursive
+
+      # third_party/whisper.cpp's AMEVA instrumentation (ameva_backend_register() etc.) is not a
+      # commit on the real upstream remote -- it can't be, that remote isn't ours -- so it ships as
+      # a patch applied on top of the pinned commit, not as part of the submodule checkout itself.
+      # See android/jni/CMakeLists.txt's own probe for the same fact, checked again at configure time.
+      - name: Apply AMEVA patch to third_party/whisper.cpp
+        working-directory: .
+        run: git apply patches/0004-whisper-ameva-full.patch --directory=third_party/whisper.cpp
+
+      # sherpa-onnx v1.13.8 AAR is not committed (~48 MiB); fetched from the upstream release and
+      # sha256-verified. The pinned digest lives in android/scripts/fetch_sherpa_onnx.sh.
+      - name: Fetch sherpa-onnx AAR (sha256-verified)
+        working-directory: .
+        run: bash android/scripts/fetch_sherpa_onnx.sh
 
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21" # matches CMAKE_MAX_NAME/GGML_MAX_NAME-era Gradle 8.14.x compatibility
 
       - name: Install Android SDK/NDK components
         uses: android-actions/setup-android@v3
+        with:
+          ndk-version: "26.3.11579264" # pinned: the version this backend was actually built/verified against
 
       - name: Install OpenCL headers (ac_vulkan_core build requirement)
         run: |
@@ -44,7 +77,7 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: "8.7"
+          gradle-version: "8.14.3"
 
       - name: Build debug AAR
         run: gradle assembleDebug --no-daemon

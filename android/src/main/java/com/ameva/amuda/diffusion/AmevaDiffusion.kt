@@ -27,20 +27,28 @@ class AmevaDiffusion private constructor(private val handle: Long) : AutoCloseab
         }
 
         /**
-         * [nThreads] <= 0 uses stable-diffusion.cpp's own default.
+         * [nThreads] <= 0 uses stable-diffusion.cpp's own default. [cacheDir] (default
+         * [context.filesDir]) is where the first load's shader pipeline compiles and per-shape
+         * GEMV auto-tuning get persisted -- without it (ggml-ameva's own fallback is $HOME, which
+         * does not exist in an app process) every load redoes this work from scratch. This is most
+         * of why a first AmevaDiffusion generation takes minutes: a UNet has dozens of distinct
+         * weight shapes, each paying its own one-time compile+tune cost with nowhere to cache it.
          *
          * Loads libggml-ameva-sd.so, not AmevaLlm's libggml-ameva.so -- same backend source, but
          * a separate build against stable-diffusion.cpp's own pinned ggml (GGML_MAX_NAME=160,
          * an ABI-level difference from llama.cpp's ggml). Mixing them would silently corrupt
          * ggml_tensor layout; see android/jni/CMakeLists.txt's ggml-ameva-sd target comment.
          */
-        fun load(context: Context, modelPath: String, nThreads: Int = 0): AmevaDiffusion {
+        fun load(
+            context: Context, modelPath: String, nThreads: Int = 0, cacheDir: String? = null
+        ): AmevaDiffusion {
             val backendPluginPath = File(context.applicationInfo.nativeLibraryDir, "libggml-ameva-sd.so").path
-            return AmevaDiffusion(nativeLoad(modelPath, backendPluginPath, nThreads))
+            val resolvedCacheDir = cacheDir ?: context.filesDir.path
+            return AmevaDiffusion(nativeLoad(modelPath, backendPluginPath, resolvedCacheDir, nThreads))
         }
 
         @JvmStatic private external fun nativeLoad(
-            modelPath: String, backendPluginPath: String, nThreads: Int
+            modelPath: String, backendPluginPath: String, cacheDir: String, nThreads: Int
         ): Long
         @JvmStatic private external fun nativeTxt2Img(
             handle: Long, prompt: String, width: Int, height: Int, steps: Int, seed: Long

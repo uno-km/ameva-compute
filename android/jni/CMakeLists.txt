@@ -135,6 +135,17 @@ if(NOT EXISTS ${WHISPER_CPP_SUBMODULE_DIR}/include/whisper.h)
     message(FATAL_ERROR "ameva_stt_jni: third_party/whisper.cpp submodule not checked out "
                         "(run: git submodule update --init third_party/whisper.cpp)")
 endif()
+# A bare `git submodule update --init` only checks out the pinned commit (610e664b) -- it does NOT
+# carry the AMEVA instrumentation (ameva_backend_register() etc.), which lives only as an
+# uncommitted working-tree diff inside that submodule (committing it there would pin a commit SHA
+# that doesn't exist on the real upstream remote, breaking every other clone's submodule fetch).
+# The real, current patch is patches/0004-whisper-ameva-full.patch; apply it before configuring.
+file(STRINGS ${WHISPER_CPP_SUBMODULE_DIR}/src/whisper.cpp _ameva_patch_probe REGEX "ameva_backend_register" LIMIT_COUNT 1)
+if(NOT _ameva_patch_probe)
+    message(FATAL_ERROR "ameva_stt_jni: third_party/whisper.cpp is checked out but the AMEVA patch "
+                        "is not applied (run from the repo root: git apply patches/0004-whisper-ameva-full.patch "
+                        "--directory=third_party/whisper.cpp)")
+endif()
 
 include(ExternalProject)
 set(WHISPER_GGML_PREFIX ${CMAKE_CURRENT_BINARY_DIR}/whisper_ggml)

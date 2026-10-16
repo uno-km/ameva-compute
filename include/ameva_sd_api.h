@@ -44,13 +44,21 @@ typedef enum {
 /**
  * @param model_path Filesystem path to a single-file GGUF/safetensors/ckpt diffusion checkpoint
  *        (not bundled with this library).
- * @param backend_plugin_path Filesystem path to libggml-ameva.so.
+ * @param backend_plugin_path Filesystem path to libggml-ameva-sd.so.
+ * @param cache_dir Per-app-writable directory (Android: Context.filesDir) used to derive the
+ *        AMEVA_PIPELINE_CACHE / AMEVA_QMV_TUNE_FILE paths ggml-ameva otherwise falls back to
+ *        $HOME for (same gap AmevaLlm.load() already closes -- AmevaDiffusion never had it in
+ *        v0.3.0, which is most of why its first generation took minutes: shader pipeline compiles
+ *        and GEMV layout auto-tuning for every one of the UNet's distinct weight shapes happened
+ *        from scratch, with nowhere to persist the result for the next call). NULL/empty leaves
+ *        both off.
  * @param n_threads CPU thread count for whatever this model leaves on CPU (text encoder tokenize,
  *        any op ggml-ameva declines); 0 uses stable-diffusion.cpp's own default.
  */
 AmevaSdStatus ameva_sd_load(
     const char* model_path,
     const char* backend_plugin_path,
+    const char* cache_dir,
     int n_threads,
     AmevaSd** out_sd,
     char* err_buf,

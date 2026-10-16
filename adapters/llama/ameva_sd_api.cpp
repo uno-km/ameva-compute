@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 #include "stable-diffusion.h"
 #include "ggml-backend.h"
@@ -60,6 +61,7 @@ void freeSd(AmevaSd* sd) {
 AmevaSdStatus ameva_sd_load(
     const char* model_path,
     const char* backend_plugin_path,
+    const char* cache_dir,
     int n_threads,
     AmevaSd** out_sd,
     char* err_buf,
@@ -69,6 +71,16 @@ AmevaSdStatus ameva_sd_load(
     if (model_path == nullptr || backend_plugin_path == nullptr || out_sd == nullptr) {
         setMsg(err_buf, err_buf_size, "ameva_sd_load: invalid argument (%s)", "NULL pointer");
         return AMEVA_SD_ERR_INVALID_ARGUMENT;
+    }
+
+    // Must be set before ggml_backend_load() below: ggml-ameva reads these once, at first use,
+    // into a function-local static (same reasoning as AMEVA_BACKEND in ggml-ameva.cpp -- setting
+    // it after the plugin is already loaded has no effect for the rest of this process).
+    if (cache_dir != nullptr && cache_dir[0] != '\0') {
+        std::string pipelineCache = std::string(cache_dir) + "/ggml-ameva-pipelines.bin";
+        std::string qmvTune = std::string(cache_dir) + "/ggml-ameva-qmv-tune.txt";
+        setenv("AMEVA_PIPELINE_CACHE", pipelineCache.c_str(), 1);
+        setenv("AMEVA_QMV_TUNE_FILE", qmvTune.c_str(), 1);
     }
 
     installLogCallbackOnce();
