@@ -11,6 +11,7 @@
 
 #include "llama.h"
 #include "ggml-backend.h"
+#include "ameva_backend_bench.h"
 
 #if defined(__ANDROID__)
 #include <android/log.h>
@@ -87,12 +88,46 @@ void freeLlm(AmevaLlm* llm) {
     delete llm;
 }
 
+// "auto": benchmark cpu/vulkan/opencl (ameva_backend_bench.h) and return whichever is actually
+// fastest on this device. Never silently prefers one on tie-ish grounds without a measurement --
+// if a candidate's benchmark reports it unavailable, it is excluded, not guessed to be slow.
+// Returns empty on total failure (should not happen: cpu always succeeds).
+std::string resolveAutoBackend(const char* backend_plugin_path, char* err_buf, size_t err_buf_size) {
+    struct Candidate { const char* name; double ms; bool ok; };
+    Candidate candidates[3] = { {"cpu", -1.0, false}, {"vulkan", -1.0, false}, {"opencl", -1.0, false} };
+
+    for (auto& c : candidates) {
+        char benchErr[128] = {0};
+        AmevaBenchStatus st = ameva_backend_bench(c.name, backend_plugin_path, &c.ms, benchErr, sizeof(benchErr));
+        c.ok = (st == AMEVA_BENCH_OK);
+#if defined(__ANDROID__)
+        if (c.ok) {
+            __android_log_print(ANDROID_LOG_INFO, "ameva_llm", "auto-bench %s: %.2f ms/op", c.name, c.ms);
+        } else {
+            __android_log_print(ANDROID_LOG_INFO, "ameva_llm", "auto-bench %s: unavailable (%s)", c.name, benchErr);
+        }
+#endif
+    }
+
+    const Candidate* best = nullptr;
+    for (const auto& c : candidates) {
+        if (c.ok && (best == nullptr || c.ms < best->ms)) best = &c;
+    }
+    if (best == nullptr) {
+        setMsg(err_buf, err_buf_size, "ameva_llm_load: auto backend selection found %s",
+               "no usable backend (not even cpu) -- refusing to guess");
+        return std::string();
+    }
+    return std::string(best->name);
+}
+
 } // namespace
 
 AmevaLlmStatus ameva_llm_load(
     const char* model_path,
     const char* backend_plugin_path,
     const char* cache_dir,
+    const char* backend,
     uint32_t n_ctx,
     AmevaLlm** out_llm,
     char* err_buf,
@@ -116,34 +151,54 @@ AmevaLlmStatus ameva_llm_load(
     installLogCallbackOnce();
     llama_backend_init();
 
+    std::string resolvedBackend = (backend != nullptr && backend[0] != '\0') ? backend : "vulkan";
+    if (resolvedBackend == "auto") {
+        resolvedBackend = resolveAutoBackend(backend_plugin_path, err_buf, err_buf_size);
+        if (resolvedBackend.empty()) {
+            return AMEVA_LLM_ERR_BACKEND_NO_DEVICE;
+        }
+    }
+
     auto* llm = new AmevaLlm();
 
-    llm->backend_reg = ggml_backend_load(backend_plugin_path);
-    if (llm->backend_reg == nullptr) {
-        setMsg(err_buf, err_buf_size, "ggml_backend_load failed for %s", backend_plugin_path);
-        freeLlm(llm);
-        return AMEVA_LLM_ERR_BACKEND_LOAD_FAILED;
-    }
-
-    size_t dev_count = ggml_backend_reg_dev_count(llm->backend_reg);
-    if (dev_count == 0) {
-        setMsg(err_buf, err_buf_size, "ggml-ameva plugin %s registered zero devices",
-               backend_plugin_path);
-        freeLlm(llm);
-        return AMEVA_LLM_ERR_BACKEND_NO_DEVICE;
-    }
-    ggml_backend_dev_t ameva_dev = ggml_backend_reg_dev_get(llm->backend_reg, 0);
-
-    // NULL-terminated device list: only ggml-ameva + llama.cpp's own CPU backend run anything.
-    // Upstream ggml-vulkan is never loaded in this process, so an op ggml-ameva declines falls
-    // back to CPU, not to the known-corrupt upstream Vulkan flash-attention path.
-    static ggml_backend_dev_t devices[2];
-    devices[0] = ameva_dev;
-    devices[1] = nullptr;
-
     llama_model_params mparams = llama_model_default_params();
-    mparams.devices = devices;
     mparams.n_gpu_layers = -1; // offload every layer the backend accepts
+
+    static ggml_backend_dev_t devices[2];
+    if (resolvedBackend == "cpu") {
+        // mparams.devices stays NULL: llama's own default device list (CPU only). The ggml-ameva
+        // plugin is never loaded in this process at all -- not "loaded but unused", genuinely
+        // absent, so there is no question of which backend a CPU-selected load actually used.
+    } else if (resolvedBackend == "vulkan" || resolvedBackend == "opencl") {
+        setenv("AMEVA_BACKEND", resolvedBackend.c_str(), 1);
+
+        llm->backend_reg = ggml_backend_load(backend_plugin_path);
+        if (llm->backend_reg == nullptr) {
+            setMsg(err_buf, err_buf_size, "ggml_backend_load failed for %s", backend_plugin_path);
+            freeLlm(llm);
+            return AMEVA_LLM_ERR_BACKEND_LOAD_FAILED;
+        }
+
+        size_t dev_count = ggml_backend_reg_dev_count(llm->backend_reg);
+        if (dev_count == 0) {
+            setMsg(err_buf, err_buf_size, "ggml-ameva plugin %s registered zero devices",
+                   backend_plugin_path);
+            freeLlm(llm);
+            return AMEVA_LLM_ERR_BACKEND_NO_DEVICE;
+        }
+        ggml_backend_dev_t ameva_dev = ggml_backend_reg_dev_get(llm->backend_reg, 0);
+
+        // NULL-terminated device list: only ggml-ameva + llama.cpp's own CPU backend run
+        // anything. Upstream ggml-vulkan is never loaded in this process, so an op ggml-ameva
+        // declines falls back to CPU, not to the known-corrupt upstream Vulkan FA path.
+        devices[0] = ameva_dev;
+        devices[1] = nullptr;
+        mparams.devices = devices;
+    } else {
+        setMsg(err_buf, err_buf_size, "ameva_llm_load: unknown backend \"%s\"", resolvedBackend.c_str());
+        freeLlm(llm);
+        return AMEVA_LLM_ERR_INVALID_ARGUMENT;
+    }
 
     llm->model = llama_model_load_from_file(model_path, mparams);
     if (llm->model == nullptr) {

@@ -60,11 +60,17 @@ typedef enum {
  *        $HOME for -- which does not exist in an app process, silently turning both off (pipeline
  *        recompilation every cold start, GEMV auto-tuning measurements never kept). NULL/empty
  *        leaves both off, matching the previous behavior.
+ * @param backend "cpu", "vulkan", "opencl", or "auto" (NULL/empty: "vulkan", matching the
+ *        previous fixed behavior). "auto" runs ameva_backend_bench() against all three and
+ *        loads whichever is actually fastest on this device -- not a fixed cpu-then-gpu rule.
+ *        Benchmarking "vulkan"/"opencl" happens in short-lived forked helper processes (see
+ *        ameva_backend_bench.h); the real model load below always happens in this process.
  */
 AmevaLlmStatus ameva_llm_load(
     const char* model_path,
     const char* backend_plugin_path,
     const char* cache_dir,
+    const char* backend,
     uint32_t n_ctx,
     AmevaLlm** out_llm,
     char* err_buf,

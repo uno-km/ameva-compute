@@ -33,15 +33,24 @@ class AmevaLlm private constructor(private val handle: Long) : AutoCloseable {
          * both silently turn off: every load recompiles pipelines from scratch and GEMV
          * auto-tuning measurements are never kept. Measured impact (Tab S8+, Adreno 730, 2026-10):
          * cold first-token 1972ms -> 297ms, 64-token generation 2.4-2.5s -> 1.67-1.77s.
+         *
+         * [backend] one of "cpu", "vulkan", "opencl", "auto" (default). "auto" benchmarks all
+         * three with a short, fixed-size GEMV (ameva_backend_bench.h) and loads whichever is
+         * actually fastest on this device -- not a fixed cpu-then-gpu rule. The benchmark adds a
+         * few hundred ms to this call; pass an explicit backend to skip it if you already know
+         * which one you want.
          */
-        fun load(context: Context, modelPath: String, nCtx: Int = 2048, cacheDir: String? = null): AmevaLlm {
+        fun load(
+            context: Context, modelPath: String, nCtx: Int = 2048, cacheDir: String? = null,
+            backend: String = "auto"
+        ): AmevaLlm {
             val backendPluginPath = File(context.applicationInfo.nativeLibraryDir, "libggml-ameva.so").path
             val resolvedCacheDir = cacheDir ?: context.filesDir.path
-            return AmevaLlm(nativeLoad(modelPath, backendPluginPath, resolvedCacheDir, nCtx))
+            return AmevaLlm(nativeLoad(modelPath, backendPluginPath, resolvedCacheDir, backend, nCtx))
         }
 
         @JvmStatic private external fun nativeLoad(
-            modelPath: String, backendPluginPath: String, cacheDir: String, nCtx: Int
+            modelPath: String, backendPluginPath: String, cacheDir: String, backend: String, nCtx: Int
         ): Long
         @JvmStatic private external fun nativeGenerate(
             handle: Long, prompt: String, maxTokens: Int, temperature: Float, seed: Long, outBufSize: Int
