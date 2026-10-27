@@ -36,30 +36,51 @@ daemons, no localhost server -- everything runs in-process inside a standard And
 - **AmevaSpeech**: verified on Samsung Galaxy A35 and A53 (Mali-G68) -- correct GPU-accelerated
   transcript of the standard whisper.cpp JFK sample on both. S21 was unreachable this cycle
   (sshd down); not tested.
-- **AmevaDiffusion**: verified on A35 only -- one model (SDXS, single-step distilled, 683 MB GGUF),
-  512x512, 1 sampling step, 1 run. Produced a correct, recognizable image (the color saturation is
-  this specific model's known 1-step-distillation characteristic, not a backend defect). Two VAE
-  decode tensors exceed a single Vulkan buffer binding and correctly, explicitly fall back to CPU
-  (logged, not hidden) -- this adds real wall-clock time (~7.5 minutes end to end on A35 for this
-  run). A53, S21, other models, other resolutions, multi-step sampling, img2img, and LoRA are
-  **not** verified.
+- **AmevaDiffusion**: one model only (SDXS, single-step distilled, 683 MB GGUF), 1 sampling step,
+  seed 42, prompt "a cat sitting on a sofa". Verified on A35 and S21 at 256x256 and 512x512. Those
+  runs executed the AAR's native layer under ART via `app_process` by calling the JNI methods
+  directly; the Kotlin `AmevaDiffusion.load()/txt2img()` wrapper (needs a Context and `Bitmap`) was
+  not run. (An earlier A35 run at the default guidance, 512x512, took ~7.5 minutes.)
+  **Correction to the earlier release text**: the over-saturated "burnt" colors seen in the first A35
+  image were not an SDXS characteristic. `txt2img()` left guidance at stable-diffusion.cpp's default of
+  7.0, while SDXS is guidance-distilled and needs about 1.0. Measured on the S21 at 256x256: channel
+  values at exactly 0 were 43.6% on CPU and 43.1% on the AMEVA GPU path at guidance 7.0, and 0.1% (CPU)
+  and 0.0% (GPU) at guidance 1.0. `txt2img()` now takes `cfgScale` (a value <= 0 keeps the 7.0 default;
+  the C API gained `ameva_sd_txt2img_ex`, `ameva_sd_txt2img` is unchanged). At guidance 1.0 the GPU
+  image matches the CPU reference at 22.5 dB PSNR (256x256) and shows a clean tabby on a sofa at both
+  sizes; two consecutive GPU runs were identical.
+  **Speed**: on the S21 the 256x256 image took 17-19 s through the AAR's GPU path versus 5.6 s for the
+  CPU `sd-cli` -- the GPU path is about 3x slower for this model on this phone. 512x512 took 152 s on
+  the GPU path (no CPU timing taken). On the A35 at guidance 1.0: 256x256 took 22-25 s and 512x512
+  116 s (no CPU timing taken there). The A35 image matches the CPU reference at 28.7 dB PSNR; the
+  A35 and S21 GPU images match each other at only 21.9 dB (different drivers and kernel paths; the
+  outputs are not bit-equal across devices). Two VAE decode tensors exceed a single Vulkan buffer
+  binding and are explicitly declined to the CPU (logged, not hidden).
+  Not verified: A53 (same Mali-G68 family as the A35, but no copy of the model there and none was
+  moved or downloaded), other models, multi-step sampling, img2img, LoRA.
 - **Auto backend-select**: verified on A35 -- real per-backend timings for a fixed GEMV (cpu
   6.77 ms, vulkan 3.39 ms, opencl 2.92 ms/op), correctly selected OpenCL as this device's fastest
   path. Not yet verified on other GPU families.
 - **AmevaModelHub**: compiles clean, pure Kotlin, no native code -- not exercised against a real
   download in this cycle.
-- **AmevaSenseVoice**: the sherpa-onnx v1.13.8 native libraries as packaged in this release AAR
-  (`libsherpa-onnx-c-api.so`, `libsherpa-onnx-jni.so` byte-identical to upstream; `libonnxruntime.so`
-  differs from upstream only in ELF section-table metadata, 8 bytes) were run on Samsung Galaxy A35,
-  A53 and S21 (Termux, CPU/ONNX Runtime, SenseVoice int8 `2024-07-17`, 5 upstream test wavs: en, zh,
-  ja, ko, yue). All three produced identical transcripts with language/emotion/event tags. Warm
-  real-time factor (4 threads): A35 0.31-0.37 and A53 0.31-0.33 (ssh cpuset cores 0-2), S21 0.063-0.068
-  (cores 0-2,4-7). On the S21 the sherpa Java API through `libsherpa-onnx-jni.so` (OpenJDK 21,
-  `AmevaSenseVoice`'s configuration, `AssetManager` = null) gave the same transcripts. Not verified:
-  the `AmevaSenseVoice` Kotlin class itself (it needs an Android `Context`; no APK was installed),
-  and recognition accuracy (one English output reads "50 pieces of code"; an fp32 reference run was
-  not possible). Only the offline SenseVoice path is wrapped; sherpa-onnx streaming and diarization
-  APIs are present in the library but have no wrapper and no verification.
+- **AmevaSenseVoice**: the `AmevaSenseVoice` Kotlin class and the sherpa-onnx v1.13.8 libraries as
+  packaged in this AAR were run on Samsung Galaxy A35, A53 and S21 (CPU/ONNX Runtime, SenseVoice int8
+  `2024-07-17`, the 5 upstream test wavs: en, zh, ja, ko, yue). Method: the AAR's classes dexed with d8
+  and run under ART via `app_process` from Termux (no APK installed, no adb). All three produced the
+  expected language/emotion/event tags and transcripts (10 of 10 per phone) and passed three guard
+  checks. Warm real-time factor, 4 threads: A35 0.34-0.42 and A53 0.31-0.40 (ssh cpuset cores 0-2),
+  S21 0.059-0.079 (cores 0-2,4-7). Not verified: running inside an installed APK, the APK-asset branch
+  of `load()` (the harness passes a `ContextWrapper(null)`; only absolute filesystem paths were
+  exercised), and recognition accuracy (one English output reads "50 pieces of code"; no fp32
+  reference was available). An Android x86_64 emulator (API 37, ARM translation) crashed inside
+  `libonnxruntime.so`'s static constructor before any AMEVA code ran; that is an emulator limitation
+  (the same library loads on all three phones) and is not counted as a pass.
+  **Defect fixed in this release**: `load()` used to pass `context.assets` together with an absolute
+  model path; sherpa-onnx then logs an error and calls `exit(-1)`, killing the app process. `load()`
+  now passes a null AssetManager for filesystem paths, rejects a missing file with
+  `AMU_ERR_MODEL_FILE_MISSING` and mixed path sources with `AMU_ERR_MIXED_SOURCES`. Only the offline
+  SenseVoice path is wrapped; sherpa-onnx streaming and diarization APIs are present in the library
+  but have no wrapper and no verification.
 
 ### Bundled Native Libraries (`jni/arm64-v8a`)
 
@@ -86,7 +107,9 @@ stt.close()
 
 // Image generation
 val sd = AmevaDiffusion.load(context, modelPath = "/sdcard/models/sdxs.gguf")
-val bitmap = sd.txt2img(prompt = "a photo of a cat", width = 512, height = 512, steps = 1)
+// cfgScale = 1f: SDXS (and other guidance-distilled few-step models) need ~1.0; the default 7.0
+// produces burnt, over-saturated images.
+val bitmap = sd.txt2img(prompt = "a photo of a cat", width = 512, height = 512, steps = 1, cfgScale = 1f)
 sd.close()
 
 // LLM, now with automatic fastest-backend selection

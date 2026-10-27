@@ -32,6 +32,10 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # Caps the nested stable-diffusion.cpp ninja build (android/jni/CMakeLists.txt); its tokenizer-vocab
+      # translation units need several GiB each in a Debug build and OOM-kill ("Killed") a small runner.
+      AMEVA_SDCPP_JOBS: "2"
     timeout-minutes: 90 # stable-diffusion.cpp's own build alone took several minutes locally
     defaults:
       run:
@@ -64,9 +68,11 @@ jobs:
           java-version: "21" # matches CMAKE_MAX_NAME/GGML_MAX_NAME-era Gradle 8.14.x compatibility
 
       - name: Install Android SDK/NDK components
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4 # v3 runs `sdkmanager tools`, a package Google removed (fixed in v4.0.2)
         with:
-          ndk-version: "26.3.11579264" # pinned: the version this backend was actually built/verified against
+          # v3/v4 have no `ndk-version` input -- the NDK/CMake/platform must come through `packages`.
+          # Values mirror android/build.gradle.kts (compileSdk, ndkVersion, cmake version).
+          packages: "platform-tools platforms;android-34 build-tools;34.0.0 ndk;26.3.11579264 cmake;3.22.1"
 
       - name: Install OpenCL headers (ac_vulkan_core build requirement)
         run: |

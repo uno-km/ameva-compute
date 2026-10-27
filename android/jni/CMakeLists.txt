@@ -95,6 +95,43 @@ target_include_directories(ggml-ameva PRIVATE
 target_link_libraries(ggml-ameva PRIVATE ac_runtime ggml ggml-base ${log-lib})
 set_target_properties(ggml-ameva PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH "$ORIGIN")
 
+# mtmd (third_party/llama.cpp/tools/mtmd): the upstream LLaVA/CLIP/Qwen2-VL multimodal stack.
+# Compiled from its own source list (mirrors tools/mtmd/CMakeLists.txt) instead of
+# add_subdirectory(tools/mtmd) -- that CMakeLists also declares llama-mtmd-cli/-debug
+# executables requiring the "common" target, which LLAMA_BUILD_COMMON=OFF above never defines.
+set(MTMD_DIR ${LLAMA_CPP_SUBMODULE_DIR}/tools/mtmd)
+add_library(mtmd STATIC
+    ${MTMD_DIR}/mtmd.cpp
+    ${MTMD_DIR}/mtmd-audio.cpp
+    ${MTMD_DIR}/mtmd-helper.cpp
+    ${MTMD_DIR}/clip.cpp
+    ${MTMD_DIR}/models/cogvlm.cpp
+    ${MTMD_DIR}/models/conformer.cpp
+    ${MTMD_DIR}/models/glm4v.cpp
+    ${MTMD_DIR}/models/internvl.cpp
+    ${MTMD_DIR}/models/kimivl.cpp
+    ${MTMD_DIR}/models/kimik25.cpp
+    ${MTMD_DIR}/models/nemotron-v2-vl.cpp
+    ${MTMD_DIR}/models/llama4.cpp
+    ${MTMD_DIR}/models/llava.cpp
+    ${MTMD_DIR}/models/minicpmv.cpp
+    ${MTMD_DIR}/models/paddleocr.cpp
+    ${MTMD_DIR}/models/pixtral.cpp
+    ${MTMD_DIR}/models/qwen2vl.cpp
+    ${MTMD_DIR}/models/qwen3vl.cpp
+    ${MTMD_DIR}/models/siglip.cpp
+    ${MTMD_DIR}/models/whisper-enc.cpp
+    ${MTMD_DIR}/models/mobilenetv5.cpp
+    ${MTMD_DIR}/models/youtuvl.cpp
+)
+target_include_directories(mtmd PUBLIC ${MTMD_DIR})
+target_include_directories(mtmd PRIVATE ${LLAMA_CPP_SUBMODULE_DIR} ${LLAMA_CPP_SUBMODULE_DIR}/vendor)
+target_link_libraries(mtmd PUBLIC ggml llama)
+target_compile_features(mtmd PRIVATE cxx_std_17)
+if(NOT MSVC)
+    target_compile_options(mtmd PRIVATE -Wno-cast-qual) # stb_image.h / miniaudio.h
+endif()
+
 add_library(ameva_jni SHARED
     ameva_jni.cpp
     ameva_llm_jni.cpp
@@ -107,10 +144,29 @@ target_include_directories(ameva_jni PRIVATE
     ${AC_OPENCL_INCLUDE_DIR}
     ${LLAMA_CPP_SUBMODULE_DIR}/include
     ${LLAMA_CPP_SUBMODULE_DIR}/ggml/include
+    ${MTMD_DIR}
 )
 
-target_link_libraries(ameva_jni PRIVATE ac_runtime llama ggml ggml-base ${log-lib} vulkan dl m)
+target_link_libraries(ameva_jni PRIVATE ac_runtime llama ggml ggml-base mtmd ${log-lib} vulkan dl m)
 set_target_properties(ameva_jni PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH "$ORIGIN")
+
+# Standalone on-device CLI harness (no JNI/APK) for the vision path: real-hardware GPU-vs-CPU
+# comparison of ameva_llm_load()/ameva_llm_load_mmproj()/ameva_llm_generate_with_image() without
+# installing an app. Links the exact same sources as ameva_jni's ameva_llm_api.cpp.
+add_executable(ameva_vision_test
+    ameva_vision_test.cpp
+    ${AMEVA_ROOT}/adapters/llama/ameva_llm_api.cpp
+    ${AMEVA_ROOT}/adapters/llama/ameva_backend_bench.cpp
+)
+target_include_directories(ameva_vision_test PRIVATE
+    ${AMEVA_ROOT}/include
+    ${AC_OPENCL_INCLUDE_DIR}
+    ${LLAMA_CPP_SUBMODULE_DIR}/include
+    ${LLAMA_CPP_SUBMODULE_DIR}/ggml/include
+    ${MTMD_DIR}
+)
+target_link_libraries(ameva_vision_test PRIVATE ac_runtime llama ggml ggml-base mtmd ${log-lib} vulkan dl m)
+set_target_properties(ameva_vision_test PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH "$ORIGIN")
 
 # ---------------------------------------------------------------------------------------------
 # v0.3: whisper.cpp (third_party/whisper.cpp, pinned tag v1.8.6 + 2 upstream fixes, commit
@@ -240,6 +296,20 @@ endif()
 
 set(SDCPP_PREFIX ${CMAKE_CURRENT_BINARY_DIR}/sdcpp)
 set(SDCPP_BUILD_DIR ${SDCPP_PREFIX}/src/sdcpp_ext-build)
+
+# stable-diffusion.cpp has translation units with very large embedded tables (the tokenizer
+# vocabularies); in a Debug build a single clang++ job on such a file needs several GiB, and ninja's
+# default is cores+2 jobs. On a small CI runner that is the kernel OOM-killer ("Killed" on
+# vocab.cpp.o). AMEVA_SDCPP_JOBS=<n> in the environment caps this nested build; unset keeps ninja's
+# default, so local builds are unchanged.
+set(SDCPP_JOBS_ARG "")
+if(DEFINED ENV{AMEVA_SDCPP_JOBS} AND NOT "$ENV{AMEVA_SDCPP_JOBS}" STREQUAL "")
+    if(NOT "$ENV{AMEVA_SDCPP_JOBS}" MATCHES "^[1-9][0-9]*$")
+        message(FATAL_ERROR "AMEVA_SDCPP_JOBS must be a positive integer, got '$ENV{AMEVA_SDCPP_JOBS}'")
+    endif()
+    set(SDCPP_JOBS_ARG -j$ENV{AMEVA_SDCPP_JOBS})
+endif()
+
 ExternalProject_Add(sdcpp_ext
     SOURCE_DIR ${SDCPP_SUBMODULE_DIR}
     PREFIX ${SDCPP_PREFIX}
@@ -255,7 +325,7 @@ ExternalProject_Add(sdcpp_ext
         -DSD_WEBP=OFF
         -DSD_WEBM=OFF
         -DGGML_CPU=ON
-    BUILD_COMMAND ${CMAKE_MAKE_PROGRAM} stable-diffusion
+    BUILD_COMMAND ${CMAKE_MAKE_PROGRAM} ${SDCPP_JOBS_ARG} stable-diffusion
     INSTALL_COMMAND ""
     BUILD_BYPRODUCTS
         ${SDCPP_BUILD_DIR}/libstable-diffusion.a

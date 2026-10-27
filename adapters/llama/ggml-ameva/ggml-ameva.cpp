@@ -1696,7 +1696,7 @@ const char* ameva_op_unsupported_reason(const struct ggml_tensor* op) {
             const struct ggml_tensor *a = op->src[0], *pos = op->src[1], *ff = op->src[2];
             const int32_t* p = (const int32_t*)op->op_params;
             const int n_dims = p[1], mode = p[2];
-            if (mode != 0 && mode != 2) return "rope mode other than normal/neox";
+            if (mode != 0 && mode != 2) return "AMEVA_ERR_ROPE_MROPE_NOT_SUPPORTED";
             // f32, or f16 to f16: the KV-cache shift of llama.cpp rotates the stored keys of the f16 cache in place
             // (ggml_rope_ext_inplace on a view of cache_k). Declining it does not move the node to the CPU: the
             // tensor is pre-allocated in this backend's buffer and the scheduler aborts.

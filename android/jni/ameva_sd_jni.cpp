@@ -61,15 +61,15 @@ Java_com_ameva_amuda_diffusion_AmevaDiffusion_nativeLoad(JNIEnv* env, jclass, js
 JNIEXPORT jbyteArray JNICALL
 Java_com_ameva_amuda_diffusion_AmevaDiffusion_nativeTxt2Img(JNIEnv* env, jclass, jlong handle,
                                                               jstring prompt, jint width, jint height,
-                                                              jint steps, jlong seed) {
+                                                              jint steps, jfloat cfgScale, jlong seed) {
     AmevaSd* sd = (AmevaSd*)(intptr_t)handle;
     std::string promptStr = jstringToUtf8(env, prompt);
 
     size_t rgbSize = (size_t)width * (size_t)height * 3;
     std::vector<uint8_t> rgb(rgbSize);
     char errBuf[256] = {0};
-    AmevaSdStatus status = ameva_sd_txt2img(
-        sd, promptStr.c_str(), (int)width, (int)height, (int)steps, (int64_t)seed,
+    AmevaSdStatus status = ameva_sd_txt2img_ex(
+        sd, promptStr.c_str(), (int)width, (int)height, (int)steps, (float)cfgScale, (int64_t)seed,
         rgb.data(), rgb.size(), errBuf, sizeof(errBuf));
     if (status != AMEVA_SD_OK) {
         throwAmudaException(env, status, errBuf);

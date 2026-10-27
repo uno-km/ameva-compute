@@ -93,4 +93,44 @@ Java_com_ameva_amuda_llm_AmevaLlm_nativeFree(JNIEnv*, jclass, jlong handle) {
     ameva_llm_free((AmevaLlm*)(intptr_t)handle);
 }
 
+JNIEXPORT void JNICALL
+Java_com_ameva_amuda_llm_AmevaLlm_nativeLoadMmproj(JNIEnv* env, jclass, jlong handle,
+                                                     jstring mmprojPath) {
+    AmevaLlm* llm = (AmevaLlm*)(intptr_t)handle;
+    std::string mmproj = jstringToUtf8(env, mmprojPath);
+
+    char errBuf[256] = {0};
+    AmevaLlmStatus status = ameva_llm_load_mmproj(llm, mmproj.c_str(), errBuf, sizeof(errBuf));
+    if (status != AMEVA_LLM_OK) {
+        throwAmudaException(env, status, errBuf);
+    }
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_ameva_amuda_llm_AmevaLlm_nativeSupportsVision(JNIEnv*, jclass, jlong handle) {
+    AmevaLlm* llm = (AmevaLlm*)(intptr_t)handle;
+    return ameva_llm_supports_vision(llm) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_ameva_amuda_llm_AmevaLlm_nativeGenerateWithImage(JNIEnv* env, jclass, jlong handle,
+                                                            jstring imagePath, jstring prompt,
+                                                            jint maxTokens, jfloat temperature,
+                                                            jlong seed, jint outBufSize) {
+    AmevaLlm* llm = (AmevaLlm*)(intptr_t)handle;
+    std::string imagePathStr = jstringToUtf8(env, imagePath);
+    std::string promptStr = jstringToUtf8(env, prompt);
+
+    std::vector<char> outBuf((size_t)outBufSize);
+    char errBuf[256] = {0};
+    AmevaLlmStatus status = ameva_llm_generate_with_image(
+        llm, imagePathStr.c_str(), promptStr.c_str(), (int32_t)maxTokens, (float)temperature,
+        (uint64_t)seed, outBuf.data(), outBuf.size(), errBuf, sizeof(errBuf));
+    if (status != AMEVA_LLM_OK) {
+        throwAmudaException(env, status, errBuf);
+        return nullptr;
+    }
+    return env->NewStringUTF(outBuf.data());
+}
+
 } // extern "C"

@@ -57,6 +57,12 @@ class AmevaLlm private constructor(private val handle: Long) : AutoCloseable {
         ): String
         @JvmStatic private external fun nativeReset(handle: Long)
         @JvmStatic private external fun nativeFree(handle: Long)
+        @JvmStatic private external fun nativeLoadMmproj(handle: Long, mmprojPath: String)
+        @JvmStatic private external fun nativeSupportsVision(handle: Long): Boolean
+        @JvmStatic private external fun nativeGenerateWithImage(
+            handle: Long, imagePath: String, prompt: String, maxTokens: Int, temperature: Float,
+            seed: Long, outBufSize: Int
+        ): String
     }
 
     /** Throws [AmudaException] on any failure (model/backend load issues surface at [load] time;
@@ -73,6 +79,38 @@ class AmevaLlm private constructor(private val handle: Long) : AutoCloseable {
     fun reset() {
         nativeReset(handle)
     }
+
+    /**
+     * Attaches a CLIP/vision projector (mmproj GGUF) to this already-loaded text model, enabling
+     * [generateWithImage]. The mmproj file must match the loaded text model's family -- e.g.
+     * mmproj-Qwen2-VL-2B-Instruct-f16.gguf for a Qwen2-VL-2B-Instruct text model; a mismatched
+     * pair throws [AmudaException] rather than silently producing garbage output.
+     *
+     * The vision encoder runs on the same backend [load] chose (GPU or CPU) -- there is no
+     * separate backend selection for it.
+     *
+     * Call at most once per instance; to switch mmproj files, [close] and [load] again.
+     */
+    fun loadVision(mmprojPath: String) {
+        nativeLoadMmproj(handle, mmprojPath)
+    }
+
+    /** Whether [loadVision] has successfully attached a vision encoder. */
+    fun supportsVision(): Boolean = nativeSupportsVision(handle)
+
+    /**
+     * Encodes one image and generates text conditioned on it and [prompt]. Requires a prior
+     * [loadVision] call -- throws [AmudaException] otherwise, never a silent text-only fallback.
+     *
+     * [prompt] may contain mtmd's media marker ("<__media__>") to place the image explicitly;
+     * otherwise the marker is prepended automatically, so a plain "describe this image" prompt
+     * works unmodified. [imagePath] must point to a JPEG/PNG/BMP/GIF/static-WebP file.
+     */
+    fun generateWithImage(
+        imagePath: String, prompt: String, maxTokens: Int = 128, temperature: Float = 0.8f,
+        seed: Long = 42L, outBufSize: Int = 4096
+    ): String = nativeGenerateWithImage(handle, imagePath, prompt, maxTokens, temperature, seed,
+        outBufSize)
 
     override fun close() {
         nativeFree(handle)

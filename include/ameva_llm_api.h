@@ -21,6 +21,7 @@
 #ifndef AMEVA_LLM_API_H
 #define AMEVA_LLM_API_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -39,7 +40,17 @@ typedef enum {
     AMEVA_LLM_ERR_TOKENIZE_FAILED,
     AMEVA_LLM_ERR_DECODE_FAILED,
     AMEVA_LLM_ERR_OUTPUT_BUFFER_TOO_SMALL,
-    AMEVA_LLM_ERR_INVALID_ARGUMENT
+    AMEVA_LLM_ERR_INVALID_ARGUMENT,
+    AMEVA_LLM_ERR_VISION_LOAD_FAILED,
+    AMEVA_LLM_ERR_VISION_NOT_LOADED,
+    AMEVA_LLM_ERR_IMAGE_LOAD_FAILED,
+    AMEVA_LLM_ERR_VISION_TOKENIZE_FAILED,
+    AMEVA_LLM_ERR_VISION_ENCODE_FAILED,
+    /** GPU-only backend ("vulkan"/"opencl", or the default) requested, but the model requires an
+     *  op ggml-ameva does not implement (e.g. M-RoPE/vision rope for Qwen2-VL). Refused outright
+     *  instead of silently handing that op to the CPU backend. Use backend="auto" to allow a
+     *  visible, logged per-op CPU fallback, or backend="cpu" to run entirely on CPU. */
+    AMEVA_LLM_ERR_GPU_ONLY_UNSUPPORTED_OP
 } AmevaLlmStatus;
 
 /**
@@ -116,6 +127,61 @@ AmevaLlmStatus ameva_llm_reset(
 
 /** @brief Release the context, model, and backend registration. Safe to call with NULL. */
 void ameva_llm_free(AmevaLlm* llm);
+
+/**
+ * @brief Attach a CLIP/vision projector (mmproj GGUF, third_party/llama.cpp/tools/mtmd) to an
+ *        already-loaded text model, enabling ameva_llm_generate_with_image(). The vision encoder
+ *        runs on the same device list ameva_llm_load() chose (ggml-ameva GPU backend or CPU) --
+ *        it is picked up through the process-wide ggml backend registry ggml_backend_load()
+ *        already populated, not re-selected here.
+ *
+ * May be called at most once per AmevaLlm handle; call again after ameva_llm_free() +
+ * ameva_llm_load() to switch mmproj files.
+ *
+ * @param mmproj_path Filesystem path to the mmproj GGUF matching the loaded text model's family
+ *        (e.g. mmproj-Qwen2-VL-2B-Instruct-f16.gguf for a Qwen2-VL-2B-Instruct text model).
+ * @return AMEVA_LLM_OK on success, AMEVA_LLM_ERR_VISION_LOAD_FAILED if the mmproj file is missing,
+ *         malformed, or does not match the text model's vision projector type.
+ */
+AmevaLlmStatus ameva_llm_load_mmproj(
+    AmevaLlm* llm,
+    const char* mmproj_path,
+    char* err_buf,
+    size_t err_buf_size
+);
+
+/** @brief Whether ameva_llm_load_mmproj() has successfully attached a vision encoder. */
+bool ameva_llm_supports_vision(AmevaLlm* llm);
+
+/**
+ * @brief Encode one image and generate text conditioned on it and a text prompt. Requires a
+ *        prior successful ameva_llm_load_mmproj() call -- AMEVA_LLM_ERR_VISION_NOT_LOADED
+ *        otherwise, never a silent text-only fallback.
+ *
+ * @param image_path Filesystem path to a JPEG/PNG/BMP/GIF/static-WebP file (stb_image, bundled in
+ *        mtmd). Decoded and preprocessed (resize/patchify) entirely inside mtmd/clip.cpp.
+ * @param prompt Text prompt. If it contains mtmd's media marker ("<__media__>"), the image is
+ *        substituted there; otherwise the marker is prepended automatically, so a plain
+ *        "describe this image" prompt works unmodified.
+ * @param max_tokens, temperature, seed, out_buf, out_buf_size: same contract as
+ *        ameva_llm_generate().
+ * @return AMEVA_LLM_OK on success. AMEVA_LLM_ERR_IMAGE_LOAD_FAILED if image_path cannot be
+ *         decoded, AMEVA_LLM_ERR_VISION_TOKENIZE_FAILED/AMEVA_LLM_ERR_VISION_ENCODE_FAILED for a
+ *         tokenize/vision-encode failure, or any ameva_llm_generate() code for the text decode
+ *         that follows.
+ */
+AmevaLlmStatus ameva_llm_generate_with_image(
+    AmevaLlm* llm,
+    const char* image_path,
+    const char* prompt,
+    int32_t max_tokens,
+    float temperature,
+    uint64_t seed,
+    char* out_buf,
+    size_t out_buf_size,
+    char* err_buf,
+    size_t err_buf_size
+);
 
 #ifdef __cplusplus
 }

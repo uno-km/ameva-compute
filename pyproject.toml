@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ameva-compute"
 version = "2.1.0"
-description = "AMUDA: Ultra-lightweight CUDA-like GPGPU Runtime for Mobile & Termux — Vulkan 1.3 SPIR-V Compute"
+description = "AMUDA core engine: CUDA-like GPGPU runtime for ARM mobile SoCs (Vulkan 1.3 / SPIR-V, OpenCL). Core C ABI only — see ameva-runtime for the batteries-included package."
 readme = "README.md"
 requires-python = ">=3.8"
 authors = [

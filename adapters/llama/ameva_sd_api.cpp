@@ -4,6 +4,7 @@
  */
 #include "ameva_sd_api.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -131,9 +132,30 @@ AmevaSdStatus ameva_sd_txt2img(
     char* err_buf,
     size_t err_buf_size
 ) {
+    return ameva_sd_txt2img_ex(sd, prompt, width, height, steps, 0.0f, seed, out_rgb, out_rgb_size,
+                               err_buf, err_buf_size);
+}
+
+AmevaSdStatus ameva_sd_txt2img_ex(
+    AmevaSd* sd,
+    const char* prompt,
+    int width,
+    int height,
+    int steps,
+    float cfg_scale,
+    int64_t seed,
+    uint8_t* out_rgb,
+    size_t out_rgb_size,
+    char* err_buf,
+    size_t err_buf_size
+) {
     if (sd == nullptr || sd->ctx == nullptr || prompt == nullptr || out_rgb == nullptr ||
         width <= 0 || height <= 0) {
         setMsg(err_buf, err_buf_size, "ameva_sd_txt2img: invalid argument (%s)", "NULL pointer or non-positive size");
+        return AMEVA_SD_ERR_INVALID_ARGUMENT;
+    }
+    if (!std::isfinite(cfg_scale)) {
+        setMsg(err_buf, err_buf_size, "ameva_sd_txt2img: invalid argument (%s)", "cfg_scale is not finite");
         return AMEVA_SD_ERR_INVALID_ARGUMENT;
     }
     const size_t expectedSize = (size_t)width * (size_t)height * 3;
@@ -149,6 +171,9 @@ AmevaSdStatus ameva_sd_txt2img(
     params.width = width;
     params.height = height;
     params.sample_params.sample_steps = steps > 0 ? steps : 20;
+    if (cfg_scale > 0.0f) {
+        params.sample_params.guidance.txt_cfg = cfg_scale;
+    }
     params.seed = seed;
     params.batch_count = 1;
 

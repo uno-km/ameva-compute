@@ -2,3 +2,4 @@
 *.spv binary
 *.log -whitespace
 *.md -whitespace
+*.sh text eol=lf

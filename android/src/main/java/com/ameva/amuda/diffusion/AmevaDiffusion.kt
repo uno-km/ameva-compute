@@ -16,6 +16,8 @@ import java.io.File
  * ```
  * val sd = AmevaDiffusion.load(context, modelPath = "/sdcard/models/sd15-pruned.safetensors")
  * val bitmap = sd.txt2img(prompt = "a photo of a cat", width = 512, height = 512)
+ * // Guidance-distilled few-step models (SDXS, SD-Turbo, LCM) need cfgScale = 1f, e.g.
+ * // sd.txt2img(prompt, width = 512, height = 512, steps = 1, cfgScale = 1f)
  * sd.close()
  * ```
  */
@@ -51,17 +53,24 @@ class AmevaDiffusion private constructor(private val handle: Long) : AutoCloseab
             modelPath: String, backendPluginPath: String, cacheDir: String, nThreads: Int
         ): Long
         @JvmStatic private external fun nativeTxt2Img(
-            handle: Long, prompt: String, width: Int, height: Int, steps: Int, seed: Long
+            handle: Long, prompt: String, width: Int, height: Int, steps: Int, cfgScale: Float, seed: Long
         ): ByteArray
         @JvmStatic private external fun nativeFree(handle: Long)
     }
 
     /** Throws [com.ameva.amuda.AmudaException] on any failure. [seed] -1 lets
-     *  stable-diffusion.cpp pick a random seed; a fixed value makes the result reproducible. */
+     *  stable-diffusion.cpp pick a random seed; a fixed value makes the result reproducible.
+     *
+     *  [cfgScale] is the classifier-free-guidance scale; a value <= 0 keeps stable-diffusion.cpp's
+     *  default of 7.0. Guidance-distilled one- to four-step models (SDXS, SD-Turbo, LCM, ...) need
+     *  about 1.0: at the default they come out burnt and over-saturated (measured on SDXS, 256x256,
+     *  1 step: pure-black channel values 43% at 7.0 versus 0.1% at 1.0, on both CPU and the AMEVA
+     *  GPU path), which is a sampler setting, not a backend defect. */
     fun txt2img(
-        prompt: String, width: Int = 512, height: Int = 512, steps: Int = 20, seed: Long = -1L
+        prompt: String, width: Int = 512, height: Int = 512, steps: Int = 20, seed: Long = -1L,
+        cfgScale: Float = 0f
     ): Bitmap {
-        val rgb = nativeTxt2Img(handle, prompt, width, height, steps, seed)
+        val rgb = nativeTxt2Img(handle, prompt, width, height, steps, cfgScale, seed)
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val argb = IntArray(width * height)
         for (i in argb.indices) {

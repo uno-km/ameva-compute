@@ -12,6 +12,8 @@
 #include "llama.h"
 #include "ggml-backend.h"
 #include "ameva_backend_bench.h"
+#include "mtmd.h"
+#include "mtmd-helper.h"
 
 #if defined(__ANDROID__)
 #include <android/log.h>
@@ -22,6 +24,7 @@ struct AmevaLlm {
     llama_model* model = nullptr;
     llama_context* ctx = nullptr;
     const llama_vocab* vocab = nullptr;
+    mtmd_context* mtmd = nullptr; // set by ameva_llm_load_mmproj(); NULL = text-only
 };
 
 namespace {
@@ -81,11 +84,64 @@ void trimIncompleteUtf8Tail(std::string& s) {
 
 void freeLlm(AmevaLlm* llm) {
     if (llm == nullptr) return;
+    if (llm->mtmd != nullptr) mtmd_free(llm->mtmd);
     if (llm->ctx != nullptr) llama_free(llm->ctx);
     if (llm->model != nullptr) llama_model_free(llm->model);
     // ggml_backend_reg_t has no public unload call in this ggml version; the plugin .so stays
     // mapped for the process lifetime, matching llama.cpp's own backend-load lifecycle.
     delete llm;
+}
+
+// Shared by ameva_llm_generate() and ameva_llm_generate_with_image(): sample up to max_tokens
+// from whatever is already decoded at the context's current position, appending text to `out`.
+// Assumes the prompt (text-only or mtmd image+text chunks) was already decoded by the caller.
+AmevaLlmStatus sampleLoop(
+    AmevaLlm* llm,
+    int32_t max_tokens,
+    float temperature,
+    uint64_t seed,
+    std::string& out,
+    size_t out_cap,
+    char* err_buf,
+    size_t err_buf_size
+) {
+    llama_sampler_chain_params scparams = llama_sampler_chain_default_params();
+    llama_sampler* chain = llama_sampler_chain_init(scparams);
+    llama_sampler_chain_add(chain, llama_sampler_init_temp(temperature));
+    llama_sampler_chain_add(chain, llama_sampler_init_dist((uint32_t)seed));
+
+    char piece[256];
+    AmevaLlmStatus status = AMEVA_LLM_OK;
+
+    for (int32_t i = 0; i < max_tokens; ++i) {
+        llama_token tok = llama_sampler_sample(chain, llm->ctx, -1);
+        llama_sampler_accept(chain, tok);
+
+        if (llama_vocab_is_eog(llm->vocab, tok)) break;
+
+        int32_t piece_len = llama_token_to_piece(llm->vocab, tok, piece, sizeof(piece), 0, true);
+        if (piece_len < 0) {
+            setMsg(err_buf, err_buf_size, "llama_token_to_piece failed (%s)", "overflowed scratch buffer");
+            status = AMEVA_LLM_ERR_DECODE_FAILED;
+            break;
+        }
+        if (out.size() + (size_t)piece_len >= out_cap) {
+            setMsg(err_buf, err_buf_size, "generated text exceeds out_buf_size (%s)", "truncation refused");
+            status = AMEVA_LLM_ERR_OUTPUT_BUFFER_TOO_SMALL;
+            break;
+        }
+        out.append(piece, piece_len);
+
+        llama_batch next = llama_batch_get_one(&tok, 1);
+        if (llama_decode(llm->ctx, next) != 0) {
+            setMsg(err_buf, err_buf_size, "llama_decode failed mid-generation (%s)", "see log");
+            status = AMEVA_LLM_ERR_DECODE_FAILED;
+            break;
+        }
+    }
+
+    llama_sampler_free(chain);
+    return status;
 }
 
 // "auto": benchmark cpu/vulkan/opencl (ameva_backend_bench.h) and return whichever is actually
@@ -151,6 +207,11 @@ AmevaLlmStatus ameva_llm_load(
     installLogCallbackOnce();
     llama_backend_init();
 
+    // "auto" is the only caller intent that tolerates a per-op CPU fallback (with a visible log
+    // line, never silent). An explicit "vulkan"/"opencl" -- or the default when backend is
+    // NULL/empty -- is a GPU-only commitment: an op ggml-ameva cannot run must fail the load, not
+    // quietly hand that op to the CPU backend llama_init_from_model always keeps available.
+    const bool wasAutoRequested = (backend != nullptr && std::string(backend) == "auto");
     std::string resolvedBackend = (backend != nullptr && backend[0] != '\0') ? backend : "vulkan";
     if (resolvedBackend == "auto") {
         resolvedBackend = resolveAutoBackend(backend_plugin_path, err_buf, err_buf_size);
@@ -158,6 +219,7 @@ AmevaLlmStatus ameva_llm_load(
             return AMEVA_LLM_ERR_BACKEND_NO_DEVICE;
         }
     }
+    const bool gpuOnlyCommitment = !wasAutoRequested && (resolvedBackend == "vulkan" || resolvedBackend == "opencl");
 
     auto* llm = new AmevaLlm();
 
@@ -207,6 +269,40 @@ AmevaLlmStatus ameva_llm_load(
         return AMEVA_LLM_ERR_MODEL_LOAD_FAILED;
     }
     llm->vocab = llama_model_get_vocab(llm->model);
+
+    // M-RoPE (Qwen2-VL and similar) and GGML_ROPE_TYPE_VISION are both rejected by
+    // ggml-ameva's compute_support (see ggml-ameva.cpp GGML_OP_ROPE: only NORM/NEOX accepted).
+    // Under a GPU-only commitment that must be a hard failure here, not a per-op CPU hand-off
+    // discovered only once decode runs the rope node.
+    const llama_rope_type ropeType = llama_model_rope_type(llm->model);
+    const bool ropeUnsupportedByAmeva =
+        ropeType == LLAMA_ROPE_TYPE_MROPE || ropeType == LLAMA_ROPE_TYPE_IMROPE ||
+        ropeType == LLAMA_ROPE_TYPE_VISION;
+    if (ropeUnsupportedByAmeva) {
+        if (gpuOnlyCommitment) {
+            setMsg(err_buf, err_buf_size,
+                   "AMEVA_ERR_ROPE_MROPE_NOT_SUPPORTED: model rope type requires M-RoPE/vision "
+                   "rope, which ggml-ameva does not implement; refusing silent CPU fallback under "
+                   "GPU-only backend \"%s\"", resolvedBackend.c_str());
+            freeLlm(llm);
+            return AMEVA_LLM_ERR_GPU_ONLY_UNSUPPORTED_OP;
+        }
+        // "auto" resolved to a GPU backend but this model's rope op cannot run there: visible,
+        // not silent. The rope nodes will land on the CPU backend llama_init_from_model always
+        // keeps available; everything else still runs on ggml-ameva. If auto instead resolved to
+        // "cpu" outright there is no fallback to report -- the whole model already runs on CPU.
+        if (resolvedBackend == "vulkan" || resolvedBackend == "opencl") {
+            char warnMsg[256];
+            std::snprintf(warnMsg, sizeof(warnMsg),
+                "ameva_llm_load [auto-fallback WARN]: model rope type (M-RoPE/vision) unsupported "
+                "by ggml-ameva -- rope ops will run on CPU while backend=\"%s\" handles the rest",
+                resolvedBackend.c_str());
+            std::fprintf(stderr, "%s\n", warnMsg);
+#if defined(__ANDROID__)
+            __android_log_write(ANDROID_LOG_WARN, "ameva_llm", warnMsg);
+#endif
+        }
+    }
 
     llama_context_params cparams = llama_context_default_params();
     cparams.n_ctx = n_ctx; // 0 keeps the model's own default
@@ -258,44 +354,9 @@ AmevaLlmStatus ameva_llm_generate(
         return AMEVA_LLM_ERR_DECODE_FAILED;
     }
 
-    llama_sampler_chain_params scparams = llama_sampler_chain_default_params();
-    llama_sampler* chain = llama_sampler_chain_init(scparams);
-    llama_sampler_chain_add(chain, llama_sampler_init_temp(temperature));
-    llama_sampler_chain_add(chain, llama_sampler_init_dist((uint32_t)seed));
-
     std::string result;
-    char piece[256];
-    AmevaLlmStatus status = AMEVA_LLM_OK;
-
-    for (int32_t i = 0; i < max_tokens; ++i) {
-        llama_token tok = llama_sampler_sample(chain, llm->ctx, -1);
-        llama_sampler_accept(chain, tok);
-
-        if (llama_vocab_is_eog(llm->vocab, tok)) break;
-
-        int32_t piece_len = llama_token_to_piece(llm->vocab, tok, piece, sizeof(piece), 0, true);
-        if (piece_len < 0) {
-            setMsg(err_buf, err_buf_size, "llama_token_to_piece failed (%s)", "overflowed scratch buffer");
-            status = AMEVA_LLM_ERR_DECODE_FAILED;
-            break;
-        }
-        if (result.size() + (size_t)piece_len >= out_buf_size) {
-            setMsg(err_buf, err_buf_size, "generated text exceeds out_buf_size (%s)", "truncation refused");
-            status = AMEVA_LLM_ERR_OUTPUT_BUFFER_TOO_SMALL;
-            break;
-        }
-        result.append(piece, piece_len);
-
-        llama_batch next = llama_batch_get_one(&tok, 1);
-        if (llama_decode(llm->ctx, next) != 0) {
-            setMsg(err_buf, err_buf_size, "llama_decode failed mid-generation (%s)", prompt);
-            status = AMEVA_LLM_ERR_DECODE_FAILED;
-            break;
-        }
-    }
-
-    llama_sampler_free(chain);
-
+    AmevaLlmStatus status = sampleLoop(llm, max_tokens, temperature, seed, result, out_buf_size,
+                                        err_buf, err_buf_size);
     if (status != AMEVA_LLM_OK) {
         return status;
     }
@@ -321,4 +382,116 @@ AmevaLlmStatus ameva_llm_reset(
 
 void ameva_llm_free(AmevaLlm* llm) {
     freeLlm(llm);
+}
+
+AmevaLlmStatus ameva_llm_load_mmproj(
+    AmevaLlm* llm,
+    const char* mmproj_path,
+    char* err_buf,
+    size_t err_buf_size
+) {
+    if (llm == nullptr || llm->model == nullptr || mmproj_path == nullptr) {
+        setMsg(err_buf, err_buf_size, "ameva_llm_load_mmproj: invalid argument (%s)", "NULL pointer");
+        return AMEVA_LLM_ERR_INVALID_ARGUMENT;
+    }
+    if (llm->mtmd != nullptr) {
+        setMsg(err_buf, err_buf_size, "ameva_llm_load_mmproj: %s",
+               "a vision encoder is already loaded on this handle -- ameva_llm_free() + "
+               "ameva_llm_load() to switch mmproj files");
+        return AMEVA_LLM_ERR_INVALID_ARGUMENT;
+    }
+
+    mtmd_context_params mparams = mtmd_context_params_default();
+    // Picked up through the process-wide ggml backend registry ggml_backend_load() already
+    // populated in ameva_llm_load() -- the same ggml-ameva device, not a second selection here.
+    mparams.use_gpu = true;
+    mparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED; // same defense-in-depth as the text path
+    mparams.print_timings = false;
+    mparams.n_threads = 4;
+    mparams.warmup = false; // the caller's first ameva_llm_generate_with_image() IS the warmup
+
+    llm->mtmd = mtmd_init_from_file(mmproj_path, llm->model, mparams);
+    if (llm->mtmd == nullptr) {
+        setMsg(err_buf, err_buf_size, "mtmd_init_from_file failed for %s", mmproj_path);
+        return AMEVA_LLM_ERR_VISION_LOAD_FAILED;
+    }
+    return AMEVA_LLM_OK;
+}
+
+bool ameva_llm_supports_vision(AmevaLlm* llm) {
+    return llm != nullptr && llm->mtmd != nullptr && mtmd_support_vision(llm->mtmd);
+}
+
+AmevaLlmStatus ameva_llm_generate_with_image(
+    AmevaLlm* llm,
+    const char* image_path,
+    const char* prompt,
+    int32_t max_tokens,
+    float temperature,
+    uint64_t seed,
+    char* out_buf,
+    size_t out_buf_size,
+    char* err_buf,
+    size_t err_buf_size
+) {
+    if (llm == nullptr || image_path == nullptr || prompt == nullptr || out_buf == nullptr ||
+        out_buf_size == 0) {
+        setMsg(err_buf, err_buf_size, "ameva_llm_generate_with_image: invalid argument (%s)",
+               "NULL pointer");
+        return AMEVA_LLM_ERR_INVALID_ARGUMENT;
+    }
+    if (llm->mtmd == nullptr) {
+        setMsg(err_buf, err_buf_size, "ameva_llm_generate_with_image: %s",
+               "no vision encoder loaded -- call ameva_llm_load_mmproj() first");
+        return AMEVA_LLM_ERR_VISION_NOT_LOADED;
+    }
+
+    mtmd_bitmap* bitmap = mtmd_helper_bitmap_init_from_file(llm->mtmd, image_path);
+    if (bitmap == nullptr) {
+        setMsg(err_buf, err_buf_size, "mtmd_helper_bitmap_init_from_file failed for %s", image_path);
+        return AMEVA_LLM_ERR_IMAGE_LOAD_FAILED;
+    }
+
+    // The media marker may already be in the caller's prompt (multi-image placement); otherwise
+    // prepend it so a plain "describe this image" prompt works unmodified.
+    std::string markedPrompt(prompt);
+    const char* marker = mtmd_default_marker();
+    if (markedPrompt.find(marker) == std::string::npos) {
+        markedPrompt = std::string(marker) + "\n" + markedPrompt;
+    }
+
+    mtmd_input_text text{markedPrompt.c_str(), /*add_special=*/true, /*parse_special=*/true};
+    mtmd_input_chunks* chunks = mtmd_input_chunks_init();
+    const mtmd_bitmap* bitmaps[1] = {bitmap};
+    int32_t tok_rc = mtmd_tokenize(llm->mtmd, chunks, &text, bitmaps, 1);
+    mtmd_bitmap_free(bitmap);
+    if (tok_rc != 0) {
+        mtmd_input_chunks_free(chunks);
+        setMsg(err_buf, err_buf_size, "mtmd_tokenize failed (%s)",
+               tok_rc == 1 ? "bitmap/marker count mismatch" : "image preprocessing error");
+        return AMEVA_LLM_ERR_VISION_TOKENIZE_FAILED;
+    }
+
+    llama_pos new_n_past = 0;
+    int32_t eval_rc = mtmd_helper_eval_chunks(llm->mtmd, llm->ctx, chunks, /*n_past=*/0,
+                                              /*seq_id=*/0, /*n_batch=*/llama_n_batch(llm->ctx),
+                                              /*logits_last=*/true, &new_n_past);
+    mtmd_input_chunks_free(chunks);
+    if (eval_rc != 0) {
+        setMsg(err_buf, err_buf_size, "mtmd_helper_eval_chunks failed (%s)",
+               "vision encode or decode of the image+text prompt");
+        return AMEVA_LLM_ERR_VISION_ENCODE_FAILED;
+    }
+
+    std::string result;
+    AmevaLlmStatus status = sampleLoop(llm, max_tokens, temperature, seed, result, out_buf_size,
+                                        err_buf, err_buf_size);
+    if (status != AMEVA_LLM_OK) {
+        return status;
+    }
+
+    trimIncompleteUtf8Tail(result);
+    std::memcpy(out_buf, result.data(), result.size());
+    out_buf[result.size()] = '\0';
+    return AMEVA_LLM_OK;
 }

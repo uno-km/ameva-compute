@@ -86,6 +86,31 @@ AmevaSdStatus ameva_sd_txt2img(
     size_t err_buf_size
 );
 
+/**
+ * @brief ameva_sd_txt2img with an explicit classifier-free-guidance scale.
+ *
+ * ameva_sd_txt2img leaves guidance at stable-diffusion.cpp's default (7.0). Guidance-distilled
+ * models (SDXS, SD-Turbo, LCM and similar one- to four-step models) are trained for a guidance
+ * scale of about 1.0; at 7.0 they produce burnt, over-saturated images -- not a backend defect.
+ *
+ * @param cfg_scale Guidance scale. A value <= 0 keeps stable-diffusion.cpp's default (7.0); a
+ *        non-finite value is rejected with AMEVA_SD_ERR_INVALID_ARGUMENT. All other parameters
+ *        are as for ameva_sd_txt2img.
+ */
+AmevaSdStatus ameva_sd_txt2img_ex(
+    AmevaSd* sd,
+    const char* prompt,
+    int width,
+    int height,
+    int steps,
+    float cfg_scale,
+    int64_t seed,
+    uint8_t* out_rgb,
+    size_t out_rgb_size,
+    char* err_buf,
+    size_t err_buf_size
+);
+
 /** @brief Release the context, model, and backend registration. Safe to call with NULL. */
 void ameva_sd_free(AmevaSd* sd);
 

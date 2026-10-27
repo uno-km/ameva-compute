@@ -1,6 +1,7 @@
 package com.ameva.amuda.stt.sherpa
 
 import android.content.Context
+import java.io.File
 import com.k2fsa.sherpa.onnx.FeatureConfig
 import com.k2fsa.sherpa.onnx.OfflineModelConfig
 import com.k2fsa.sherpa.onnx.OfflineRecognizer
@@ -24,7 +25,11 @@ import com.k2fsa.sherpa.onnx.OfflineSenseVoiceModelConfig
  * in this module yet.
  *
  * ```
- * val sv = AmevaSenseVoice.load(context, modelPath = "/sdcard/models/sense-voice-small.onnx")
+ * val sv = AmevaSenseVoice.load(
+ *     context,
+ *     modelPath = "${context.filesDir}/sense-voice/model.int8.onnx",
+ *     tokensPath = "${context.filesDir}/sense-voice/tokens.txt"
+ * )
  * val result = sv.transcribe(pcm16, sampleRate = 16000)
  * println("${result.text} (lang=${result.language}, emotion=${result.emotion}, event=${result.event})")
  * sv.close()
@@ -71,11 +76,23 @@ class AmevaSenseVoice private constructor(private val recognizer: OfflineRecogni
                     modelType = "sense_voice"
                 )
             )
-            // The one public constructor takes an AssetManager regardless of source; sherpa-onnx's
-            // own JNI layer resolves `modelPath`/`tokensPath` as a real filesystem path when one
-            // exists there, falling back to the AssetManager only otherwise -- so an absolute path
-            // from AmevaModelHub.download() (not an APK asset) is the expected, supported case.
-            return AmevaSenseVoice(OfflineRecognizer(context.assets, config))
+            // sherpa-onnx does NOT fall back between the two sources: with a non-null AssetManager
+            // every path is opened as an APK asset, and an absolute path there makes the native
+            // layer log an error and call SHERPA_ONNX_EXIT(-1) (kills the process; file-utils.cc
+            // ReadFile(AAssetManager*) in v1.13.8). So an absolute path -- e.g. from
+            // AmevaModelHub.download() -- must go in with a null AssetManager, and is checked here
+            // so a missing file is a catchable exception instead of a process exit.
+            val fromFilesystem = modelPath.startsWith("/")
+            require(fromFilesystem == tokensPath.startsWith("/")) {
+                "AMU_ERR_MIXED_SOURCES: modelPath and tokensPath must both be absolute filesystem paths " +
+                    "or both be APK asset names (modelPath=$modelPath, tokensPath=$tokensPath)"
+            }
+            if (fromFilesystem) {
+                for (path in listOf(modelPath, tokensPath)) {
+                    require(File(path).isFile) { "AMU_ERR_MODEL_FILE_MISSING: $path" }
+                }
+            }
+            return AmevaSenseVoice(OfflineRecognizer(if (fromFilesystem) null else context.assets, config))
         }
     }
 
