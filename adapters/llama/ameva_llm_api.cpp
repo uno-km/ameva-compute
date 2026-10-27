@@ -4,6 +4,8 @@
  */
 #include "ameva_llm_api.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -11,6 +13,7 @@
 
 #include "llama.h"
 #include "ggml-backend.h"
+#include "gguf.h"
 #include "ameva_backend_bench.h"
 #include "mtmd.h"
 #include "mtmd-helper.h"
@@ -80,6 +83,134 @@ void trimIncompleteUtf8Tail(std::string& s) {
         if (expectedLen > back) s.erase(s.size() - back); // incomplete sequence
         return;
     }
+}
+
+// Fleet observation (2026-10-27, S21 Qwen2.5-VL-7B): mparams.n_gpu_layers=-1 (offload every layer)
+// crashed the whole Termux session mid-load on a 7 GiB-RAM UMA device once the model no longer
+// fits in free memory -- ggml-ameva's device memory report is real (/proc/meminfo MemAvailable),
+// but nothing used it to size the offload before this. Mirrors sd::backend_fit's budget-then-split
+// approach (see third_party/stable-diffusion.cpp/src/core/backend_fit.cpp) at layer granularity
+// instead of pipeline-component granularity: peek the GGUF tensor list (no tensor data read) for
+// llama.cpp's universal "blk.N.*" naming to estimate a per-layer byte cost, then offload only as
+// many layers as the budget allows. Never a silent full-GPU attempt -- a tighter fit than requested
+// is always logged.
+struct LayerBudgetEstimate {
+    int32_t n_layers = 0;
+    int64_t avg_layer_bytes = 0;
+    int64_t non_layer_bytes = 0; // embeddings/output/norms: always resident wherever any layer runs
+    bool ok = false;
+};
+
+LayerBudgetEstimate estimateLayerBudget(const char* model_path) {
+    LayerBudgetEstimate est;
+    gguf_init_params params = {};
+    params.no_alloc = true;
+    params.ctx = nullptr;
+    gguf_context* gguf = gguf_init_from_file(model_path, params);
+    if (gguf == nullptr) return est;
+
+    const int64_t n_tensors = gguf_get_n_tensors(gguf);
+    int64_t layer_bytes_sum = 0;
+    int32_t max_layer_idx = -1;
+    for (int64_t i = 0; i < n_tensors; i++) {
+        const char* name = gguf_get_tensor_name(gguf, i);
+        const int64_t sz = (int64_t)gguf_get_tensor_size(gguf, i);
+        int layer_idx = -1;
+        if (name != nullptr && std::sscanf(name, "blk.%d.", &layer_idx) == 1) {
+            layer_bytes_sum += sz;
+            if (layer_idx > max_layer_idx) max_layer_idx = layer_idx;
+        } else {
+            est.non_layer_bytes += sz;
+        }
+    }
+    gguf_free(gguf);
+    if (max_layer_idx < 0) return est; // no "blk.N." tensors recognized; caller keeps its own default
+    est.n_layers = max_layer_idx + 1;
+    est.avg_layer_bytes = layer_bytes_sum / est.n_layers;
+    est.ok = true;
+    return est;
+}
+
+struct GpuBudgetResult {
+    bool ok = true;              // false only for AMEVA_GPU_BUDGET_MODE_GPU_ONLY that does not fit
+    int32_t n_gpu_layers = -1;
+    std::string fail_reason;     // set only when !ok
+};
+
+void logBudgetWarn(const char* msg) {
+    std::fprintf(stderr, "%s\n", msg);
+#if defined(__ANDROID__)
+    __android_log_write(ANDROID_LOG_WARN, "ameva_llm", msg);
+#endif
+}
+
+// Opt-in only: opts == NULL or mode == AMEVA_GPU_BUDGET_MODE_DEFAULT reproduces the previous fixed
+// behavior (-1, offload everything, no estimation). Every other mode sizes the offload against
+// ggml-ameva's real free-memory report (/proc/meminfo MemAvailable, this device is UMA) and the
+// GGUF's own "blk.N.*" tensor layout -- never silently falls back to "offload everything" once the
+// caller has opted in, since that is exactly the fixed behavior that OOM-killed the whole process
+// in the first place.
+GpuBudgetResult fitGpuLayerBudget(ggml_backend_dev_t dev, const char* model_path,
+                                   const AmevaGpuBudgetOptions* opts) {
+    GpuBudgetResult result;
+    if (opts == nullptr || opts->mode == AMEVA_GPU_BUDGET_MODE_DEFAULT) {
+        result.n_gpu_layers = -1;
+        return result;
+    }
+    if (opts->mode == AMEVA_GPU_BUDGET_MODE_CPU_ONLY) {
+        result.n_gpu_layers = 0;
+        return result;
+    }
+
+    size_t free_bytes = 0, total_bytes = 0;
+    ggml_backend_dev_memory(dev, &free_bytes, &total_bytes);
+    const LayerBudgetEstimate est = estimateLayerBudget(model_path);
+    const float fraction = (opts->budget_fraction > 0.f) ? opts->budget_fraction : 0.95f;
+    const bool gpuOnly = (opts->mode == AMEVA_GPU_BUDGET_MODE_GPU_ONLY);
+
+    if (free_bytes == 0 || !est.ok || est.avg_layer_bytes <= 0) {
+        if (gpuOnly) {
+            result.ok = false;
+            result.fail_reason = "AMEVA_GPU_BUDGET_MODE_GPU_ONLY: device memory or model layer size "
+                                  "could not be estimated; refusing an unmeasured full-GPU attempt";
+            return result;
+        }
+        result.n_gpu_layers = -1; // GPU_THEN_CPU without a usable estimate: previous fixed behavior
+        return result;
+    }
+
+    constexpr int64_t kSafetyReserveBytes = 1536LL * 1024 * 1024; // KV cache + compute-buffer headroom
+    const int64_t budget = (int64_t)((double)free_bytes * (double)fraction)
+                          - kSafetyReserveBytes - est.non_layer_bytes;
+    int32_t fit_layers = 0;
+    if (budget > 0) {
+        const int64_t max_fit = budget / est.avg_layer_bytes;
+        fit_layers = (int32_t)std::min<int64_t>(est.n_layers, max_fit);
+    }
+
+    if (fit_layers < est.n_layers) {
+        if (gpuOnly) {
+            result.ok = false;
+            char reason[320];
+            std::snprintf(reason, sizeof(reason),
+                "AMEVA_GPU_BUDGET_MODE_GPU_ONLY: only %d/%d transformer layers fit the budget "
+                "(free=%lld MiB, fraction=%.2f, reserve=%lld MiB); refusing to spill %d layer(s) to CPU",
+                fit_layers, est.n_layers, (long long)(free_bytes / (1024 * 1024)), fraction,
+                (long long)(kSafetyReserveBytes / (1024 * 1024)), est.n_layers - fit_layers);
+            result.fail_reason = reason;
+            return result;
+        }
+        char msg[320];
+        std::snprintf(msg, sizeof(msg),
+            "ameva_llm_load [budget-fit WARN]: only %d/%d transformer layers fit the ggml-ameva "
+            "memory budget (free=%lld MiB, fraction=%.2f) -- %d layer(s) run on CPU instead of a "
+            "silent full-GPU attempt that would risk an OOM kill",
+            fit_layers, est.n_layers, (long long)(free_bytes / (1024 * 1024)), fraction,
+            est.n_layers - fit_layers);
+        logBudgetWarn(msg);
+    }
+    result.n_gpu_layers = fit_layers;
+    return result;
 }
 
 void freeLlm(AmevaLlm* llm) {
@@ -185,6 +316,7 @@ AmevaLlmStatus ameva_llm_load(
     const char* cache_dir,
     const char* backend,
     uint32_t n_ctx,
+    const AmevaGpuBudgetOptions* gpu_budget_opts,
     AmevaLlm** out_llm,
     char* err_buf,
     size_t err_buf_size
@@ -249,6 +381,14 @@ AmevaLlmStatus ameva_llm_load(
             return AMEVA_LLM_ERR_BACKEND_NO_DEVICE;
         }
         ggml_backend_dev_t ameva_dev = ggml_backend_reg_dev_get(llm->backend_reg, 0);
+
+        const GpuBudgetResult budget_result = fitGpuLayerBudget(ameva_dev, model_path, gpu_budget_opts);
+        if (!budget_result.ok) {
+            setMsg(err_buf, err_buf_size, "%s", budget_result.fail_reason.c_str());
+            freeLlm(llm);
+            return AMEVA_LLM_ERR_GPU_BUDGET_EXCEEDED;
+        }
+        mparams.n_gpu_layers = budget_result.n_gpu_layers;
 
         // NULL-terminated device list: only ggml-ameva + llama.cpp's own CPU backend run
         // anything. Upstream ggml-vulkan is never loaded in this process, so an op ggml-ameva

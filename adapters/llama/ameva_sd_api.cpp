@@ -4,7 +4,11 @@
  */
 #include "ameva_sd_api.h"
 
+#include <sys/stat.h>
+
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -64,6 +68,7 @@ AmevaSdStatus ameva_sd_load(
     const char* backend_plugin_path,
     const char* cache_dir,
     int n_threads,
+    const AmevaSdGpuBudgetOptions* gpu_budget_opts,
     AmevaSd** out_sd,
     char* err_buf,
     size_t err_buf_size
@@ -108,6 +113,76 @@ AmevaSdStatus ameva_sd_load(
                                 // AMEVA0 in it, matching ggml_backend_ameva_device()'s GGML_AMEVA_DEVICE_NAME.
     params.n_threads = n_threads > 0 ? n_threads : -1; // -1: stable-diffusion.cpp's own default
     params.flash_attn = false; // same defense-in-depth as ameva_llm_api.cpp/ameva_stt_api.cpp
+
+    // Opt-in only: gpu_budget_opts == NULL (or mode == DEFAULT) keeps params.backend == "AMEVA0"
+    // exactly as set above -- the previous fixed, unconditional-full-GPU behavior. maxVramSpec
+    // must stay alive through new_sd_ctx() below, since params.max_vram is a raw pointer into it.
+    std::string maxVramSpec;
+    if (gpu_budget_opts != nullptr && gpu_budget_opts->mode != AMEVA_SD_GPU_BUDGET_MODE_DEFAULT) {
+        if (gpu_budget_opts->mode == AMEVA_SD_GPU_BUDGET_MODE_CPU_ONLY) {
+            params.backend = "CPU";
+        } else {
+            size_t free_bytes = 0, total_bytes = 0;
+            ggml_backend_dev_t ameva_dev = ggml_backend_reg_dev_get(sd->backend_reg, 0);
+            ggml_backend_dev_memory(ameva_dev, &free_bytes, &total_bytes);
+            const float fraction = (gpu_budget_opts->budget_fraction > 0.f)
+                                        ? gpu_budget_opts->budget_fraction : 0.95f;
+            const bool gpuOnly = (gpu_budget_opts->mode == AMEVA_SD_GPU_BUDGET_MODE_GPU_ONLY);
+            constexpr int64_t kSafetyReserveBytes = 512LL * 1024 * 1024; // matches backend_fit's own default reserve
+
+            if (free_bytes == 0) {
+                if (gpuOnly) {
+                    setMsg(err_buf, err_buf_size,
+                           "AMEVA_SD_GPU_BUDGET_MODE_GPU_ONLY: device memory could not be estimated "
+                           "(%s); refusing an unmeasured full-GPU attempt", "/proc/meminfo unreadable");
+                    freeSd(sd);
+                    return AMEVA_SD_ERR_GPU_BUDGET_EXCEEDED;
+                }
+                // GPU_THEN_CPU without a usable estimate: leave params.backend == "AMEVA0" (DEFAULT)
+            } else {
+                const int64_t budget = (int64_t)((double)free_bytes * (double)fraction) - kSafetyReserveBytes;
+                if (gpuOnly) {
+                    // Coarser than GPU_THEN_CPU's component-level auto-fit below: a single whole-file
+                    // size check, since GPU_ONLY must refuse before new_sd_ctx() runs at all rather
+                    // than discover a per-component shortfall partway through model loading.
+                    struct stat st;
+                    if (stat(model_path, &st) != 0) {
+                        setMsg(err_buf, err_buf_size,
+                               "AMEVA_SD_GPU_BUDGET_MODE_GPU_ONLY: could not stat model file (%s)",
+                               model_path);
+                        freeSd(sd);
+                        return AMEVA_SD_ERR_GPU_BUDGET_EXCEEDED;
+                    }
+                    if ((int64_t)st.st_size > budget) {
+                        char reason[320];
+                        std::snprintf(reason, sizeof(reason),
+                            "AMEVA_SD_GPU_BUDGET_MODE_GPU_ONLY: model file %lld MiB exceeds the %lld MiB "
+                            "budget (free=%lld MiB, fraction=%.2f); refusing a partial/CPU spill",
+                            (long long)(st.st_size / (1024 * 1024)), (long long)(budget / (1024 * 1024)),
+                            (long long)(free_bytes / (1024 * 1024)), fraction);
+                        setMsg(err_buf, err_buf_size, "%s", reason);
+                        freeSd(sd);
+                        return AMEVA_SD_ERR_GPU_BUDGET_EXCEEDED;
+                    }
+                    // Fits: proceed unconditionally on "AMEVA0", same as DEFAULT.
+                } else {
+                    // GPU_THEN_CPU: hand off to stable-diffusion.cpp's own component-level auto-fit
+                    // (third_party/stable-diffusion.cpp's sd::backend_fit, already used by the CLI's
+                    // --auto-fit) by translating the fraction into its reserve-GiB syntax (negative
+                    // value = "free minus N GiB", see ggml_graph_cut.cpp) -- more precise than this
+                    // wrapper's own file-size estimate, and it logs its plan (LOG_INFO "auto-fit
+                    // plan..."), never acting silently.
+                    const double reserveGib =
+                        (double)(free_bytes - (uint64_t)std::max<int64_t>(budget, 0)) / (1024.0 * 1024.0 * 1024.0);
+                    char buf[64];
+                    std::snprintf(buf, sizeof(buf), "-%.3f", reserveGib);
+                    maxVramSpec = buf;
+                    params.auto_fit = true;
+                    params.max_vram = maxVramSpec.c_str();
+                }
+            }
+        }
+    }
 
     sd->ctx = new_sd_ctx(&params);
     if (sd->ctx == nullptr) {

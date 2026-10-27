@@ -41,18 +41,27 @@ extern "C" {
 JNIEXPORT jlong JNICALL
 Java_com_ameva_amuda_stt_AmevaSpeech_nativeLoad(JNIEnv* env, jclass, jstring modelPath,
                                                   jstring spirvF16Path, jstring spirvQ50Path,
-                                                  jstring language) {
+                                                  jstring language, jint gpuBudgetMode,
+                                                  jfloat gpuBudgetFraction) {
     std::string model = jstringToUtf8(env, modelPath);
     std::string f16 = jstringToUtf8(env, spirvF16Path);
     std::string q50 = jstringToUtf8(env, spirvQ50Path);
     std::string lang = jstringToUtf8(env, language);
+
+    // gpuBudgetMode mirrors AmevaSttGpuBudgetMode's declaration order (0=DEFAULT ... 3=CPU_ONLY)
+    // -- see com.ameva.amuda.stt.AmevaSpeech.GpuBudgetMode on the Kotlin side.
+    AmevaSttGpuBudgetOptions budgetOpts = {};
+    budgetOpts.mode = (AmevaSttGpuBudgetMode)gpuBudgetMode;
+    budgetOpts.budget_fraction = (float)gpuBudgetFraction;
+    const AmevaSttGpuBudgetOptions* budgetOptsPtr =
+        (budgetOpts.mode == AMEVA_STT_GPU_BUDGET_MODE_DEFAULT) ? nullptr : &budgetOpts;
 
     AmevaStt* stt = nullptr;
     char errBuf[256] = {0};
     AmevaSttStatus status = ameva_stt_load(
         model.c_str(), f16.empty() ? nullptr : f16.c_str(),
         q50.empty() ? nullptr : q50.c_str(), lang.empty() ? nullptr : lang.c_str(),
-        &stt, errBuf, sizeof(errBuf));
+        budgetOptsPtr, &stt, errBuf, sizeof(errBuf));
     if (status != AMEVA_STT_OK) {
         throwAmudaException(env, status, errBuf);
         return 0;

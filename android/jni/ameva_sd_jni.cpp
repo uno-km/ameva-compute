@@ -41,16 +41,25 @@ extern "C" {
 JNIEXPORT jlong JNICALL
 Java_com_ameva_amuda_diffusion_AmevaDiffusion_nativeLoad(JNIEnv* env, jclass, jstring modelPath,
                                                            jstring backendPluginPath, jstring cacheDir,
-                                                           jint nThreads) {
+                                                           jint nThreads, jint gpuBudgetMode,
+                                                           jfloat gpuBudgetFraction) {
     std::string model = jstringToUtf8(env, modelPath);
     std::string backendPlugin = jstringToUtf8(env, backendPluginPath);
     std::string cache = jstringToUtf8(env, cacheDir);
+
+    // gpuBudgetMode mirrors AmevaSdGpuBudgetMode's declaration order (0=DEFAULT ... 3=CPU_ONLY) --
+    // see com.ameva.amuda.diffusion.AmevaDiffusion.GpuBudgetMode on the Kotlin side.
+    AmevaSdGpuBudgetOptions budgetOpts = {};
+    budgetOpts.mode = (AmevaSdGpuBudgetMode)gpuBudgetMode;
+    budgetOpts.budget_fraction = (float)gpuBudgetFraction;
+    const AmevaSdGpuBudgetOptions* budgetOptsPtr =
+        (budgetOpts.mode == AMEVA_SD_GPU_BUDGET_MODE_DEFAULT) ? nullptr : &budgetOpts;
 
     AmevaSd* sd = nullptr;
     char errBuf[256] = {0};
     AmevaSdStatus status = ameva_sd_load(model.c_str(), backendPlugin.c_str(),
                                           cache.empty() ? nullptr : cache.c_str(), (int)nThreads,
-                                          &sd, errBuf, sizeof(errBuf));
+                                          budgetOptsPtr, &sd, errBuf, sizeof(errBuf));
     if (status != AMEVA_SD_OK) {
         throwAmudaException(env, status, errBuf);
         return 0;

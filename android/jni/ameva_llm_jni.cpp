@@ -41,17 +41,27 @@ extern "C" {
 JNIEXPORT jlong JNICALL
 Java_com_ameva_amuda_llm_AmevaLlm_nativeLoad(JNIEnv* env, jclass, jstring modelPath,
                                                jstring backendPluginPath, jstring cacheDir,
-                                               jstring backendName, jint nCtx) {
+                                               jstring backendName, jint nCtx,
+                                               jint gpuBudgetMode, jfloat gpuBudgetFraction) {
     std::string model = jstringToUtf8(env, modelPath);
     std::string backendPlugin = jstringToUtf8(env, backendPluginPath);
     std::string cache = jstringToUtf8(env, cacheDir);
     std::string backend = jstringToUtf8(env, backendName);
 
+    // gpuBudgetMode mirrors AmevaGpuBudgetMode's declaration order (0=DEFAULT ... 3=CPU_ONLY) --
+    // see com.ameva.amuda.llm.AmevaLlm.GpuBudgetMode on the Kotlin side. DEFAULT (0) passes NULL,
+    // reproducing the previous fixed "offload everything" behavior exactly -- opt-in only.
+    AmevaGpuBudgetOptions budgetOpts = {};
+    budgetOpts.mode = (AmevaGpuBudgetMode)gpuBudgetMode;
+    budgetOpts.budget_fraction = (float)gpuBudgetFraction;
+    const AmevaGpuBudgetOptions* budgetOptsPtr =
+        (budgetOpts.mode == AMEVA_GPU_BUDGET_MODE_DEFAULT) ? nullptr : &budgetOpts;
+
     AmevaLlm* llm = nullptr;
     char errBuf[256] = {0};
     AmevaLlmStatus status = ameva_llm_load(model.c_str(), backendPlugin.c_str(), cache.c_str(),
                                             backend.empty() ? nullptr : backend.c_str(),
-                                            (uint32_t)nCtx, &llm, errBuf, sizeof(errBuf));
+                                            (uint32_t)nCtx, budgetOptsPtr, &llm, errBuf, sizeof(errBuf));
     if (status != AMEVA_LLM_OK) {
         throwAmudaException(env, status, errBuf);
         return 0;

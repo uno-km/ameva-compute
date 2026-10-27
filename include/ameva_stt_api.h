@@ -39,8 +39,38 @@ typedef enum {
     AMEVA_STT_ERR_MODEL_LOAD_FAILED,
     AMEVA_STT_ERR_TRANSCRIBE_FAILED,
     AMEVA_STT_ERR_OUTPUT_BUFFER_TOO_SMALL,
-    AMEVA_STT_ERR_INVALID_ARGUMENT
+    AMEVA_STT_ERR_INVALID_ARGUMENT,
+    /** AMEVA_STT_GPU_BUDGET_MODE_GPU_ONLY requested, but the model file does not fit the memory
+     *  budget. Refused outright, before whisper_init_from_file_with_params() runs. */
+    AMEVA_STT_ERR_GPU_BUDGET_EXCEEDED
 } AmevaSttStatus;
+
+/**
+ * @brief How ameva_stt_load() decides whisper_context_params.use_gpu against currently free
+ *        device memory. Unlike ameva_llm_api.h/ameva_sd_api.h, this backend has no per-layer or
+ *        per-component offload to size -- it accelerates exactly two encoder matmul shapes (f16,
+ *        q5_0; see this file's top comment) via use_gpu, and the UMA model weights occupy the
+ *        same system RAM regardless of use_gpu's value. The meaningful budget decision here is
+ *        therefore simpler: whether the model fits at all, and whether to pay the AMEVA backend's
+ *        own shader-pipeline/descriptor overhead on top of it. Mostly relevant for whisper-large*
+ *        (~3 GiB); base/small/medium models are far below typical fleet device RAM.
+ *
+ * Opt-in only: NULL (or AMEVA_STT_GPU_BUDGET_MODE_DEFAULT) keeps the previous fixed behavior
+ * (use_gpu = true unconditionally).
+ */
+typedef enum {
+    AMEVA_STT_GPU_BUDGET_MODE_DEFAULT = 0,   // no budget-fit: use_gpu = true unconditionally (previous behavior)
+    AMEVA_STT_GPU_BUDGET_MODE_GPU_ONLY,      // fit the whole model in budget, or fail -- never silently degrades
+    AMEVA_STT_GPU_BUDGET_MODE_GPU_THEN_CPU,  // use_gpu = true if it fits the budget, false otherwise (logged, never silent)
+    AMEVA_STT_GPU_BUDGET_MODE_CPU_ONLY       // use_gpu = false unconditionally
+} AmevaSttGpuBudgetMode;
+
+typedef struct {
+    AmevaSttGpuBudgetMode mode;
+    /** Fraction of the device's currently free memory the budget may use, e.g. 0.95 for 95%.
+     *  0.0f means "use the default" (0.95). Ignored when mode is DEFAULT or CPU_ONLY. */
+    float budget_fraction;
+} AmevaSttGpuBudgetOptions;
 
 /**
  * @brief Load a GGML Whisper model (e.g. ggml-base.en.bin, ggml-small-q5_0.bin) and register the
@@ -58,6 +88,8 @@ typedef enum {
  * @param out_stt Output handle, guaranteed NULL on failure.
  * @param err_buf Destination for a human-readable failure reason; always NUL-terminated.
  * @param err_buf_size Size of err_buf.
+ * @param gpu_budget_opts NULL: previous fixed behavior (use_gpu = true unconditionally). See
+ *        AmevaSttGpuBudgetOptions.
  * @return AMEVA_STT_OK on success, an error code otherwise.
  */
 AmevaSttStatus ameva_stt_load(
@@ -65,6 +97,7 @@ AmevaSttStatus ameva_stt_load(
     const char* spirv_f16_path,
     const char* spirv_q5_0_path,
     const char* language,
+    const AmevaSttGpuBudgetOptions* gpu_budget_opts,
     AmevaStt** out_stt,
     char* err_buf,
     size_t err_buf_size

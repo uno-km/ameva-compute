@@ -23,6 +23,40 @@ import java.io.File
  */
 class AmevaDiffusion private constructor(private val handle: Long) : AutoCloseable {
 
+    /**
+     * How [load] sizes the GPU ("AMEVA0") placement against currently free device memory. Mirrors
+     * [com.ameva.amuda.llm.AmevaLlm.GpuBudgetMode] -- same four modes, same opt-in contract:
+     * [DEFAULT] is the only mode that reproduces the previous fixed behavior (the whole model
+     * unconditionally placed on "AMEVA0"), which can OOM-kill the whole process if it does not
+     * fit. Picking any other mode is a deliberate caller decision, never automatic.
+     *
+     * Values match [AmevaSdGpuBudgetMode] in ameva_sd_api.h by declaration order -- do not reorder
+     * without updating the native enum and ameva_sd_jni.cpp's nativeLoad binding together.
+     */
+    enum class GpuBudgetMode {
+        /** No budget-fit: unconditional "AMEVA0", exactly like before this option existed. */
+        DEFAULT,
+        /** Fit the whole model in the budget, or fail with [com.ameva.amuda.AmudaException] --
+         *  never spills to CPU silently or otherwise. A coarser, file-size-based check than
+         *  [GPU_THEN_CPU]'s own component-level estimate. */
+        GPU_ONLY,
+        /** Hands off to stable-diffusion.cpp's own component-level (DiT/VAE/conditioner)
+         *  auto-fit placement. Always logged (logcat tag "ameva_sd") -- never silent. */
+        GPU_THEN_CPU,
+        /** Runs entirely on CPU; the AMEVA plugin is not placed at all. */
+        CPU_ONLY,
+    }
+
+    /**
+     * @param mode see [GpuBudgetMode]. Default [GpuBudgetMode.DEFAULT] (no budget-fit).
+     * @param budgetFraction fraction of the device's currently free memory the budget may use,
+     *        e.g. 0.95f for 95%. Ignored when [mode] is DEFAULT or CPU_ONLY.
+     */
+    data class GpuBudgetOptions(
+        val mode: GpuBudgetMode = GpuBudgetMode.DEFAULT,
+        val budgetFraction: Float = 0.95f,
+    )
+
     companion object {
         init {
             System.loadLibrary("ameva_sd_jni")
@@ -40,17 +74,27 @@ class AmevaDiffusion private constructor(private val handle: Long) : AutoCloseab
          * a separate build against stable-diffusion.cpp's own pinned ggml (GGML_MAX_NAME=160,
          * an ABI-level difference from llama.cpp's ggml). Mixing them would silently corrupt
          * ggml_tensor layout; see android/jni/CMakeLists.txt's ggml-ameva-sd target comment.
+         *
+         * [gpuBudgetOptions] null (default): no budget-fit, same fixed behavior as before this
+         * option existed. See [GpuBudgetOptions] to opt into fitting the GPU placement against
+         * free device memory instead -- recommended for any model whose size is not known in
+         * advance to comfortably fit the target device's RAM.
          */
         fun load(
-            context: Context, modelPath: String, nThreads: Int = 0, cacheDir: String? = null
+            context: Context, modelPath: String, nThreads: Int = 0, cacheDir: String? = null,
+            gpuBudgetOptions: GpuBudgetOptions? = null
         ): AmevaDiffusion {
             val backendPluginPath = File(context.applicationInfo.nativeLibraryDir, "libggml-ameva-sd.so").path
             val resolvedCacheDir = cacheDir ?: context.filesDir.path
-            return AmevaDiffusion(nativeLoad(modelPath, backendPluginPath, resolvedCacheDir, nThreads))
+            val mode = gpuBudgetOptions?.mode ?: GpuBudgetMode.DEFAULT
+            val fraction = gpuBudgetOptions?.budgetFraction ?: 0.95f
+            return AmevaDiffusion(nativeLoad(modelPath, backendPluginPath, resolvedCacheDir, nThreads,
+                mode.ordinal, fraction))
         }
 
         @JvmStatic private external fun nativeLoad(
-            modelPath: String, backendPluginPath: String, cacheDir: String, nThreads: Int
+            modelPath: String, backendPluginPath: String, cacheDir: String, nThreads: Int,
+            gpuBudgetMode: Int, gpuBudgetFraction: Float
         ): Long
         @JvmStatic private external fun nativeTxt2Img(
             handle: Long, prompt: String, width: Int, height: Int, steps: Int, cfgScale: Float, seed: Long

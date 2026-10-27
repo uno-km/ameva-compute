@@ -50,8 +50,35 @@ typedef enum {
      *  op ggml-ameva does not implement (e.g. M-RoPE/vision rope for Qwen2-VL). Refused outright
      *  instead of silently handing that op to the CPU backend. Use backend="auto" to allow a
      *  visible, logged per-op CPU fallback, or backend="cpu" to run entirely on CPU. */
-    AMEVA_LLM_ERR_GPU_ONLY_UNSUPPORTED_OP
+    AMEVA_LLM_ERR_GPU_ONLY_UNSUPPORTED_OP,
+    /** AMEVA_GPU_BUDGET_MODE_GPU_ONLY requested, but the model's estimated size does not fit the
+     *  memory budget. Refused outright -- GPU_ONLY never silently spills layers to CPU. Use
+     *  AMEVA_GPU_BUDGET_MODE_GPU_THEN_CPU to allow a visible, logged partial offload instead. */
+    AMEVA_LLM_ERR_GPU_BUDGET_EXCEEDED
 } AmevaLlmStatus;
+
+/**
+ * @brief How ameva_llm_load() sizes the GPU (ggml-ameva) layer offload against currently free
+ *        device memory. Opt-in only: a NULL AmevaGpuBudgetOptions* to ameva_llm_load() (or
+ *        AMEVA_GPU_BUDGET_MODE_DEFAULT) keeps the previous fixed behavior -- every layer offloaded
+ *        unconditionally, which can OOM-kill the whole process on a UMA device if the model does
+ *        not fit (observed on a 7 GiB-RAM device loading a ~5.7 GiB model). Mirrors the budget/
+ *        split-or-refuse pattern in third_party/stable-diffusion.cpp's sd::backend_fit, at
+ *        transformer-layer granularity instead of pipeline-component granularity.
+ */
+typedef enum {
+    AMEVA_GPU_BUDGET_MODE_DEFAULT = 0,    // no budget-fit: offload every layer (previous behavior)
+    AMEVA_GPU_BUDGET_MODE_GPU_ONLY,       // fit every layer within budget, or fail -- never spills to CPU
+    AMEVA_GPU_BUDGET_MODE_GPU_THEN_CPU,   // offload as many layers as the budget allows; the rest run on CPU (logged, never silent)
+    AMEVA_GPU_BUDGET_MODE_CPU_ONLY        // 0 layers offloaded, even though the GPU backend plugin stays loaded
+} AmevaGpuBudgetMode;
+
+typedef struct {
+    AmevaGpuBudgetMode mode;
+    /** Fraction of the device's currently free memory the budget may use, e.g. 0.95 for 95%.
+     *  0.0f means "use the default" (0.95). Ignored when mode is DEFAULT or CPU_ONLY. */
+    float budget_fraction;
+} AmevaGpuBudgetOptions;
 
 /**
  * @brief Load the ggml-ameva backend plugin and a GGUF model, and create a context.
@@ -76,6 +103,8 @@ typedef enum {
  *        loads whichever is actually fastest on this device -- not a fixed cpu-then-gpu rule.
  *        Benchmarking "vulkan"/"opencl" happens in short-lived forked helper processes (see
  *        ameva_backend_bench.h); the real model load below always happens in this process.
+ * @param gpu_budget_opts NULL: previous fixed behavior (offload every layer, no budget-fit). Set
+ *        to size the GPU offload against free device memory instead -- see AmevaGpuBudgetOptions.
  */
 AmevaLlmStatus ameva_llm_load(
     const char* model_path,
@@ -83,6 +112,7 @@ AmevaLlmStatus ameva_llm_load(
     const char* cache_dir,
     const char* backend,
     uint32_t n_ctx,
+    const AmevaGpuBudgetOptions* gpu_budget_opts,
     AmevaLlm** out_llm,
     char* err_buf,
     size_t err_buf_size

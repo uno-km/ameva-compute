@@ -38,8 +38,42 @@ typedef enum {
     AMEVA_SD_ERR_MODEL_LOAD_FAILED,
     AMEVA_SD_ERR_GENERATE_FAILED,
     AMEVA_SD_ERR_OUTPUT_BUFFER_TOO_SMALL,
-    AMEVA_SD_ERR_INVALID_ARGUMENT
+    AMEVA_SD_ERR_INVALID_ARGUMENT,
+    /** AMEVA_SD_GPU_BUDGET_MODE_GPU_ONLY requested, but the model's file size (or device memory)
+     *  could not be fit within the budget. Refused outright, before new_sd_ctx() runs --
+     *  GPU_ONLY never spills onto CPU, silently or otherwise. */
+    AMEVA_SD_ERR_GPU_BUDGET_EXCEEDED
 } AmevaSdStatus;
+
+/**
+ * @brief How ameva_sd_load() sizes the GPU (ggml-ameva/"AMEVA0") placement against currently free
+ *        device memory. Opt-in only: a NULL AmevaSdGpuBudgetOptions* (or AMEVA_SD_GPU_BUDGET_MODE_
+ *        DEFAULT) keeps the previous fixed behavior -- the whole model unconditionally placed on
+ *        "AMEVA0", which can OOM-kill the whole process if it does not fit (same risk pattern
+ *        confirmed on the LLM path's unconditional n_gpu_layers=-1; see ameva_llm_api.h's
+ *        AmevaGpuBudgetOptions, which this mirrors).
+ *
+ * GPU_THEN_CPU is implemented by translating budget_fraction into stable-diffusion.cpp's own
+ * sd_ctx_params_t.auto_fit + max_vram reserve-GiB mechanism (third_party/stable-diffusion.cpp's
+ * sd::backend_fit, already used by the CLI's --auto-fit) -- its own component-level (DiT/VAE/
+ * conditioner) placement decides the split, and it logs its plan (LOG_INFO "auto-fit plan...").
+ * GPU_ONLY is a coarser, file-size-based pre-check (this wrapper does not call backend_fit's
+ * per-component estimator directly): if the model file is larger than the budget, the load is
+ * refused before new_sd_ctx() runs at all.
+ */
+typedef enum {
+    AMEVA_SD_GPU_BUDGET_MODE_DEFAULT = 0,   // no budget-fit: unconditional "AMEVA0" (previous behavior)
+    AMEVA_SD_GPU_BUDGET_MODE_GPU_ONLY,      // fit the whole model in budget, or fail -- never spills to CPU
+    AMEVA_SD_GPU_BUDGET_MODE_GPU_THEN_CPU,  // sd.cpp's own auto-fit component placement; logged, never silent
+    AMEVA_SD_GPU_BUDGET_MODE_CPU_ONLY       // run entirely on CPU; the AMEVA plugin is not placed at all
+} AmevaSdGpuBudgetMode;
+
+typedef struct {
+    AmevaSdGpuBudgetMode mode;
+    /** Fraction of the device's currently free memory the budget may use, e.g. 0.95 for 95%.
+     *  0.0f means "use the default" (0.95). Ignored when mode is DEFAULT or CPU_ONLY. */
+    float budget_fraction;
+} AmevaSdGpuBudgetOptions;
 
 /**
  * @param model_path Filesystem path to a single-file GGUF/safetensors/ckpt diffusion checkpoint
@@ -54,12 +88,16 @@ typedef enum {
  *        both off.
  * @param n_threads CPU thread count for whatever this model leaves on CPU (text encoder tokenize,
  *        any op ggml-ameva declines); 0 uses stable-diffusion.cpp's own default.
+ * @param gpu_budget_opts NULL: previous fixed behavior (unconditional "AMEVA0", no budget-fit).
+ *        Set to size the GPU placement against free device memory instead -- see
+ *        AmevaSdGpuBudgetOptions.
  */
 AmevaSdStatus ameva_sd_load(
     const char* model_path,
     const char* backend_plugin_path,
     const char* cache_dir,
     int n_threads,
+    const AmevaSdGpuBudgetOptions* gpu_budget_opts,
     AmevaSd** out_sd,
     char* err_buf,
     size_t err_buf_size

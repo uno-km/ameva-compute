@@ -5,8 +5,8 @@
 #include "ameva_llm_api.h"
 
 #include <cstdio>
-#include <cstring>
 #include <cstdlib>
+#include <cstring>
 
 static const char* statusName(AmevaLlmStatus s) {
     switch (s) {
@@ -25,6 +25,7 @@ static const char* statusName(AmevaLlmStatus s) {
         case AMEVA_LLM_ERR_VISION_TOKENIZE_FAILED: return "AMEVA_LLM_ERR_VISION_TOKENIZE_FAILED";
         case AMEVA_LLM_ERR_VISION_ENCODE_FAILED: return "AMEVA_LLM_ERR_VISION_ENCODE_FAILED";
         case AMEVA_LLM_ERR_GPU_ONLY_UNSUPPORTED_OP: return "AMEVA_LLM_ERR_GPU_ONLY_UNSUPPORTED_OP";
+        case AMEVA_LLM_ERR_GPU_BUDGET_EXCEEDED: return "AMEVA_LLM_ERR_GPU_BUDGET_EXCEEDED";
         default: return "UNKNOWN";
     }
 }
@@ -32,7 +33,9 @@ static const char* statusName(AmevaLlmStatus s) {
 int main(int argc, char** argv) {
     if (argc < 6) {
         std::fprintf(stderr,
-            "usage: %s <model.gguf> <mmproj.gguf> <image.jpg> <backend: cpu|vulkan|opencl> <ggml-ameva.so path or \"-\">\n",
+            "usage: %s <model.gguf> <mmproj.gguf> <image.jpg> <backend: cpu|vulkan|opencl> "
+            "<ggml-ameva.so path or \"-\"> [budget_mode: default|gpu_only|gpu_then_cpu|cpu_only] "
+            "[budget_fraction]\n",
             argv[0]);
         return 2;
     }
@@ -41,13 +44,24 @@ int main(int argc, char** argv) {
     const char* image_path = argv[3];
     const char* backend = argv[4];
     const char* backend_plugin_path = (std::strcmp(argv[5], "-") == 0) ? nullptr : argv[5];
+    const char* budget_mode_arg = (argc > 6) ? argv[6] : "default";
+    const float budget_fraction = (argc > 7) ? std::strtof(argv[7], nullptr) : 0.0f;
+
+    AmevaGpuBudgetOptions budget_opts = {};
+    budget_opts.budget_fraction = budget_fraction;
+    if (std::strcmp(budget_mode_arg, "gpu_only") == 0) budget_opts.mode = AMEVA_GPU_BUDGET_MODE_GPU_ONLY;
+    else if (std::strcmp(budget_mode_arg, "gpu_then_cpu") == 0) budget_opts.mode = AMEVA_GPU_BUDGET_MODE_GPU_THEN_CPU;
+    else if (std::strcmp(budget_mode_arg, "cpu_only") == 0) budget_opts.mode = AMEVA_GPU_BUDGET_MODE_CPU_ONLY;
+    else budget_opts.mode = AMEVA_GPU_BUDGET_MODE_DEFAULT;
+    const AmevaGpuBudgetOptions* budget_opts_ptr =
+        (budget_opts.mode == AMEVA_GPU_BUDGET_MODE_DEFAULT) ? nullptr : &budget_opts;
 
     char err[512] = {0};
     AmevaLlm* llm = nullptr;
 
-    std::printf("[ameva_vision_test] backend=%s model=%s\n", backend, model_path);
+    std::printf("[ameva_vision_test] backend=%s model=%s budget_mode=%s\n", backend, model_path, budget_mode_arg);
     AmevaLlmStatus st = ameva_llm_load(model_path, backend_plugin_path, /*cache_dir=*/nullptr,
-                                       backend, /*n_ctx=*/4096, &llm, err, sizeof(err));
+                                       backend, /*n_ctx=*/4096, budget_opts_ptr, &llm, err, sizeof(err));
     if (st != AMEVA_LLM_OK) {
         std::printf("RESULT: FAIL\nSTAGE: ameva_llm_load\nSTATUS: %s\nERR: %s\n", statusName(st), err);
         return 1;

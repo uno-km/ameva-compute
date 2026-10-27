@@ -19,6 +19,40 @@ import java.io.File
  */
 class AmevaLlm private constructor(private val handle: Long) : AutoCloseable {
 
+    /**
+     * How [load] sizes the GPU (ggml-ameva) layer offload against currently free device memory.
+     * [DEFAULT] is the only mode that reproduces the previous fixed behavior (every layer
+     * offloaded unconditionally) -- this is opt-in, never automatic: picking any other mode is a
+     * deliberate caller decision, not something [load] decides for you. On a memory-constrained
+     * device, [DEFAULT] with a model too large for free device memory can OOM-kill the whole
+     * process (observed: 7 GiB-RAM device, ~5.7 GiB model, GPU backend).
+     *
+     * Values match [AmevaGpuBudgetMode] in ameva_llm_api.h by declaration order -- do not reorder
+     * without updating the native enum and ameva_llm_jni.cpp's nativeLoad binding together.
+     */
+    enum class GpuBudgetMode {
+        /** No budget-fit: offload every layer, exactly like before this option existed. */
+        DEFAULT,
+        /** Fit every layer within the budget, or fail with [AmudaException] -- never spills
+         *  layers to CPU silently or otherwise. */
+        GPU_ONLY,
+        /** Offload as many layers as the budget allows; the rest run on CPU. Always logged
+         *  (logcat tag "ameva_llm") when fewer than every layer fits -- never silent. */
+        GPU_THEN_CPU,
+        /** 0 layers offloaded, even though the GPU backend plugin stays loaded. */
+        CPU_ONLY,
+    }
+
+    /**
+     * @param mode see [GpuBudgetMode]. Default [GpuBudgetMode.DEFAULT] (no budget-fit).
+     * @param budgetFraction fraction of the device's currently free memory the budget may use,
+     *        e.g. 0.95f for 95%. Ignored when [mode] is DEFAULT or CPU_ONLY.
+     */
+    data class GpuBudgetOptions(
+        val mode: GpuBudgetMode = GpuBudgetMode.DEFAULT,
+        val budgetFraction: Float = 0.95f,
+    )
+
     companion object {
         init {
             System.loadLibrary("ameva_jni")
@@ -39,18 +73,27 @@ class AmevaLlm private constructor(private val handle: Long) : AutoCloseable {
          * actually fastest on this device -- not a fixed cpu-then-gpu rule. The benchmark adds a
          * few hundred ms to this call; pass an explicit backend to skip it if you already know
          * which one you want.
+         *
+         * [gpuBudgetOptions] null (default): no budget-fit, same fixed behavior as before this
+         * option existed. See [GpuBudgetOptions] to opt into fitting the GPU offload against free
+         * device memory instead -- recommended for any model whose size is not known in advance
+         * to comfortably fit the target device's RAM.
          */
         fun load(
             context: Context, modelPath: String, nCtx: Int = 2048, cacheDir: String? = null,
-            backend: String = "auto"
+            backend: String = "auto", gpuBudgetOptions: GpuBudgetOptions? = null
         ): AmevaLlm {
             val backendPluginPath = File(context.applicationInfo.nativeLibraryDir, "libggml-ameva.so").path
             val resolvedCacheDir = cacheDir ?: context.filesDir.path
-            return AmevaLlm(nativeLoad(modelPath, backendPluginPath, resolvedCacheDir, backend, nCtx))
+            val mode = gpuBudgetOptions?.mode ?: GpuBudgetMode.DEFAULT
+            val fraction = gpuBudgetOptions?.budgetFraction ?: 0.95f
+            return AmevaLlm(nativeLoad(modelPath, backendPluginPath, resolvedCacheDir, backend, nCtx,
+                mode.ordinal, fraction))
         }
 
         @JvmStatic private external fun nativeLoad(
-            modelPath: String, backendPluginPath: String, cacheDir: String, backend: String, nCtx: Int
+            modelPath: String, backendPluginPath: String, cacheDir: String, backend: String, nCtx: Int,
+            gpuBudgetMode: Int, gpuBudgetFraction: Float
         ): Long
         @JvmStatic private external fun nativeGenerate(
             handle: Long, prompt: String, maxTokens: Int, temperature: Float, seed: Long, outBufSize: Int

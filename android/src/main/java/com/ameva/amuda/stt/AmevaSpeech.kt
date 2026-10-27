@@ -28,6 +28,42 @@ import java.security.MessageDigest
  */
 class AmevaSpeech private constructor(private val handle: Long) : AutoCloseable {
 
+    /**
+     * How [load] decides whether to enable this backend's two GPU-accelerated encoder matmul
+     * kernels (f16, q5_0) against currently free device memory. Mirrors
+     * [com.ameva.amuda.llm.AmevaLlm.GpuBudgetMode]'s opt-in contract, but this backend has no
+     * per-layer/per-component split to size -- the model's weights occupy the same UMA system RAM
+     * regardless of mode, and the only real lever is whether those two kernels (and the AMEVA
+     * backend's own shader-pipeline overhead) are enabled at all. Mostly relevant for
+     * whisper-large* (~3 GiB); base/small/medium models are far below typical fleet device RAM.
+     *
+     * Values match [AmevaSttGpuBudgetMode] in ameva_stt_api.h by declaration order -- do not
+     * reorder without updating the native enum and ameva_stt_jni.cpp's nativeLoad binding together.
+     */
+    enum class GpuBudgetMode {
+        /** No budget-fit: GPU kernels enabled unconditionally, exactly like before this option
+         *  existed. */
+        DEFAULT,
+        /** Refuses to load with [com.ameva.amuda.AmudaException] if the model file does not fit
+         *  the budget -- never silently degrades to CPU. */
+        GPU_ONLY,
+        /** Enables the GPU kernels if the model fits the budget, disables them otherwise. Always
+         *  logged (logcat tag "ameva_stt") when disabled -- never silent. */
+        GPU_THEN_CPU,
+        /** GPU kernels disabled unconditionally; everything runs on CPU. */
+        CPU_ONLY,
+    }
+
+    /**
+     * @param mode see [GpuBudgetMode]. Default [GpuBudgetMode.DEFAULT] (no budget-fit).
+     * @param budgetFraction fraction of the device's currently free memory the budget may use,
+     *        e.g. 0.95f for 95%. Ignored when [mode] is DEFAULT or CPU_ONLY.
+     */
+    data class GpuBudgetOptions(
+        val mode: GpuBudgetMode = GpuBudgetMode.DEFAULT,
+        val budgetFraction: Float = 0.95f,
+    )
+
     companion object {
         init {
             System.loadLibrary("ameva_stt_jni")
@@ -43,15 +79,22 @@ class AmevaSpeech private constructor(private val handle: Long) : AutoCloseable 
          * [context] supplies this module's own bundled SPIR-V shader assets, extracted once to
          * [cacheDir] (default [context.filesDir]) and reused on later loads (sha256-verified,
          * re-extracted if the asset was replaced by an SDK update or the cached copy is corrupt).
+         *
+         * [gpuBudgetOptions] null (default): no budget-fit, same fixed behavior as before this
+         * option existed. See [GpuBudgetOptions] -- mainly useful for whisper-large* models on
+         * memory-constrained devices.
          */
         fun load(
-            context: Context, modelPath: String, language: String = "auto", cacheDir: String? = null
+            context: Context, modelPath: String, language: String = "auto", cacheDir: String? = null,
+            gpuBudgetOptions: GpuBudgetOptions? = null
         ): AmevaSpeech {
             val resolvedCacheDir = File(cacheDir ?: context.filesDir.path, ASSET_DIR)
             resolvedCacheDir.mkdirs()
             val f16Path = extractAssetIfNeeded(context, resolvedCacheDir, "matmul_f16_f32.spv")
             val q50Path = extractAssetIfNeeded(context, resolvedCacheDir, "matmul_q5_0_f32.spv")
-            return AmevaSpeech(nativeLoad(modelPath, f16Path, q50Path, language))
+            val mode = gpuBudgetOptions?.mode ?: GpuBudgetMode.DEFAULT
+            val fraction = gpuBudgetOptions?.budgetFraction ?: 0.95f
+            return AmevaSpeech(nativeLoad(modelPath, f16Path, q50Path, language, mode.ordinal, fraction))
         }
 
         private fun extractAssetIfNeeded(context: Context, destDir: File, name: String): String {
@@ -84,7 +127,8 @@ class AmevaSpeech private constructor(private val handle: Long) : AutoCloseable 
         }
 
         @JvmStatic private external fun nativeLoad(
-            modelPath: String, spirvF16Path: String, spirvQ50Path: String, language: String
+            modelPath: String, spirvF16Path: String, spirvQ50Path: String, language: String,
+            gpuBudgetMode: Int, gpuBudgetFraction: Float
         ): Long
         @JvmStatic private external fun nativeTranscribe(
             handle: Long, pcmf32: FloatArray, translate: Boolean, outBufSize: Int
