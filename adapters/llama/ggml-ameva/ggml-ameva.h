@@ -77,7 +77,7 @@ GGML_API int64_t ggml_backend_ameva_get_group_norm_count(void);
 // whole planes: CONV_2D, GROUP_NORM, UPSCALE and the binary ops (not cleared by reset_counters)
 GGML_API int64_t ggml_backend_ameva_get_window_node_count(void);
 GGML_API const char* ggml_backend_ameva_get_build_commit(void);
-GGML_API void ggml_backend_ameva_reset_counters(void);
+GGML_API void ggml_backend_ameva_reset_counters(void);// Prints the AMEVA_PROFILE totals now (the same report as at process exit). An Android app process does not run// atexit handlers when it exits, so a host calls this after a unit of work; also reachable as// ggml_backend_reg_get_proc_address(reg, "ggml_backend_ameva_profile_report").GGML_API void ggml_backend_ameva_profile_report(void);
 
 // Failure Injection Hooks (P0 Hardening Verification)
 typedef enum {

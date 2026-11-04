@@ -48,6 +48,10 @@
 #include "conv_q8_0_vd_spv.h"
 #include "conv_f16_va4_spv.h"
 #include "conv_f16_vd_spv.h"
+#include "conv_q8_0_v64_spv.h"
+#include "conv_q8_0_s64_spv.h"
+#include "conv_f16_v64_spv.h"
+#include "conv_f16_s64_spv.h"
 #include "qgemm_q8_0_a1_spv.h"
 #include "qgemm_q8_0_a2_spv.h"
 #include "qgemm_f16_a1_spv.h"
@@ -315,6 +319,7 @@ struct Path {
     bool matrix = false, ablation = false;
     const Buf *q = nullptr, *s = nullptr;
     uint32_t qper = 0, s_row = 0; // Q vector elements per unit, S bytes per weight row
+    uint32_t bm = 32;             // output positions per tile along w (BM64 kernels: 64)
     Diff diff;
     std::vector<double> wall, gpu;
     uint32_t dispatches = 0;
@@ -351,6 +356,10 @@ static const KernelDef kKernels[] = {
     KERNEL("conv_v_oneload", "conv_f16_va2", ConvF16Va2, true, false, true, true),
     KERNEL("conv_v_noload", "conv_f16_va3", ConvF16Va3, true, false, true, true),
     KERNEL("conv_v_noload_pmout", "conv_f16_va4", ConvF16Va4, true, false, true, true),
+    KERNEL("conv_v64", "conv_q8_0_v64", ConvQ80V64, false, false, true, false),
+    KERNEL("conv_s64", "conv_q8_0_s64", ConvQ80S64, false, false, false, false),
+    KERNEL("conv_v64", "conv_f16_v64", ConvF16V64, true, false, true, false),
+    KERNEL("conv_s64", "conv_f16_s64", ConvF16S64, true, false, false, false),
 };
 
 int main(int argc, char** argv) {
@@ -513,7 +522,7 @@ int main(int argc, char** argv) {
                                           whole(b_units, "unit table") };
         // tiles along w times output rows: one grid dimension (rows split over dispatches when it does not hold
         // them), or w tiles in y and rows in z (AMEVA_CONV_BENCH_GRID=3d)
-        const uint32_t tiles_w = ((uint32_t)s.OW + 31) / 32, rows = (uint32_t)(s.OH * s.OT);
+        const uint32_t tiles_w = ((uint32_t)s.OW + p.bm - 1) / p.bm, rows = (uint32_t)(s.OH * s.OT);
         const uint32_t rows_max = grid_3d ? g_limits.max_compute_workgroup_count[2] : g_limits.max_compute_workgroup_count[1] / tiles_w;
         if (rows_max == 0) die("one output row has more tiles (%u) than a grid dimension holds", tiles_w);
         for (uint32_t n0 = 0; n0 < s.N; n0 += rows_per_slice) {
@@ -598,6 +607,7 @@ int main(int argc, char** argv) {
             p.type = type, p.name = kd.path, p.matrix = kd.matrix, p.ablation = kd.ablation, p.q = bq, p.s = bs;
             p.kernel = make_kernel(kd.kernel, kd.spv, kd.bytes, kd.sha, kd.matrix ? 5 : 7, kd.matrix ? 40 : 76);
             p.qper = qb / 16, p.s_row = f16 ? 0 : s.U * 2;
+            p.bm = strstr(kd.path, "64") ? 64u : 32u;
             paths.push_back(p);
         }
 

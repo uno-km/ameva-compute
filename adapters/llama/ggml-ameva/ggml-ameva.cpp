@@ -276,6 +276,11 @@ static void ameva_profile_report(void) {
     }
 }
 
+void ggml_backend_ameva_profile_report(void) {
+    ameva_profile_report();
+    fflush(stderr);
+}
+
 // =============================================================================
 // Context, device limits, kernels, status buffer
 // =============================================================================
@@ -821,10 +826,21 @@ static int ameva_fa_find(uint32_t d, uint32_t dv, uint64_t rows) {
         const AmevaFaVariant& f = kAmevaFaVariants[i];
         if (d <= f.dmax && dv <= f.dmax) dmin = std::min(dmin, f.dmax);
     }
+    // Adreno: among the DMAX 128 tiles the two-rows-per-invocation one (appended last, see FA_VARIANTS in
+    // scripts/build_ameva_kernels.py; 1.3-1.5x on Adreno 650 and 830 at D 80 and 128, slower on Mali-G78),
+    // when a tile of it fills (token generation keeps the entry-2 tile: not measured with RPI 2). Everywhere else that
+    // entry is skipped, so the choice is the one before it was appended.
+    static const bool adreno = strstr(s_device_name, "Adreno") != nullptr;
+    auto rpi2_128 = [](const AmevaFaVariant& f) { return f.dmax == 128u && f.rpi == 2u; };
+    if (dmin == 128u && adreno) {
+        for (int i = 0; i < AMEVA_FA_VARIANT_COUNT; ++i) {
+            if (rpi2_128(kAmevaFaVariants[i]) && kAmevaFaVariants[i].bq <= rows) return i;
+        }
+    }
     int fewest = -1;
     for (int i = 0; i < AMEVA_FA_VARIANT_COUNT; ++i) {
         const AmevaFaVariant& f = kAmevaFaVariants[i];
-        if (f.dmax != dmin) continue;
+        if (f.dmax != dmin || rpi2_128(f)) continue;
         if (f.bq <= rows) return i;
         if (fewest < 0 || f.bq < kAmevaFaVariants[fewest].bq) fewest = i;
     }
@@ -4402,6 +4418,23 @@ static bool ameva_conv_prefers_vec4(void) {
     return pref == 1;
 }
 
+// BM64 tiles of ameva_conv (64 output positions per workgroup, 4 x 8 sums per invocation; vec4 staging only).
+// tests/ameva_conv_bench.cpp, 3x3 convolutions of the SD VAE, f16 weights (2026-11-03): Adreno 830 +16-18 %,
+// Mali-G78 +9-12 %, Turnip Adreno 650 7x slower (the larger register tile does not suit it). auto: on for the
+// measured gains (Adreno 8xx, Mali-G7x), off elsewhere. AMEVA_CONV_TILE=64 / 32 forces it (experiment).
+static bool ameva_conv_bm64(void) {
+    static const int pref = [] {
+        const char* e = getenv("AMEVA_CONV_TILE");
+        if (!e || !*e || !strcmp(e, "auto"))
+            return (strstr(s_device_name, "Adreno (TM) 8") || strstr(s_device_name, "Mali-G7")) &&
+                           !strstr(s_device_name, "Turnip") ? 1 : 0;
+        if (!strcmp(e, "64")) return 1;
+        if (!strcmp(e, "32")) return 0;
+        GGML_ABORT("ggml-ameva: AMEVA_CONV_TILE must be auto, 64 or 32 (got \"%s\")", e);
+    }();
+    return pref == 1;
+}
+
 // CONV_2D. The weights go into the scratch buffer in the K order of the kernel (one dispatch of ameva_conv_w, bit
 // patterns unchanged), then each batch element is convolved in slices of weight rows and output rows that keep a
 // dispatch under kDispatchMac. A source or weights above one binding take one such pass per window of channel
@@ -4441,7 +4474,12 @@ static const char* enc_conv_2d(AmevaRecorder& rec, const struct ggml_tensor* nod
     const uint64_t P = (uint64_t)g.OW * g.OH;
     const uint64_t SP = (uint64_t)g.W * g.H; // floats of one source channel
     const uint32_t qper = f32w ? 8u : 4u;    // Q vector elements per unit (ameva_qdecode.glsl QPER)
-    const uint32_t tiles_w = (g.OW + 31) / 32;
+    // BM64 only on rows of at least 128 positions: at 64 (the SD1.5 UNet's largest) a row is one BM64 tile, the grid
+    // halves and the S25 sampling was 4 % slower, while the VAE decode (rows 128-512) was 12 % faster (in-app A/B,
+    // 2026-11-03). Fastest with vec4 staging, which it takes wherever the source allows it (scalar BM64 elsewhere).
+    const bool bm64 = g.OW >= 128 && ameva_conv_bm64();
+    const uint32_t bm = bm64 ? 64u : 32u;
+    const uint32_t tiles_w = (g.OW + bm - 1) / bm;
     const uint32_t stride = g.s0 | g.s1 << 8 | 1u << 16, pad = g.p0 | g.p1 << 8;
     const AcBufferBinding bzero = { zero, 0, AMEVA_CONV_ZERO_BYTES };
 
@@ -4492,9 +4530,15 @@ static const char* enc_conv_2d(AmevaRecorder& rec, const struct ggml_tensor* nod
             }
             // Aligned vec4 staging needs the stride 1 and every vec4 that holds a source float inside the binding
             // (a binding that ends in a partial vec4 hides its last floats from a vec4 array)
-            const bool vec4 = g.s0 == 1 && ameva_conv_prefers_vec4() &&
+            const bool vec4 = g.s0 == 1 && (bm64 || ameva_conv_prefers_vec4()) &&
                               (((uint64_t)a_off + (uint64_t)cc * SP) * 4 + 15) / 16 * 16 <= bs.b.range;
-            const AmevaVkKernelId kid =
+            const AmevaVkKernelId kid = bm64 ?
+                (first ? (f32w ? (vec4 ? AMEVA_VK_CONV_F32_V64 : AMEVA_VK_CONV_F32_S64)
+                                : builtin ? (vec4 ? AMEVA_VK_CONV_F16U_V64 : AMEVA_VK_CONV_F16U_S64)
+                                          : (vec4 ? AMEVA_VK_CONV_F16_V64 : AMEVA_VK_CONV_F16_S64))
+                       : (f32w ? (vec4 ? AMEVA_VK_CONV_F32_V64_ACC : AMEVA_VK_CONV_F32_S64_ACC)
+                                : builtin ? (vec4 ? AMEVA_VK_CONV_F16U_V64_ACC : AMEVA_VK_CONV_F16U_S64_ACC)
+                                          : (vec4 ? AMEVA_VK_CONV_F16_V64_ACC : AMEVA_VK_CONV_F16_S64_ACC))) :
                 first ? (f32w ? (vec4 ? AMEVA_VK_CONV_F32_V : AMEVA_VK_CONV_F32_S)
                               : builtin ? (vec4 ? AMEVA_VK_CONV_F16U_V : AMEVA_VK_CONV_F16U_S)
                                         : (vec4 ? AMEVA_VK_CONV_F16_V : AMEVA_VK_CONV_F16_S))

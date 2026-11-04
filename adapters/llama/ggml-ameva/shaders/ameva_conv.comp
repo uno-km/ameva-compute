@@ -39,6 +39,10 @@
 // channel groups, which is a run of consecutive units of the whole kernel's K order, so the passes together add the
 // terms of an output in the order of the one-pass kernel. Every pass but the last gets the zero vector as bias. A
 // workgroup reads its outputs before its first barrier and writes them after its last.
+// BM64 (compile time): 64 output positions per tile instead of 32. An invocation stages 16 positions of its channel
+// and accumulates 4 weight rows x 8 positions, so each pair of shared-memory reads feeds twice the multiply-adds; the
+// grid has ceil(OW / 64) tiles along w (the host must use the same BM). The output goes through both tiles (64 x 64
+// floats); OUT_DIRECT and ABLATE are not available with BM64.
 // ABLATE=<n> (kernel tuning; such a kernel gives wrong results): 1 no padding mask, 2 (STAGE_VEC4) two aligned loads
 // without the shift, 3 no loads from the source, 4 as 3 with the output stage of ameva_qgemm (position-major, no
 // bias).
@@ -81,12 +85,23 @@ layout(push_constant) uniform PushConstants {
 } pc;
 
 #define BN 64u // weight rows per tile
-#define BM 32u // activation rows (output positions along w) per tile
+#if defined(BM64)
+#if defined(OUT_DIRECT) || defined(ABLATE)
+#error BM64 has neither OUT_DIRECT nor ABLATE
+#endif
+#define BM 64u // activation rows (output positions along w) per tile
+#define SPI 16u // positions staged per invocation and unit
+#else
+#define BM 32u
+#define SPI 8u
+#endif
+#define AV (BM / 4u) // vec4 per k row of the activation tile
 
-// tile_w[k * 16 + n / 4][n % 4] = W[n0 + n][k0 + k], tile_a[k * 8 + m / 4][m % 4] = A[m0 + m][k0 + k];
-// after the last unit, tile_w[n * 8 + m / 4][m % 4] = output (n0 + n, m0 + m)
-shared vec4 tile_w[32 * (BN / 4u)];
-shared vec4 tile_a[32 * (BM / 4u)];
+// tile_w(k * 16 + n / 4)[n % 4] = W[n0 + n][k0 + k], tile_a(k * AV + m / 4)[m % 4] = A[m0 + m][k0 + k];
+// after the last unit, tsh[n * AV + m / 4][m % 4] = output (n0 + n, m0 + m) (BM64: across both tiles, one array)
+shared vec4 tsh[32u * (BN / 4u) + 32u * AV];
+#define tile_w(i) tsh[(i)]
+#define tile_a(i) tsh[32u * (BN / 4u) + (i)]
 
 ivec3 unpack3(uint p) { return ivec3(p & 0xFFu, (p >> 8u) & 0xFFu, (p >> 16u) & 0xFFu); }
 #if defined(STAGE_VEC4)
@@ -117,23 +132,32 @@ void main() {
     // tile from one line of the source. org = source (w, h, t) of the first of them at tap offset (0, 0, 0);
     // positions past OW are staged like any other and never stored
     const uint wo = tid & 3u, ci = tid >> 2u;
-    const uint ta = ci * 8u + 2u * wo;
+    const uint ta = ci * AV + (SPI / 4u) * wo;
     const ivec3 strd = unpack3(pc.stride);
-    const ivec3 org = ivec3(int(ow0 + 8u * wo), int(oh), int(ot)) * strd - unpack3(pc.pad);
-    // accumulation: rows 4 tn .. 4 tn + 3 of the tile, activation rows 4 tm .. 4 tm + 3
+    const ivec3 org = ivec3(int(ow0 + SPI * wo), int(oh), int(ot)) * strd - unpack3(pc.pad);
+    // accumulation: rows 4 tn .. 4 tn + 3 of the tile, activation rows 4 tm .. 4 tm + 3 (BM64: 8 tm .. 8 tm + 7)
     const uint tn = tid & 15u, tm = tid >> 4u;
     vec4 acc0 = vec4(0.0), acc1 = vec4(0.0), acc2 = vec4(0.0), acc3 = vec4(0.0);
+#if defined(BM64)
+    vec4 acc4 = vec4(0.0), acc5 = vec4(0.0), acc6 = vec4(0.0), acc7 = vec4(0.0);
+#endif
 #if defined(ACCUM)
-    // (weight row n0 + 4 tn + i, position ow0 + 4 tm + j of this row) as stored by the pass before
+    // (weight row n0 + 4 tn + i, position ow0 + (BM / 8) tm + j of this row) as stored by the pass before
     [[unroll]] for (uint i = 0u; i < 4u; ++i) {
         const uint n = n0 + 4u * tn + i;
-        const uint owb = ow0 + 4u * tm;
+        const uint owb = ow0 + (BM / 8u) * tm;
         if (n < pc.N) {
             const uint o = pc.d_off + pc.plane * n + pc.OW * row + owb;
             if (owb + 0u < pc.OW) acc0[i] = dst[o + 0u];
             if (owb + 1u < pc.OW) acc1[i] = dst[o + 1u];
             if (owb + 2u < pc.OW) acc2[i] = dst[o + 2u];
             if (owb + 3u < pc.OW) acc3[i] = dst[o + 3u];
+#if defined(BM64)
+            if (owb + 4u < pc.OW) acc4[i] = dst[o + 4u];
+            if (owb + 5u < pc.OW) acc5[i] = dst[o + 5u];
+            if (owb + 6u < pc.OW) acc6[i] = dst[o + 6u];
+            if (owb + 7u < pc.OW) acc7[i] = dst[o + 7u];
+#endif
         }
     }
 #endif
@@ -146,15 +170,15 @@ void main() {
                    u - b * UPB, w);
             [[unroll]] for (uint i = 0u; i < 8u; ++i) {
                 const uint k = 4u * (i & 3u) + 16u * (i >> 2u); // w[i] holds weights k .. k + 3 of the unit
-                tile_w[(k + 0u) * 16u + dcol][dcomp] = w[i].x;
-                tile_w[(k + 1u) * 16u + dcol][dcomp] = w[i].y;
-                tile_w[(k + 2u) * 16u + dcol][dcomp] = w[i].z;
-                tile_w[(k + 3u) * 16u + dcol][dcomp] = w[i].w;
+                tile_w((k + 0u) * 16u + dcol)[dcomp] = w[i].x;
+                tile_w((k + 1u) * 16u + dcol)[dcomp] = w[i].y;
+                tile_w((k + 2u) * 16u + dcol)[dcomp] = w[i].z;
+                tile_w((k + 3u) * 16u + dcol)[dcomp] = w[i].w;
             }
         }
 #if defined(ABLATE) && ABLATE >= 3
-        tile_a[ta] = vec4(1.0);
-        tile_a[ta + 1u] = vec4(1.0);
+        tile_a(ta) = vec4(1.0);
+        tile_a(ta + 1u) = vec4(1.0);
 #else
         const uint unit = units[pc.u_off + u];
         const ivec3 p = org + unpack3(unit);
@@ -175,14 +199,23 @@ void main() {
         const vec4 x0 = shift4(v0, v1, g & 3), x1 = shift4(v1, v2, g & 3);
 #endif
 #if defined(ABLATE) && ABLATE == 1
-        tile_a[ta] = x0;
-        tile_a[ta + 1u] = x1;
+        tile_a(ta) = x0;
+        tile_a(ta + 1u) = x1;
 #else
-        tile_a[ta] = mix(vec4(0.0), x0, lessThan(uvec4(p.x + ivec4(0, 1, 2, 3)), uvec4(w_end)));
-        tile_a[ta + 1u] = mix(vec4(0.0), x1, lessThan(uvec4(p.x + ivec4(4, 5, 6, 7)), uvec4(w_end)));
+        tile_a(ta) = mix(vec4(0.0), x0, lessThan(uvec4(p.x + ivec4(0, 1, 2, 3)), uvec4(w_end)));
+        tile_a(ta + 1u) = mix(vec4(0.0), x1, lessThan(uvec4(p.x + ivec4(4, 5, 6, 7)), uvec4(w_end)));
+#endif
+#if defined(BM64)
+        {
+            const vec4 v3 = a4[clamp((g >> 2) + 3, 0, last)];
+            const vec4 v4 = a4[clamp((g >> 2) + 4, 0, last)];
+            const vec4 x2 = shift4(v2, v3, g & 3), x3 = shift4(v3, v4, g & 3);
+            tile_a(ta + 2u) = mix(vec4(0.0), x2, lessThan(uvec4(p.x + ivec4(8, 9, 10, 11)), uvec4(w_end)));
+            tile_a(ta + 3u) = mix(vec4(0.0), x3, lessThan(uvec4(p.x + ivec4(12, 13, 14, 15)), uvec4(w_end)));
+        }
 #endif
 #else
-        [[unroll]] for (int e = 0; e < 2; ++e) {
+        [[unroll]] for (int e = 0; e < int(SPI / 4u); ++e) {
             vec4 x;
             [[unroll]] for (int j = 0; j < 4; ++j) {
                 const int iw = p.x + (4 * e + j) * strd.x;
@@ -193,14 +226,23 @@ void main() {
                 x[j] = uint(iw) < w_end ? val : 0.0;
 #endif
             }
-            tile_a[ta + uint(e)] = x;
+            tile_a(ta + uint(e)) = x;
         }
 #endif
 #endif
         barrier();
         [[unroll]] for (uint k = 0u; k < 32u; ++k) {
-            const vec4 wv = tile_w[k * 16u + tn];
-            const vec4 av = tile_a[k * 8u + tm];
+            const vec4 wv = tile_w(k * 16u + tn);
+#if defined(BM64)
+            const vec4 av = tile_a(k * AV + 2u * tm);
+            const vec4 bv = tile_a(k * AV + 2u * tm + 1u);
+            acc4 = fma(wv, vec4(bv.x), acc4);
+            acc5 = fma(wv, vec4(bv.y), acc5);
+            acc6 = fma(wv, vec4(bv.z), acc6);
+            acc7 = fma(wv, vec4(bv.w), acc7);
+#else
+            const vec4 av = tile_a(k * AV + tm);
+#endif
             acc0 = fma(wv, vec4(av.x), acc0);
             acc1 = fma(wv, vec4(av.y), acc1);
             acc2 = fma(wv, vec4(av.z), acc2);
@@ -241,16 +283,21 @@ void main() {
     // through the weight tile (every invocation is past the barrier that ends the last unit); then invocation t
     // writes positions 16 (t % 2) .. + 15 of the tile's weight row t / 2: one run of one plane
     [[unroll]] for (uint i = 0u; i < 4u; ++i) {
-        tile_w[(4u * tn + i) * 8u + tm] = vec4(acc0[i], acc1[i], acc2[i], acc3[i]);
+#if defined(BM64)
+        tsh[(4u * tn + i) * AV + 2u * tm] = vec4(acc0[i], acc1[i], acc2[i], acc3[i]);
+        tsh[(4u * tn + i) * AV + 2u * tm + 1u] = vec4(acc4[i], acc5[i], acc6[i], acc7[i]);
+#else
+        tsh[(4u * tn + i) * AV + tm] = vec4(acc0[i], acc1[i], acc2[i], acc3[i]);
+#endif
     }
     barrier();
     const uint n = n0 + (tid >> 1u);
     if (n < pc.N) {
         const float b = bias[pc.b_off + n];
-        const uint m0 = ow0 + 16u * (tid & 1u);
+        const uint m0 = ow0 + (BM / 2u) * (tid & 1u);
         const uint o = pc.d_off + pc.plane * n + pc.OW * row + m0;
-        [[unroll]] for (uint q = 0u; q < 4u; ++q) {
-            const vec4 r = tile_w[(tid >> 1u) * 8u + 4u * (tid & 1u) + q] + b;
+        [[unroll]] for (uint q = 0u; q < BM / 8u; ++q) {
+            const vec4 r = tsh[(tid >> 1u) * AV + (BM / 8u) * (tid & 1u) + q] + b;
             if (m0 + 4u * q + 0u < pc.OW) dst[o + 4u * q + 0u] = r.x;
             if (m0 + 4u * q + 1u < pc.OW) dst[o + 4u * q + 1u] = r.y;
             if (m0 + 4u * q + 2u < pc.OW) dst[o + 4u * q + 2u] = r.z;

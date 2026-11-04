@@ -144,7 +144,14 @@ VK_ONLY = ([("conv_%s_%s" % (w, st), "conv", wd + sd)
            [("conv_%s_%s_acc" % (w, st), "conv", wd + sd + ["ACCUM"])
             for w, wd in (("f16", ["TYPE_F16"]), ("f16u", ["TYPE_F16", "F16_UNPACK"]), ("f32", ["TYPE_F32"]))
             for st, sd in (("s", []), ("v", ["STAGE_VEC4"]))] +
-           [("timestep_embd", "timestep_embd", [])])
+           [("timestep_embd", "timestep_embd", [])] +
+           # BM64: 64 output positions per tile (4 x 8 sums per invocation), staging vec4 or scalar. Faster on Adreno 830
+           # (+16-18 %) and Mali-G78 (+9-12 %), 7x slower on Turnip Adreno 650 (tests/ameva_conv_bench.cpp,
+           # 2026-11-03); the engine selects it per device (ameva_conv_bm64).
+           [("conv_%s_%s64%s" % (w, st, acc), "conv", wd + sd + ["BM64"] + ad)
+            for acc, ad in (("", []), ("_acc", ["ACCUM"]))
+            for st, sd in (("s", []), ("v", ["STAGE_VEC4"]))
+            for w, wd in (("f16", ["TYPE_F16"]), ("f16u", ["TYPE_F16", "F16_UNPACK"]), ("f32", ["TYPE_F32"]))])
 
 # the licence header of the generated files (kept identical to the other sources of the repository)
 LICENSE_HEADER = ["/**", " * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.",
@@ -162,7 +169,14 @@ LICENSE_HEADER = ["/**", " * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All 
 #   (128, 16, 32, 1, 1) 27.0 KiB, (256, 8, 16, 1, 1) 25.3 KiB: not re-measured with RPI > 1.
 # AMEVA_FA_VARIANT=<index> forces one variant (experiment). AMEVA_FA_VARIANTS="D:BQ:BK:RPI:DUNROLL,..." replaces the
 # list for an experiment build; the header then says so.
-FA_VARIANTS = [(64, 32, 16, 2, 1), (64, 16, 32, 1, 1), (128, 16, 32, 1, 1), (256, 8, 16, 1, 1)]
+#   (128, 16, 32, 2, 1) 27.5 KiB, appended 2026-11-04 (tests/ameva_fa_bench.cpp, f16 K/V, against (128, 16, 32, 1, 1)):
+#                       D 80 (SD1.5 at 32x32) Turnip Adreno 650 152 -> 102 ms, Adreno 830 48 -> 37 ms; D 128 (prompt 512 /
+#                       2048) Adreno 650 50.6 -> 34.1 / 795 -> 534 ms, Adreno 830 16.9 -> 13.4 / 256 -> 191 ms; Mali-G78
+#                       slower (D 80 191 -> 227, D 128 62.5 -> 75.1 ms). Taken in place of entry 2 on Adreno only
+#                       (ameva_fa_find). Also measured, not kept: (64, 32, 16, 4, 1), (64, 64, 16, 4, 1), (64, 32, 32, 2, 1),
+#                       (64, 16, 16, 2, 1), (64, 32, 16, 2, 2) at D 40 (none faster than entry 0 on S20, S21 or S25) and
+#                       (128, 32, 16, 2, 1) (Adreno 830 D 80 32.9 ms, Adreno 650 133 ms).
+FA_VARIANTS = [(64, 32, 16, 2, 1), (64, 16, 32, 1, 1), (128, 16, 32, 1, 1), (256, 8, 16, 1, 1), (128, 16, 32, 2, 1)]
 
 
 def fa_variants():

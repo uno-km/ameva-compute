@@ -60,6 +60,10 @@ conv_q8_0_va4 ConvQ80Va4 ameva_conv.comp TYPE_Q8_0 STAGE_VEC4 ABLATE=4
 conv_q8_0_vd ConvQ80Vd ameva_conv.comp TYPE_Q8_0 STAGE_VEC4 OUT_DIRECT
 conv_f16_va4 ConvF16Va4 ameva_conv.comp TYPE_F16 STAGE_VEC4 ABLATE=4
 conv_f16_vd ConvF16Vd ameva_conv.comp TYPE_F16 STAGE_VEC4 OUT_DIRECT
+conv_q8_0_v64 ConvQ80V64 ameva_conv.comp TYPE_Q8_0 STAGE_VEC4 BM64
+conv_q8_0_s64 ConvQ80S64 ameva_conv.comp TYPE_Q8_0 BM64
+conv_f16_v64 ConvF16V64 ameva_conv.comp TYPE_F16 STAGE_VEC4 BM64
+conv_f16_s64 ConvF16S64 ameva_conv.comp TYPE_F16 BM64
 qgemm_q8_0_a1 QgemmQ80A1 ameva_qgemm.comp TYPE_Q8_0 ABLATE=1
 qgemm_q8_0_a2 QgemmQ80A2 ameva_qgemm.comp TYPE_Q8_0 ABLATE=2
 qgemm_f16_a1 QgemmF16A1 ameva_qgemm.comp TYPE_F16 ABLATE=1

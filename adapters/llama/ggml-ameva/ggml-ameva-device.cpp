@@ -371,11 +371,19 @@ static size_t ggml_backend_ameva_reg_get_device_count(ggml_backend_reg_t reg) {
 
 static ggml_backend_dev_t ggml_backend_ameva_reg_get_device(ggml_backend_reg_t reg, size_t index);
 
+static void* ggml_backend_ameva_reg_get_proc_address(ggml_backend_reg_t reg, const char* name) {
+    (void)reg;
+    if (name != nullptr && strcmp(name, "ggml_backend_ameva_profile_report") == 0) {
+        return (void*)ggml_backend_ameva_profile_report;
+    }
+    return nullptr;
+}
+
 static const struct ggml_backend_reg_i ggml_backend_ameva_reg_i = {
     .get_name         = ggml_backend_ameva_reg_get_name,
     .get_device_count = ggml_backend_ameva_reg_get_device_count,
     .get_device       = ggml_backend_ameva_reg_get_device,
-    .get_proc_address = nullptr,
+    .get_proc_address = ggml_backend_ameva_reg_get_proc_address,
 };
 
 static struct ggml_backend_reg g_ameva_reg = {

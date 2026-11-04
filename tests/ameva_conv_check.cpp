@@ -106,6 +106,10 @@ int main() {
         { "3x3 100->70 stride 2 (four channel groups)", GGML_TYPE_F16, 30, 34, 100, 70, 1, 3, 3, 2, 2, 1, 1, 1, 1, 1.0f },
         { "1x1 96->64 (three channel groups)", GGML_TYPE_F16, 32, 31, 96, 64, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1.0f },
         { "3x3 33->96 f32 (weights of two channel groups)", GGML_TYPE_F32, 20, 12, 33, 96, 1, 3, 3, 1, 1, 1, 1, 1, 1, 1.0f },
+        // rows of 130 and 160 positions: the BM64 tiles (ameva_conv_bm64, rows >= 128) with a partial last tile, in
+        // channel-group passes and the result in slices of its planes under the 131072-byte limit, and whole
+        { "3x3 70->40 width 130 (BM64 tiles in channel-group windows)", GGML_TYPE_F16, 130, 7, 70, 40, 1, 3, 3, 1, 1, 1, 1, 1, 1, 1.0f },
+        { "3x3 64->72 width 160 f32 kernel (BM64 tiles)", GGML_TYPE_F32, 160, 20, 64, 72, 1, 3, 3, 1, 1, 1, 1, 1, 1, 1.0f },
         // ggml gives one output row although the dilated kernel (9 rows) is larger than the padded source (5 rows):
         // every tap is outside, the result is zero
         { "1x3 dilation 4 on height 1 (kernel larger than the padded source)", GGML_TYPE_F16, 9, 1, 8, 4, 1, 1, 3, 1, 5, 0, 2, 1, 4, 1.0f },
