@@ -171,3 +171,11 @@ Written 2026-11-03 while integrating the SDK into AmfyUI (`dev/app/amfyui`). Not
   case the SDK passes `strength_as_noise_level=true,force_first_sigma=true`, so the single step starts at the
   strength's noise level. Note: SDXS still does not denoise from an intermediate level (grainy results at 0.3 and
   0.55); AmfyUI refuses photo conversion with it.
+
+### Measured on Mali-G68 (A35, A53), 2026-11-05
+
+- Streamed diffusion tier, Anything q8 + IP-Adapter, 512x512, 4 steps (AmfyUI MIDDLE comic cut): the UNet runs on
+  the GPU (budgets 1196-1460 MiB). Per cut A35 212-214 s (was 230-241 s on the CPU), A53 232 s (was 342-350 s).
+- BM64 convolution tile, VAE decode: A35 41.0 -> 36.7 s, A53 57.0 / 57.2 -> 50.5 / 50.3 s; Mali-G68 now in the auto
+  list (in-app A53 with the auto choice: 50.4 s). Sampling unchanged (the UNet keeps the 32 tile).
+- Diffusion flash attention: A53 sampling 123.7-127.6 s with it, 183.6 s without. Kept on.

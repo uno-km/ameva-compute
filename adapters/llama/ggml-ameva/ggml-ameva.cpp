@@ -4420,13 +4420,15 @@ static bool ameva_conv_prefers_vec4(void) {
 
 // BM64 tiles of ameva_conv (64 output positions per workgroup, 4 x 8 sums per invocation; vec4 staging only).
 // tests/ameva_conv_bench.cpp, 3x3 convolutions of the SD VAE, f16 weights (2026-11-03): Adreno 830 +16-18 %,
-// Mali-G78 +9-12 %, Turnip Adreno 650 7x slower (the larger register tile does not suit it). auto: on for the
-// measured gains (Adreno 8xx, Mali-G7x), off elsewhere. AMEVA_CONV_TILE=64 / 32 forces it (experiment).
+// Mali-G78 +9-12 %, Turnip Adreno 650 7x slower (the larger register tile does not suit it). In-app SD1.5 VAE decode
+// with AMEVA_CONV_TILE=64 on Mali-G68 (2026-11-05): A35 41.0 -> 36.7 s, A53 57.0 / 57.2 -> 50.5 / 50.3 s. auto: on
+// for the measured gains (Adreno 8xx, Mali-G7x, Mali-G68), off elsewhere. AMEVA_CONV_TILE=64 / 32 forces it.
 static bool ameva_conv_bm64(void) {
     static const int pref = [] {
         const char* e = getenv("AMEVA_CONV_TILE");
         if (!e || !*e || !strcmp(e, "auto"))
-            return (strstr(s_device_name, "Adreno (TM) 8") || strstr(s_device_name, "Mali-G7")) &&
+            return (strstr(s_device_name, "Adreno (TM) 8") || strstr(s_device_name, "Mali-G7") ||
+                    strstr(s_device_name, "Mali-G68")) &&
                            !strstr(s_device_name, "Turnip") ? 1 : 0;
         if (!strcmp(e, "64")) return 1;
         if (!strcmp(e, "32")) return 0;
