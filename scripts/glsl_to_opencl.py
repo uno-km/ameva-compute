@@ -477,7 +477,27 @@ def _gather_to_vload4(text):
     return _GATHER_U.sub(lambda m: "vload4(0, %s + (%s))" % (m.group(1), m.group(2)), text)
 
 
-def translate(src):
+_UNROLL_MARK = "AMEVA_CF_UNROLL"
+_NOUNROLL_MARK = "AMEVA_CF_DONT_UNROLL"
+
+
+def _emit_unroll(text, unroll):
+    """The marks of [[unroll]] / [[dont_unroll]] -> a pragma on a line of its own before the loop they precede
+    (unroll True), or nothing (unroll False)."""
+    def one(mark, pragma, t):
+        def rep(m):
+            if not re.match(r"\s*for\s*\(", t[m.end():]):
+                _fail("%s not followed by a for loop" % mark)
+            return ("\n%s\n%s" % (pragma, m.group(1))) if unroll else m.group(1)
+        return re.sub(r"([ \t]*)%s[ \t]*" % mark, rep, t)
+    text = one(_UNROLL_MARK, "#pragma unroll", text)
+    text = one(_NOUNROLL_MARK, "#pragma unroll 1", text)
+    if _UNROLL_MARK in text or _NOUNROLL_MARK in text:
+        _fail("an unroll mark is left in the translation")
+    return re.sub(r"\n[ \t]*\n+", "\n", text)
+
+
+def translate(src, unroll=False):
     """(OpenCL C source without the prelude, binding count, push-constant bytes, local size, takes binding ranges) of
     a preprocessed AMEVA compute shader"""
     src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
@@ -495,7 +515,18 @@ def translate(src):
             _fail("preprocessor line left in the source: %r" % s)
         kept.append(line)
     src = "\n".join(kept)
-    src = re.sub(r"\[\[[^\]]*\]\]", "", src)  # [[unroll]] and other control-flow attributes
+    # [[unroll]] / [[dont_unroll]] (GL_EXT_control_flow_attributes) on a for loop: kept as a mark through the
+    # translation; with unroll=True written out as "#pragma unroll" / "#pragma unroll 1" before the loop, otherwise
+    # dropped (_emit_unroll). The Mali OpenCL compiler (S21, 2026-11-07, ameva-foundation N-20261107-opencl-conv-gap)
+    # does what the pragma says, which is not what a Vulkan compiler does with the attribute (a hint): without it the
+    # 32-step inner loop of ameva_conv stays rolled (1.13-1.16x the Vulkan GPU time, 0.89-0.95x with it), but with it
+    # on every kernel the BM64 convolution took 8.3x and the LLM prompt 1.16x their time. So it is per kernel, where
+    # measured (scripts/build_ameva_kernels.py).
+    src = re.sub(r"\[\[\s*unroll\s*\]\]", " " + _UNROLL_MARK + " ", src)
+    src = re.sub(r"\[\[\s*dont_unroll\s*\]\]", " " + _NOUNROLL_MARK + " ", src)
+    m = re.search(r"\[\[[^\]]*\]\]", src)
+    if m:
+        _fail("control-flow attribute without a translation: %s" % m.group(0))
 
     m = re.search(r"layout\s*\(\s*local_size_x\s*=\s*(\d+)\s*,\s*local_size_y\s*=\s*(\d+)\s*,\s*local_size_z\s*=\s*"
                   r"(\d+)\s*\)\s*in\s*;", src)
@@ -686,6 +717,7 @@ def translate(src):
     text = "\n".join(o for o in out if o) + "\n"
     text = re.sub(r"\n[ \t]*\n+", "\n", text)
     text = _gather_to_vload4(text)
+    text = _emit_unroll(text, unroll)
     if precise:
         text = "#pragma OPENCL FP_CONTRACT OFF\n" + text
     return text, len(buffers), 4 * len(push_members or []), local, uses_ranges

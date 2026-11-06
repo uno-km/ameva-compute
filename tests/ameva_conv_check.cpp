@@ -120,7 +120,12 @@ int main() {
     const int64_t win0 = ggml_backend_ameva_get_window_node_count();
     const char* fuse_env = getenv("AMEVA_FUSE");
     const int fuse_on = fuse_env && !strcmp(fuse_env, "0") ? 0 : 1; // the engine's default is on
+    // AMEVA_CONV_CHECK_TIME_ONLY=1: no exactness case, only the timing below (so that the backend's per-kind GPU time,
+    // AMEVA_PROFILE=2, holds the timed convolutions alone). The run then reports no pass: check a kernel without it.
+    const char* only_env = getenv("AMEVA_CONV_CHECK_TIME_ONLY");
+    const bool time_only = only_env && !strcmp(only_env, "1");
     for (const Case& c : cases) {
+        if (time_only) break;
         total += 2; // without and with a bias
         struct ggml_init_params ip = { 16 * ggml_tensor_overhead() + 2 * ggml_graph_overhead(), nullptr, true };
         struct ggml_context* ctx = ggml_init(ip);
@@ -229,8 +234,8 @@ int main() {
     }
 
     // a source that is a permuted view is not contiguous: the op must be declined, not computed some other way
-    ++total;
-    {
+    if (!time_only) {
+        ++total;
         struct ggml_init_params ip = { 16 * ggml_tensor_overhead(), nullptr, true };
         struct ggml_context* ctx = ggml_init(ip);
         struct ggml_tensor* a = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, 3, 3, 8, 8);
@@ -242,9 +247,15 @@ int main() {
         ggml_free(ctx);
     }
     // AMEVA_CONV_CHECK_TIME="W,H,IC,OC,K[ W,H,IC,OC,K...]": wall time of graph_compute for a K x K convolution with
-    // an f16 kernel and padding K / 2 (one run that is not counted, then four). Timing only: these outputs are not
-    // compared, the cases above are the check.
+    // an f16 kernel and padding K / 2 (one run that is not counted, then AMEVA_CONV_CHECK_TIME_ITERS, default four;
+    // the mean and the fastest are printed). Timing only: these outputs are not compared, the cases above are the check.
     if (const char* spec = getenv("AMEVA_CONV_CHECK_TIME")) {
+        const char* it_env = getenv("AMEVA_CONV_CHECK_TIME_ITERS");
+        const int iters = it_env ? atoi(it_env) : 4;
+        if (iters < 1 || iters > 1000) {
+            fprintf(stderr, "AMEVA_CONV_CHECK_TIME_ITERS must be 1..1000 (got \"%s\")\n", it_env);
+            return 2;
+        }
         for (const char* p = spec; *p;) {
             int W = 0, H = 0, IC = 0, OC = 0, K = 0, used = 0;
             if (sscanf(p, "%d,%d,%d,%d,%d%n", &W, &H, &IC, &OC, &K, &used) != 5 || W < 1 || H < 1 || IC < 1 || OC < 1 || K < 1) {
@@ -272,23 +283,32 @@ int main() {
             ggml_backend_tensor_set(b, x.data(), 0, x.size() * sizeof(float));
             struct ggml_cgraph* gf = ggml_new_graph(ctx);
             ggml_build_forward_expand(gf, d);
-            double ms = 0;
+            double ms = 0, best = 0;
             bool ok = true;
-            for (int it = -1; it < 4 && ok; ++it) {
+            for (int it = -1; it < iters && ok; ++it) {
                 struct timespec t0, t1;
                 clock_gettime(CLOCK_MONOTONIC, &t0);
                 ok = ggml_backend_graph_compute(be, gf) == GGML_STATUS_SUCCESS;
                 clock_gettime(CLOCK_MONOTONIC, &t1);
-                if (it >= 0) ms += (double)(t1.tv_sec - t0.tv_sec) * 1e3 + (double)(t1.tv_nsec - t0.tv_nsec) * 1e-6;
+                const double t = (double)(t1.tv_sec - t0.tv_sec) * 1e3 + (double)(t1.tv_nsec - t0.tv_nsec) * 1e-6;
+                if (it >= 0) {
+                    ms += t;
+                    if (it == 0 || t < best) best = t;
+                }
             }
             const double gflop = 2.0 * (double)d->ne[0] * (double)d->ne[1] * OC * (double)IC * K * K * 1e-9;
-            if (ok) printf("CONV_TIME %dx%dx%d->%d %dx%d f16: %.1f ms per graph_compute (%.2f GFLOP, %.1f GFLOPS)\n", W, H, IC, OC,
-                           K, K, ms / 4, gflop, gflop / (ms / 4 * 1e-3));
+            if (ok) printf("CONV_TIME %dx%dx%d->%d %dx%d f16: %.1f ms per graph_compute, fastest %.2f ms of %d (%.2f GFLOP, %.1f GFLOPS)\n",
+                           W, H, IC, OC, K, K, ms / iters, best, iters, gflop, gflop / (ms / iters * 1e-3));
             else printf("CONV_TIME %dx%dx%d->%d %dx%d: graph_compute failed\n", W, H, IC, OC, K, K);
             ggml_backend_buffer_free(buf);
             ggml_free(ctx);
             if (!ok) return 1;
         }
+    }
+    if (time_only) {
+        printf("CONV_CHECK time only (AMEVA_CONV_CHECK_TIME_ONLY=1): no exactness case ran\n");
+        ggml_backend_free(be);
+        return 0;
     }
     const int dec = ggml_backend_ameva_get_conv_f16_decoder();
     const int64_t windowed = ggml_backend_ameva_get_window_node_count() - win0;

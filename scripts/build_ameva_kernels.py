@@ -254,7 +254,7 @@ def source_info(path):
     return len(bindings), 4 * members, int(ls.group(1)) if ls else None
 
 
-def compile_module(args, src, defines, out, cl, local_size=None):
+def compile_module(args, src, defines, out, cl, local_size=None, cl_unroll=False):
     """SPIR-V of one kernel variant, and its OpenCL C translation appended to cl (the same variant, the same order);
     cl None: SPIR-V only. local_size: the (x, y, z) the defines give a source that does not spell its local size
     out."""
@@ -267,7 +267,9 @@ def compile_module(args, src, defines, out, cl, local_size=None):
     if cl is None:
         return data, (int(m.group(1)) if m else None)
     try:
-        text, nbind, npush, local, _ = glsl_to_opencl.translate(glsl_to_opencl.preprocess(args.glslang, src, defines))
+        # cl_unroll: the OpenCL C keeps the source's [[unroll]] / [[dont_unroll]] as pragmas (glsl_to_opencl.translate)
+        text, nbind, npush, local, _ = glsl_to_opencl.translate(glsl_to_opencl.preprocess(args.glslang, src, defines),
+                                                                unroll=cl_unroll)
     except glsl_to_opencl.TranslateError as e:
         fail("%s %s: OpenCL C translation: %s" % (os.path.basename(src), " ".join(defines), e))
     sbind, spush, slocal = source_info(src)
@@ -517,7 +519,11 @@ def main():
             if npush > 128:
                 fail("%s: %d push-constant bytes exceed the runtime limit of 128" % (name, npush))
             spv = os.path.join(tmp, "%s.spv" % name)
-            data, rsize = compile_module(args, src, defines, spv, cl["vk"])
+            # loop pragmas in the OpenCL C only where measured faster: the 32-position convolution tile (S21, GPU time
+            # 0.79-0.82x of the rolled translation, 2026-11-07). On every kernel they made the BM64 tile 8.3x and the
+            # LLM prompt 1.16x slower (ameva-foundation N-20261107-opencl-conv-gap).
+            cl_unroll = stem == "conv" and "BM64" not in defines
+            data, rsize = compile_module(args, src, defines, spv, cl["vk"], cl_unroll=cl_unroll)
             if rsize is not None and rsize != npush:
                 fail("%s: reflection says %d push-constant bytes, source %d" % (name, rsize, npush))
             var = "kAmevaVk_%s" % name
