@@ -461,6 +461,22 @@ def _rewrite_vector_subscripts(text, type_at, base=0):
             pos = close + 1
 
 
+# Four scalar loads of consecutive words, X[i], X[i + 1u], X[i + 2u], X[i + 3u], gathered into one vector: one vload4
+# (alignment of one word, as the scalar loads). Same values, same arithmetic. The Mali OpenCL compiler does not merge
+# these loads by itself, its Vulkan compiler does: ameva_mm f32 on the Galaxy S21 (Mali-G78), attention shape
+# 1024x40, 26.8 ms per dispatch as four scalar loads against 6.7 ms as vload4 (Vulkan 6.6 ms), images bit-equal
+# (2026-11-06, ameva-foundation research note N-20261106-opencl-conv-translation, RQ-13).
+_GATHER_IDX = r"(\w+)\[([^\[\]\n]+?)\]"
+_GATHER_U2F = re.compile(r"glsl_vec4\(glsl_uintBitsToFloat\(%s\), glsl_uintBitsToFloat\(\1\[\2 \+ 1u\]\), "
+                         r"glsl_uintBitsToFloat\(\1\[\2 \+ 2u\]\), glsl_uintBitsToFloat\(\1\[\2 \+ 3u\]\)\)" % _GATHER_IDX)
+_GATHER_U = re.compile(r"glsl_uvec4\(%s, \1\[\2 \+ 1u\], \1\[\2 \+ 2u\], \1\[\2 \+ 3u\]\)" % _GATHER_IDX)
+
+
+def _gather_to_vload4(text):
+    text = _GATHER_U2F.sub(lambda m: "as_float4(vload4(0, %s + (%s)))" % (m.group(1), m.group(2)), text)
+    return _GATHER_U.sub(lambda m: "vload4(0, %s + (%s))" % (m.group(1), m.group(2)), text)
+
+
 def translate(src):
     """(OpenCL C source without the prelude, binding count, push-constant bytes, local size, takes binding ranges) of
     a preprocessed AMEVA compute shader"""
@@ -669,6 +685,7 @@ def translate(src):
             out.append("%s %s(%s) {%s}" % (f.ret, f.name, ", ".join((ctx_decl if f.needs_ctx else []) + params), body))
     text = "\n".join(o for o in out if o) + "\n"
     text = re.sub(r"\n[ \t]*\n+", "\n", text)
+    text = _gather_to_vload4(text)
     if precise:
         text = "#pragma OPENCL FP_CONTRACT OFF\n" + text
     return text, len(buffers), 4 * len(push_members or []), local, uses_ranges
