@@ -33,11 +33,11 @@
   per 256 elements (shaders/ameva_quant_a8b.comp, an op kernel). No shared memory: an invocation owns DRW weight
   rows x DRA activation rows. One variant per weight type and layout (DRW, DRA, local size).
 
-* SPIR-V-only kernels (VK_ONLY: shaders/ameva_conv.comp, the convolution without a column matrix, per weight form
-  and staging, shaders/ameva_conv_w.comp, which brings the weights into its K order, and the two passes of
-  GROUP_NORM, shaders/ameva_cnorm_stat.comp and shaders/ameva_cnorm.comp): scripts/glsl_to_opencl.py does not
-  translate them yet, so they have no entry in the OpenCL C header and the engine declines their ops on the OpenCL
-  backend.
+* VK_ONLY kernels (named for their history: SPIR-V only until 2026-11-06): shaders/ameva_conv.comp, the
+  convolution without a column matrix, per weight form and staging, shaders/ameva_conv_w.comp, which brings the
+  weights into its K order, the two passes of GROUP_NORM, shaders/ameva_cnorm_stat.comp and shaders/ameva_cnorm.comp,
+  and shaders/ameva_timestep_embd.comp. They have their own enum and table (kAmevaVkKernels) and, like every other
+  family, an OpenCL C table in the same order (kAmevaClVk).
 
 For every module: glslangValidator -V (vulkan1.0), spirv-val, SHA-256 (pinned by the runtime at kernel creation),
 binding count (from the source's layout declarations), push-constant size (counted from the source's push-constant
@@ -294,7 +294,7 @@ def c_string(text):
 # OpenCL C tables of ggml_ameva_kernels_cl.h: (key in cl, table name), in the order of the SPIR-V tables
 CL_TABLES = [("qmm", "kAmevaClQmm"), ("qmv", "kAmevaClQmv"), ("mali_qmv", "kAmevaClMaliQmv"),
              ("qgemm", "kAmevaClQgemm"), ("mmq", "kAmevaClMmq"), ("mmqb", "kAmevaClMmqb"), ("mmvq", "kAmevaClMmvq"), ("mmvqe", "kAmevaClMmvqe"),
-             ("fa", "kAmevaClFa"), ("ops", "kAmevaClOps")]
+             ("fa", "kAmevaClFa"), ("ops", "kAmevaClOps"), ("vk", "kAmevaClVk")]
 
 
 def write_cl_header(path, version, cl):
@@ -517,7 +517,7 @@ def main():
             if npush > 128:
                 fail("%s: %d push-constant bytes exceed the runtime limit of 128" % (name, npush))
             spv = os.path.join(tmp, "%s.spv" % name)
-            data, rsize = compile_module(args, src, defines, spv, None)
+            data, rsize = compile_module(args, src, defines, spv, cl["vk"])
             if rsize is not None and rsize != npush:
                 fail("%s: reflection says %d push-constant bytes, source %d" % (name, rsize, npush))
             var = "kAmevaVk_%s" % name
@@ -645,7 +645,7 @@ def main():
     for op, var, nbytes, sha, nbind, npush, nlocal in ops:
         lines.append('    { "ameva_%s", %du, %du, %du, %s, %du, "%s" },' % (op, nbind, npush, nlocal, var, nbytes, sha))
     lines += ["};", "",
-              "/* SPIR-V only: these kernels have no OpenCL C translation (no entry in ggml_ameva_kernels_cl.h). */",
+              "/* VK_ONLY family (SPIR-V only until 2026-11-06; OpenCL C in kAmevaClVk of ggml_ameva_kernels_cl.h). */",
               "typedef enum {"]
     for name, *_ in vk:
         lines.append("    AMEVA_VK_%s," % name.upper())
@@ -657,14 +657,14 @@ def main():
     with open(args.out, "w", newline="\n") as f:
         f.write("\n".join(lines))
     counts = [len(qmm), len(qmv), len(mali_qmv), len(qgemm), len(mmq), len(mmqb), len(mmvq), len(mmvqe), len(fa),
-              len(ops)]
+              len(ops), len(vk)]
     if [len(cl[key]) for key, _ in CL_TABLES] != counts:
         fail("OpenCL C tables %s do not match the SPIR-V tables %s" % ([len(cl[key]) for key, _ in CL_TABLES], counts))
     cl_bytes = write_cl_header(args.cl_out, version, cl)
     print("wrote %s (%d kernels as OpenCL C, %d bytes of kernel text)" % (args.cl_out, sum(counts), cl_bytes))
     # the summary of the SPIR-V header stays the last line (scripts read it)
     print("wrote %s (%d qmm, %d qmv, %d mali_qmv, %d qgemm, %d mmq, %d mmqb, %d mmvq, %d mmvqe, %d fa variants, "
-          "%d op kernels, %d SPIR-V-only kernels)" % (args.out, len(qmm), len(qmv), len(mali_qmv), len(qgemm), len(mmq),
+          "%d op kernels, %d VK_ONLY-family kernels)" % (args.out, len(qmm), len(qmv), len(mali_qmv), len(qgemm), len(mmq),
                                                       len(mmqb), len(mmvq), len(mmvqe), len(fa), len(ops), len(vk)))
 
 

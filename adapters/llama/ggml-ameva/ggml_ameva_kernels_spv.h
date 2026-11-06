@@ -137420,7 +137420,7 @@ static const AmevaOpKernel kAmevaOpKernels[AMEVA_K_COUNT] = {
     { "ameva_get_rows_q5_0", 4u, 72u, 256u, kAmevaOp_get_rows_q5_0, 9100u, "79cb679afb189b4433f95d9600ac5ca70835854acc7cfdc0ac7761c84be25595" },
 };
 
-/* SPIR-V only: these kernels have no OpenCL C translation (no entry in ggml_ameva_kernels_cl.h). */
+/* VK_ONLY family (SPIR-V only until 2026-11-06; OpenCL C in kAmevaClVk of ggml_ameva_kernels_cl.h). */
 typedef enum {
     AMEVA_VK_CONV_F16_S,
     AMEVA_VK_CONV_F16_V,

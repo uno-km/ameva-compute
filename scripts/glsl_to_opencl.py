@@ -72,6 +72,8 @@ float4 AMEVA_OVL glsl_vec4(float2 a, float2 b) { return (float4)(a, b); }
 float4 AMEVA_OVL glsl_vec4(float2 a, float b, float c) { return (float4)(a, b, c); }
 float4 AMEVA_OVL glsl_vec4(float a, float b, float2 c) { return (float4)(a, b, c); }
 float4 AMEVA_OVL glsl_vec4(float3 a, float b) { return (float4)(a, b); }
+float4 AMEVA_OVL glsl_vec4(float a, float3 b) { return (float4)(a, b); }
+float4 AMEVA_OVL glsl_vec4(float a, float2 b, float c) { return (float4)(a, b, c); }
 float3 AMEVA_OVL glsl_vec3(float a) { return (float3)(a); }
 float3 AMEVA_OVL glsl_vec3(float a, float b, float c) { return (float3)(a, b, c); }
 float3 AMEVA_OVL glsl_vec3(float3 v) { return v; }
@@ -155,6 +157,33 @@ float AMEVA_OVL glsl_sign(float x) { return sign(x); }
 float4 AMEVA_OVL glsl_sign(float4 x) { return sign(x); }
 int AMEVA_OVL glsl_sign(int x) { return (x > 0) - (x < 0); }
 
+/* lessThan, equal, ...: a GLSL bvec4 is an OpenCL C mask (-1 true, 0 false); mix with a mask takes y where true */
+int4 AMEVA_OVL glsl_lessThan(uint4 a, uint4 b) { return a < b; }
+int4 AMEVA_OVL glsl_lessThan(int4 a, int4 b) { return a < b; }
+int4 AMEVA_OVL glsl_lessThan(float4 a, float4 b) { return a < b; }
+int4 AMEVA_OVL glsl_lessThanEqual(uint4 a, uint4 b) { return a <= b; }
+int4 AMEVA_OVL glsl_lessThanEqual(int4 a, int4 b) { return a <= b; }
+int4 AMEVA_OVL glsl_lessThanEqual(float4 a, float4 b) { return a <= b; }
+int4 AMEVA_OVL glsl_greaterThan(uint4 a, uint4 b) { return a > b; }
+int4 AMEVA_OVL glsl_greaterThan(int4 a, int4 b) { return a > b; }
+int4 AMEVA_OVL glsl_greaterThan(float4 a, float4 b) { return a > b; }
+int4 AMEVA_OVL glsl_greaterThanEqual(uint4 a, uint4 b) { return a >= b; }
+int4 AMEVA_OVL glsl_greaterThanEqual(int4 a, int4 b) { return a >= b; }
+int4 AMEVA_OVL glsl_greaterThanEqual(float4 a, float4 b) { return a >= b; }
+int4 AMEVA_OVL glsl_equal(uint4 a, uint4 b) { return a == b; }
+int4 AMEVA_OVL glsl_equal(int4 a, int4 b) { return a == b; }
+int4 AMEVA_OVL glsl_equal(float4 a, float4 b) { return a == b; }
+int4 AMEVA_OVL glsl_notEqual(uint4 a, uint4 b) { return a != b; }
+int4 AMEVA_OVL glsl_notEqual(int4 a, int4 b) { return a != b; }
+int4 AMEVA_OVL glsl_notEqual(float4 a, float4 b) { return a != b; }
+float4 AMEVA_OVL glsl_mix(float4 x, float4 y, int4 m) { return select(x, y, m); }
+uint4 AMEVA_OVL glsl_mix(uint4 x, uint4 y, int4 m) { return select(x, y, m); }
+int4 AMEVA_OVL glsl_mix(int4 x, int4 y, int4 m) { return select(x, y, m); }
+float AMEVA_OVL glsl_mix(float x, float y, bool m) { return m ? y : x; }
+float AMEVA_OVL glsl_mix(float x, float y, float a) { return mix(x, y, a); }
+float4 AMEVA_OVL glsl_mix(float4 x, float4 y, float a) { return mix(x, y, a); }
+float4 AMEVA_OVL glsl_mix(float4 x, float4 y, float4 a) { return mix(x, y, a); }
+
 /* unpackHalf2x16: the two binary16 halves of a word (low half first) as floats */
 float2 glsl_unpackHalf2x16(uint v) {
     const ushort lo = (ushort)(v & 0xFFFFu), hi = (ushort)(v >> 16);
@@ -191,13 +220,13 @@ BUILTIN_RENAMES = [
     (r"\buintBitsToFloat\b", "glsl_uintBitsToFloat"), (r"\bfloatBitsToUint\b", "glsl_floatBitsToUint"),
     (r"\bbitfieldExtract\b", "glsl_bitfieldExtract"), (r"\bunpackHalf2x16\b", "glsl_unpackHalf2x16"),
     (r"\bdotPacked4x8EXT\b", "glsl_dot4x8"), (r"\broundEven\b", "rint"), (r"\binversesqrt\b", "rsqrt"),
-    (r"\babs\s*\(", "glsl_abs("), (r"\bsign\s*\(", "glsl_sign("),
+    (r"\babs\s*\(", "glsl_abs("), (r"\bsign\s*\(", "glsl_sign("), (r"\bmix\s*\(", "glsl_mix("),
+    (r"\b(lessThanEqual|lessThan|greaterThanEqual|greaterThan|notEqual|equal)\s*\(", r"glsl_\1("),
     (r"\bbarrier\s*\(\s*\)", "barrier(CLK_LOCAL_MEM_FENCE)"),
 ]
 # GLSL built-ins this translator has no OpenCL C form for: their use is an error, not a silent pass-through
 UNSUPPORTED = ["floatBitsToInt", "intBitsToFloat", "packHalf2x16", "bitfieldInsert", "findMSB", "findLSB", "bitCount",
-               "mix", "fract", "mod", "trunc", "lessThan", "lessThanEqual", "greaterThan", "greaterThanEqual", "equal",
-               "notEqual", "step", "smoothstep", "umulExtended", "imulExtended", "uaddCarry", "usubBorrow", "ldexp",
+               "fract", "mod", "trunc", "step","smoothstep", "umulExtended", "imulExtended", "uaddCarry", "usubBorrow", "ldexp",
                "frexp", "atomicExchange", "atomicCompSwap", "atomicXor",
                "memoryBarrier", "memoryBarrierShared", "memoryBarrierBuffer", "gl_LocalInvocationIndex", "discard"]
 # identifiers that are free in GLSL and reserved in OpenCL C

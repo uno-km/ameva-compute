@@ -631,6 +631,7 @@ static_assert(sizeof(kAmevaClMmvq) / sizeof(kAmevaClMmvq[0]) == AMEVA_MMVQ_VARIA
 static_assert(sizeof(kAmevaClMmvqe) / sizeof(kAmevaClMmvqe[0]) == AMEVA_MMVQE_VARIANT_COUNT, "kAmevaClMmvqe");
 static_assert(sizeof(kAmevaClFa) / sizeof(kAmevaClFa[0]) == AMEVA_FA_VARIANT_COUNT, "kAmevaClFa");
 static_assert(sizeof(kAmevaClOps) / sizeof(kAmevaClOps[0]) == AMEVA_K_COUNT, "kAmevaClOps");
+static_assert(sizeof(kAmevaClVk) / sizeof(kAmevaClVk[0]) == AMEVA_VK_COUNT, "kAmevaClVk");
 
 static AcKernel* ameva_qmm_kernel(int idx) {
     static char names[AMEVA_QMM_VARIANT_COUNT][40];
@@ -857,15 +858,14 @@ static AcKernel* ameva_op_kernel(AmevaOpKernelId id) {
     return s_ops[id];
 }
 
-// SPIR-V-only kernels (scripts/build_ameva_kernels.py VK_ONLY): NULL on the OpenCL backend, which has no translation
-// of them; the op contract declines their ops there.
+// VK_ONLY family (scripts/build_ameva_kernels.py; convolution, group norm, timestep embedding). SPIR-V only until
+// 2026-11-06; the OpenCL backend now builds the translations of kAmevaClVk.
 static AcKernel* ameva_vk_kernel(AmevaVkKernelId id) {
-    if (ameva_backend_is_opencl()) return nullptr;
     std::lock_guard<std::mutex> lock(s_mutex);
     if (!s_vk[id] && s_ctx) {
         const AmevaOpKernel& k = kAmevaVkKernels[id];
         s_vk[id] = ameva_make_kernel(k.name, k.spirv, k.spirv_bytes, k.spirv_sha256, k.bindings, k.push_constant_bytes,
-                                     k.local_size_x, nullptr);
+                                     k.local_size_x, kAmevaClVk[id]);
     }
     return s_vk[id];
 }
@@ -1460,7 +1460,6 @@ static const char* upscale_windows_reason(const struct ggml_tensor* op, uint64_t
 
 // Fills g and returns NULL when ameva_conv can compute the node, otherwise the reason it cannot.
 static const char* ameva_conv2d_geometry(const struct ggml_tensor* op, AmevaConv2d* g) {
-    if (ameva_backend_is_opencl()) return "convolution kernels have no OpenCL C translation";
     const struct ggml_tensor *a = op->src[0], *b = op->src[1];
     if (!a || !b) return "convolution without kernel or data";
     if (!(is_f16(a) || is_f32(a)) || !is_f32(b) || !is_f32(op)) return "convolution types (kernel f16/f32, data and result f32)";
@@ -1530,7 +1529,6 @@ struct AmevaGroupNorm {
 // Fills g and returns NULL when ameva_cnorm can compute the node, otherwise the reason it cannot. A node without
 // elements is accepted with g zeroed: nothing is recorded for it.
 static const char* ameva_group_norm_geometry(const struct ggml_tensor* op, AmevaGroupNorm* g) {
-    if (ameva_backend_is_opencl()) return "group norm kernels have no OpenCL C translation";
     const struct ggml_tensor* a = op->src[0];
     if (!a || !is_f32(a) || !is_f32(op) || !ggml_are_same_shape(a, op)) return "group norm on non-f32 or reshaping";
     if (!ggml_is_contiguous(a) || !ggml_is_contiguous(op)) return "group norm tensor not contiguous";
@@ -1695,7 +1693,6 @@ const char* ameva_op_unsupported_reason(const struct ggml_tensor* op) {
         }
         case GGML_OP_TIMESTEP_EMBEDDING: {
             // op params: dim, max_period (ggml_timestep_embedding); result [dim, timesteps]
-            if (ameva_backend_is_opencl()) return "timestep embedding kernel has no OpenCL C translation";
             const struct ggml_tensor* a = op->src[0];
             const int32_t* prm = (const int32_t*)op->op_params;
             if (!is_f32(a) || !is_f32(op)) return "timestep embedding on non-f32";
@@ -4304,7 +4301,9 @@ static const char* ameva_conv_f16_check(bool* builtin_ok, uint32_t* mismatches, 
     return nullptr;
 }
 
-// The same check on the OpenCL backend, which has no ameva_conv: ameva_mm -DF16 -DF16_WORDS -DF16_UNPACK multiplies the
+// The same check on the OpenCL backend (written before ameva_conv had an OpenCL translation; kept because the decision is
+// shared with ameva_mm and both kernels convert through the same glsl_unpackHalf2x16 / vload_half of the translation):
+// ameva_mm -DF16 -DF16_WORDS -DF16_UNPACK multiplies the
 // 64 x 32 f16 weights by an f16 identity (32 x 32), so result (m, n) is weight (n, m) alone (a x 1 plus terms of 0).
 static const char* ameva_mm_f16_check(bool* builtin_ok, uint32_t* mismatches, uint32_t* first_half) {
     AcKernel* kernel = ameva_op_kernel(AMEVA_K_MM_F16WU);
