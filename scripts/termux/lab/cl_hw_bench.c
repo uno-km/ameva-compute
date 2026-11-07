@@ -263,6 +263,49 @@ int main(int argc, char** argv) {
     // HW_STREAM_SECONDS=S: only a sustained 16-byte read stream over the whole 64 MiB buffer for S seconds (gld,
     // launched back to back), the GPU side of the decode roofline; run next to cpu_bw_bench (STREAM=1) it gives what
     // the two pull together. Prints HW_STREAM GB/s and the launches.
+    // HW_SYNC_REPS=N: the round trip of one tiny kernel (64 work-items) from enqueue to the host seeing it finished,
+    // N times: clFinish (the driver's wait) and a spin on clGetEventInfo (no sleeping). This is the cost of every
+    // hand-over between the CPU and the GPU inside a token (a CPU+GPU split of one MUL_MAT needs one per matrix or
+    // per layer). Prints HW_SYNC median and 90th percentile in microseconds.
+    const char* sync_env = getenv("HW_SYNC_REPS");
+    if (sync_env && atoi(sync_env) > 0) {
+        const int n = atoi(sync_env) > 2000 ? 2000 : atoi(sync_env);
+        cl_program p = build("-DT=uint -DLN=256");
+        cl_kernel k = clCreateKernel(p, "bar", &err); CHECK(err);
+        const int iters = 1;
+        CHECK(clSetKernelArg(k, 0, sizeof(out), &out)); CHECK(clSetKernelArg(k, 1, sizeof(int), &iters));
+        const size_t g = 64, l = 64;
+        static double us[2][2000];
+        for (int mode = 0; mode < 2; ++mode) {
+            for (int i = -20; i < n; ++i) {
+                struct timespec a, b;
+                clock_gettime(CLOCK_MONOTONIC, &a);
+                cl_event ev;
+                CHECK(clEnqueueNDRangeKernel(q, k, 1, NULL, &g, &l, 0, NULL, &ev));
+                if (mode == 0) {
+                    CHECK(clFinish(q));
+                } else {
+                    CHECK(clFlush(q));
+                    cl_int st = CL_QUEUED;
+                    while (st != CL_COMPLETE) {
+                        CHECK(clGetEventInfo(ev, CL_EVENT_COMMAND_EXECUTION_STATUS, sizeof(st), &st, NULL));
+                        if (st < 0) { fprintf(stderr, "FAIL event status %d\n", st); exit(1); }
+                    }
+                }
+                clock_gettime(CLOCK_MONOTONIC, &b);
+                clReleaseEvent(ev);
+                if (i >= 0) us[mode][i] = (b.tv_sec - a.tv_sec) * 1e6 + (b.tv_nsec - a.tv_nsec) * 1e-3;
+            }
+            for (int x = 0; x < n; ++x)  // insertion sort, n <= 2000
+                for (int y = x; y > 0 && us[mode][y - 1] > us[mode][y]; --y) {
+                    const double t = us[mode][y]; us[mode][y] = us[mode][y - 1]; us[mode][y - 1] = t;
+                }
+            printf("HW_SYNC mode=%s n=%d median_us=%.1f p90_us=%.1f min_us=%.1f\n", mode ? "spin_event" : "clFinish", n,
+                   us[mode][n / 2], us[mode][n * 9 / 10], us[mode][0]);
+        }
+        return 0;
+    }
+
     const char* stream_env = getenv("HW_STREAM_SECONDS");
     if (stream_env && atof(stream_env) > 0) {
         const double secs = atof(stream_env);
