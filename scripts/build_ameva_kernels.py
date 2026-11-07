@@ -254,10 +254,22 @@ def source_info(path):
     return len(bindings), 4 * members, int(ls.group(1)) if ls else None
 
 
+def cl_unroll_mode():
+    """AMEVA_CL_UNROLL (experiment build): "all" keeps the loop pragmas in every OpenCL C translation, "none" in none;
+    unset: only where measured faster (cl_unroll of compile_module). The CL header of an experiment build says so."""
+    e = os.environ.get("AMEVA_CL_UNROLL", "")
+    if e not in ("", "all", "none"):
+        fail("AMEVA_CL_UNROLL=%r is not all or none" % e)
+    return e
+
+
 def compile_module(args, src, defines, out, cl, local_size=None, cl_unroll=False):
     """SPIR-V of one kernel variant, and its OpenCL C translation appended to cl (the same variant, the same order);
     cl None: SPIR-V only. local_size: the (x, y, z) the defines give a source that does not spell its local size
     out."""
+    mode = cl_unroll_mode()
+    if mode:
+        cl_unroll = mode == "all"
     cmd = [args.glslang, "-V", "-q", "--target-env", "vulkan1.0"] + ["-D%s" % d for d in defines] + ["-o", out, src]
     refl = run(cmd)
     if args.spirv_val != "none":
@@ -311,6 +323,8 @@ def write_cl_header(path, version, cl):
              "#ifndef GGML_AMEVA_KERNELS_CL_H", "#define GGML_AMEVA_KERNELS_CL_H", "",
              '#define AMEVA_CL_ENTRY_POINT "%s"' % glsl_to_opencl.ENTRY_POINT, "",
              "static const char kAmevaClPrelude[] =", c_string(glsl_to_opencl.PRELUDE) + ";", ""]
+    if cl_unroll_mode():
+        lines += ["/* experiment build: loop pragmas from AMEVA_CL_UNROLL=%s */" % cl_unroll_mode(), ""]
     total = 0
     for key, table in CL_TABLES:
         for i, text in enumerate(cl[key]):

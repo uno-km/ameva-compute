@@ -590,6 +590,25 @@ AcResult ac_cl_kernel_create(AcClContext* c, const char* source, size_t source_s
         g_api.clReleaseProgram(prog);
         return AC_ERR_INVALID_WORK_GROUP_SIZE;
     }
+    // AMEVA_CL_KERNEL_INFO=1 (kernel tuning): the driver's resource figures of every kernel built, one line each.
+    // On Mali the largest work-group size falls when a kernel needs more registers per work-item, and the private
+    // memory size counts what lives in memory instead of registers (spills, indexed arrays).
+    static const bool info = [] {
+        const char* e = getenv("AMEVA_CL_KERNEL_INFO");
+        return e && *e && *e != '0';
+    }();
+    if (info) {
+        cl_ulong pmem = 0, lmem = 0;
+        size_t mult = 0, bin = 0;
+        g_api.clGetKernelWorkGroupInfo(k, c->device, CL_KERNEL_PRIVATE_MEM_SIZE, sizeof(pmem), &pmem, nullptr);
+        g_api.clGetKernelWorkGroupInfo(k, c->device, CL_KERNEL_LOCAL_MEM_SIZE, sizeof(lmem), &lmem, nullptr);
+        g_api.clGetKernelWorkGroupInfo(k, c->device, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, sizeof(mult), &mult,
+                                       nullptr);
+        g_api.clGetProgramInfo(prog, CL_PROGRAM_BINARY_SIZES, sizeof(bin), &bin, nullptr);
+        fprintf(stderr, "ac_runtime(opencl): KERNEL_INFO name=%s local=%zu max_wg=%zu private=%llu local_mem=%llu "
+                "wg_multiple=%zu binary=%zu source=%zu\n", m->kernel_name, local, kwg, (unsigned long long)pmem,
+                (unsigned long long)lmem, mult, bin, src.size());
+    }
     AcClKernel* ak = new AcClKernel();
     ak->ctx = c;
     ak->program = prog;
