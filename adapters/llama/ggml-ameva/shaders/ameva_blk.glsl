@@ -86,10 +86,15 @@ int dot16(uvec4 w, uvec4 a) {
     const uint b0 = (scw[4u * (i) + 1u] >> k) & 0xFFu, b2 = (scw[4u * (i) + 3u] >> k) & 0xFFu; \
     sc0[i] = int(j8 < 4u ? (b0 & 63u) : ((b2 & 0xFu) | ((b0 >> 6u) << 4u)));
 #endif
+// ROW_STEP: the distance between the weight rows of an invocation: 1, or the local size x in ameva_mmqb, whose
+// invocations take rows n0 + i * LX so that the invocations of a warp read one 16-row tile contiguously
+#ifndef ROW_STEP
+#define ROW_STEP 1u
+#endif
 #define UNIT_ROW(i) { \
-    const uint row = min(n0 + (i), pc.N - 1u); \
+    const uint row = min(n0 + (i) * ROW_STEP, pc.N - 1u); \
     uvec4 l, h; \
-    unit_i8(pc.q_off + (row * U + u) * QPER, pc.h_off + row * U + u, l, h); \
+    unit_i8(pc.q_off + qunit(row, u, U, pc.qt) * QPER, pc.h_off + qunit(row, u, U, pc.qt), l, h); \
     wlo[i] = l; \
     whi[i] = h; \
     UNIT_SCALES(i) \

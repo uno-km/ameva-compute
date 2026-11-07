@@ -26,6 +26,7 @@ layout(push_constant) uniform PushConstants {
     uint h_off, s_off, a_off, d_off;
     uint s1, sd, tpr, ep_mode;
     uint e_off, eo_off;
+    uint qt; // weight rows from the first 16-row tile of the binding << 4 | rows before the first row (qunit)
 } pc;
 
 #include "mali_qdecode.glsl"
@@ -48,8 +49,8 @@ void main() {
     if (global_row < pc.N) {
         for (uint u = local_lane; u < U; u += 32u) {
             const uint b = u / UPB;
-            const uint qi = pc.q_off + (global_row * U + u) * QPER;
-            const uint hi = pc.h_off + global_row * U + u;
+            const uint qi = pc.q_off + qunit(global_row, u, U, pc.qt) * QPER;
+            const uint hi = pc.h_off + qunit(global_row, u, U, pc.qt);
             const uint sb = pc.s_off + global_row * s_row + b * SB;
             const uint ab = (pc.a_off + 32u * u) >> 2u;
             decode_dot(qi, hi, sb, u - b * UPB, ab, acc);

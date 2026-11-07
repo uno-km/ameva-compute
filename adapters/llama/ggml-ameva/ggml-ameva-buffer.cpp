@@ -120,21 +120,64 @@ static void stage_rows(ggml_backend_ameva_buffer_context* ctx, const AmevaRepack
     }
 }
 
-static int64_t staging_rows(uint64_t row_bytes) {
-    return row_bytes >= kStagingBytes ? 1 : (int64_t)(kStagingBytes / row_bytes);
+// Rows per staging pass. For the tiled types (ameva_repack_tiled) a whole number of 16-row tiles, so that every pass
+// starts at a tile and its rows are one byte range per region (ggml-ameva-repack.h).
+static int64_t staging_rows(enum ggml_type type, uint64_t row_bytes) {
+    const int64_t n = row_bytes >= kStagingBytes ? 1 : (int64_t)(kStagingBytes / row_bytes);
+    if (!ameva_repack_tiled(type)) return n;
+    return std::max<int64_t>(AMEVA_REPACK_TILE_ROWS, n & ~(int64_t)(AMEVA_REPACK_TILE_ROWS - 1));
 }
 
-// Rows [r0, r0 + nr) of the repacked tensor at buffer offset `t_off` (`rows` rows of K weights of `type`) from `ggml`
-// (those rows in the ggml layout).
-static void write_repacked(ggml_backend_ameva_buffer_context* ctx, enum ggml_type type, int64_t K, int64_t rows,
-                           uint64_t t_off, int64_t r0, int64_t nr, const uint8_t* ggml, const char* what,
-                           const char* name) {
+// The tile-aligned row range [a0, a1) around rows [r0, r0 + nr) of a tiled tensor of `rows` rows.
+static void tile_range(int64_t rows, int64_t r0, int64_t nr, int64_t* a0, int64_t* a1) {
+    const int64_t t = AMEVA_REPACK_TILE_ROWS;
+    *a0 = r0 / t * t;
+    *a1 = std::min(rows, (r0 + nr + t - 1) / t * t);
+}
+
+// Rows [r0, r0 + nr) of the repacked tensor at buffer offset `t_off` into `ggml` (ggml layout). Tiled types: r0 must
+// be a multiple of 16 and r0 + nr a multiple of 16 or `rows`.
+static void read_repacked(ggml_backend_ameva_buffer_context* ctx, enum ggml_type type, int64_t K, int64_t rows,
+                          uint64_t t_off, int64_t r0, int64_t nr, uint8_t* ggml, const char* what, const char* name) {
     const uint64_t row_bytes = ggml_row_size(type, K);
     AmevaRepackRegions R;
     if (!ameva_repack_regions(type, K, rows, &R)) {
         GGML_ABORT("ggml-ameva-buffer: %s: no repacked layout for %s", what, name);
     }
-    const int64_t chunk = staging_rows(row_bytes);
+    const int64_t chunk = staging_rows(type, row_bytes);
+    std::vector<uint8_t> stage((size_t)((uint64_t)std::min(chunk, nr) * row_bytes));
+    for (int64_t r = r0; r < r0 + nr; r += chunk) {
+        const int64_t n = std::min(chunk, r0 + nr - r);
+        stage_rows(ctx, R, r, n, t_off, stage.data(), false, what);
+        if (!ameva_unrepack_rows(type, K, n, 0, n, stage.data(), ggml + (uint64_t)(r - r0) * row_bytes)) {
+            GGML_ABORT("ggml-ameva-buffer: %s: unpacking rows of %s failed", what, name);
+        }
+    }
+}
+
+// Rows [r0, r0 + nr) of the repacked tensor at buffer offset `t_off` (`rows` rows of K weights of `type`) from `ggml`
+// (those rows in the ggml layout). A range of a tiled type that does not start and end at tiles is widened to them:
+// the rows around it are read back, merged and written again.
+static void write_repacked(ggml_backend_ameva_buffer_context* ctx, enum ggml_type type, int64_t K, int64_t rows,
+                           uint64_t t_off, int64_t r0, int64_t nr, const uint8_t* ggml, const char* what,
+                           const char* name) {
+    const uint64_t row_bytes = ggml_row_size(type, K);
+    if (ameva_repack_tiled(type)) {
+        int64_t a0, a1;
+        tile_range(rows, r0, nr, &a0, &a1);
+        if (a0 != r0 || a1 != r0 + nr) {
+            std::vector<uint8_t> img((size_t)((uint64_t)(a1 - a0) * row_bytes));
+            read_repacked(ctx, type, K, rows, t_off, a0, a1 - a0, img.data(), what, name);
+            memcpy(img.data() + (uint64_t)(r0 - a0) * row_bytes, ggml, (size_t)((uint64_t)nr * row_bytes));
+            write_repacked(ctx, type, K, rows, t_off, a0, a1 - a0, img.data(), what, name);
+            return;
+        }
+    }
+    AmevaRepackRegions R;
+    if (!ameva_repack_regions(type, K, rows, &R)) {
+        GGML_ABORT("ggml-ameva-buffer: %s: no repacked layout for %s", what, name);
+    }
+    const int64_t chunk = staging_rows(type, row_bytes);
     std::vector<uint8_t> stage((size_t)((uint64_t)std::min(chunk, nr) * row_bytes));
     for (int64_t r = r0; r < r0 + nr; r += chunk) {
         const int64_t n = std::min(chunk, r0 + nr - r);
@@ -157,19 +200,17 @@ static void read_rows(ggml_backend_ameva_buffer_context* ctx, const ggml_tensor*
     const int64_t K = base->ne[0], rows = ggml_nrows(base);
     const uint64_t row_bytes = ggml_row_size(base->type, K);
     const uint64_t t_off = base_offset(ctx, base->data, ggml_nbytes(base), what);
-    AmevaRepackRegions R;
-    if (!ameva_repack_regions(base->type, K, rows, &R)) {
-        GGML_ABORT("ggml-ameva-buffer: %s: no repacked layout for %s", what, base->name);
-    }
-    const int64_t chunk = staging_rows(row_bytes);
-    std::vector<uint8_t> stage((size_t)((uint64_t)std::min(chunk, nr) * row_bytes));
-    for (int64_t r = r0; r < r0 + nr; r += chunk) {
-        const int64_t n = std::min(chunk, r0 + nr - r);
-        stage_rows(ctx, R, r, n, t_off, stage.data(), false, what);
-        if (!ameva_unrepack_rows(base->type, K, n, 0, n, stage.data(), ggml + (uint64_t)(r - r0) * row_bytes)) {
-            GGML_ABORT("ggml-ameva-buffer: %s: unpacking rows of %s failed", what, base->name);
+    if (ameva_repack_tiled(base->type)) {
+        int64_t a0, a1;
+        tile_range(rows, r0, nr, &a0, &a1);
+        if (a0 != r0 || a1 != r0 + nr) {
+            std::vector<uint8_t> img((size_t)((uint64_t)(a1 - a0) * row_bytes));
+            read_repacked(ctx, base->type, K, rows, t_off, a0, a1 - a0, img.data(), what, base->name);
+            memcpy(ggml, img.data() + (uint64_t)(r0 - a0) * row_bytes, (size_t)((uint64_t)nr * row_bytes));
+            return;
         }
     }
+    read_repacked(ctx, base->type, K, rows, t_off, r0, nr, ggml, what, base->name);
 }
 
 // Bytes [off, off + size) of the ggml-layout image of the repacked tensor `base`: copied to `out` (Read), replaced by

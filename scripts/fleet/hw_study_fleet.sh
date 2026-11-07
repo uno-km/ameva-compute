@@ -6,7 +6,7 @@
 #
 #   hw_study_fleet.sh up                       which phones answer ssh
 #   hw_study_fleet.sh kit                      make the kit: one backend build pulled from BUILD_DEV:BUILD_DIR
-#                                              (default s21:abi-lab/out-mq) plus the study sources of this tree
+#                                              (default s21:abi-lab/out-tile) plus the study sources of this tree
 #                                              (LF), into evidence/hw_study/kits/<id>.tar
 #   hw_study_fleet.sh push DEV...              upload the newest kit (checked by sha256) to ~/abi-lab/hwkit/<id>
 #   hw_study_fleet.sh run DEV...               take a wake lock and start the suite in the background (nohup);
@@ -25,7 +25,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 EV=$ROOT/evidence/hw_study
 FLEET=${FLEET:-s21 a35 a53 s20 s25}
 BUILD_DEV=${BUILD_DEV:-s21}
-BUILD_DIR=${BUILD_DIR:-abi-lab/out-mq}
+BUILD_DIR=${BUILD_DIR:-abi-lab/out-tile}
 RT_DIR=${RT_DIR:-abi-lab/rt098}
 SSH="ssh -o ConnectTimeout=6 -o BatchMode=yes"
 mkdir -p "$EV/kits"

@@ -17,13 +17,25 @@
 // ggml_nbytes(tensor): sizes and offsets seen by ggml do not change.
 //
 //   tensor of R rows, U = K/32 units and B = K/block_elems blocks per row
-//   Q region at 0                      row r at r*U*QB
-//   H region at R*U*QB                 row r at H + r*U*HB
+//   Q region at 0                      unit (r, u) at unit index r*U + u              (times QB bytes)
+//   H region at R*U*QB                 unit (r, u) at H + (r*U + u)*HB
 //   S region at R*U*(QB+HB)            row r at S + r*B*SB
+// q4_K, q5_K and q6_K (ameva_repack_tiled) hold Q and H in tiles of AMEVA_REPACK_TILE_ROWS (16) rows instead: unit
+// (r, u) at unit index r0*U + u*T + (r - r0), r0 = r rounded down to a multiple of 16, T = min(16, R - r0). A tile is
+// contiguous and the tiles are in row order, so rows [a, b) with a a multiple of 16 occupy the same byte range as in
+// the row-major layout; a tile is the unit of every partial write, read and dispatch of these types. The work-items of
+// a warp that take different rows then read contiguous memory, which on Mali-G78 made ameva_mmqb 1.66-2.05x faster
+// (ameva-foundation N-20261107-hw-bottleneck section 4.8). The kernels use qunit() of ameva_common.glsl.
 #include "ggml.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+
+#define AMEVA_REPACK_TILE_ROWS 16
+
+// Whether Q and H of `type` are stored in 16-row tiles (q4_K, q5_K, q6_K).
+bool ameva_repack_tiled(enum ggml_type type);
 
 struct AmevaRepackLayout {
     uint32_t block_elems; // weights per ggml block

@@ -339,7 +339,8 @@ int main(int argc, char** argv) {
     // shf: shuffles per clock and core (lane operations), and the ALU baseline of the same chains
     if (!shuf) printf("HW_SKIP shf reason=device lacks cl_khr_subgroup_shuffle\n");
     for (int alu = 0; shuf && alu < 2; ++alu) {
-        snprintf(opts, sizeof(opts), "-DT=uint -DLN=1024 -DHAS_SHUFFLE -DALU=%d", alu);
+        // OpenCL C 3.0: under the default 1.2 the Mali compiler does not declare the sub-group built-ins
+        snprintf(opts, sizeof(opts), "-cl-std=CL3.0 -DT=uint -DLN=1024 -DHAS_SHUFFLE -DALU=%d", alu);
         cl_program p = build(opts);
         cl_kernel k = clCreateKernel(p, "shf", &err); CHECK(err);
         const int iters = 1024;

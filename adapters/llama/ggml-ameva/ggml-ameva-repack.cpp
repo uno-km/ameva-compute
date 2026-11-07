@@ -27,6 +27,16 @@ const TypeInfo kTypes[] = {
     {"iq4_nl", K_IQ4_NL, {32, 18, 16, 0, 2}}, {"iq4_xs", K_IQ4_XS, {256, 136, 16, 0, 8}},
 };
 
+// q4_K, q5_K and q6_K keep Q and H in 16-row tiles (ggml-ameva-repack.h; the kernels' qunit() in ameva_common.glsl)
+bool tiled(Kind k) { return k == K_Q4_K || k == K_Q5_K || k == K_Q6_K; }
+
+// unit u of row r in Q and H, in units, for a tiled tensor of `rows` rows and `units` units per row
+uint64_t tile_unit(int64_t rows, uint64_t units, int64_t r, uint64_t u) {
+    const int64_t r0 = r & ~(int64_t)(AMEVA_REPACK_TILE_ROWS - 1);
+    const int64_t t = std::min<int64_t>(AMEVA_REPACK_TILE_ROWS, rows - r0);
+    return (uint64_t)r0 * units + u * (uint64_t)t + (uint64_t)(r - r0);
+}
+
 const TypeInfo* find(enum ggml_type type) {
     const char* n = ggml_type_name(type);
     if (!n) return nullptr;
@@ -248,13 +258,39 @@ bool codec(enum ggml_type type, int64_t K, int64_t rows, int64_t r0, int64_t nr,
     const int64_t nb = K / L.block_elems;
     const uint32_t upb = L.block_elems / 32;
     uint8_t blk[256];
+    const bool tile = tiled(ti->kind);
+    const uint64_t units = (uint64_t)K / 32;
+    uint8_t tq[8 * 32], th[8 * 8]; // the units of one block, contiguous, for the tiled types (at most 8 units of 16 + 8)
     for (int64_t row = r0; row < r0 + nr; ++row) {
         for (int64_t b = 0; b < nb; ++b) {
             const uint64_t u0 = (uint64_t)b * upb;
             uint8_t* g = ggml + (uint64_t)(row - r0) * nb * L.block_bytes + (uint64_t)b * L.block_bytes;
+            uint8_t* s = tensor + r.s + (uint64_t)row * r.s_row + (uint64_t)b * L.sb;
+            if (tile) {
+                if (to_repacked) {
+                    memcpy(blk, g, L.block_bytes);
+                    block_codec(ti->kind, true, blk, tq, th, s);
+                }
+                for (uint32_t k = 0; k < upb; ++k) {
+                    const uint64_t i = tile_unit(rows, units, row, u0 + k);
+                    uint8_t* qd = tensor + r.q + i * L.qb;
+                    uint8_t* hd = tensor + r.h + i * L.hb;
+                    if (to_repacked) {
+                        memcpy(qd, tq + k * L.qb, L.qb);
+                        if (L.hb) memcpy(hd, th + k * L.hb, L.hb);
+                    } else {
+                        memcpy(tq + k * L.qb, qd, L.qb);
+                        if (L.hb) memcpy(th + k * L.hb, hd, L.hb);
+                    }
+                }
+                if (!to_repacked) {
+                    block_codec(ti->kind, false, blk, tq, th, s);
+                    memcpy(g, blk, L.block_bytes);
+                }
+                continue;
+            }
             uint8_t* q = tensor + r.q + (uint64_t)row * r.q_row + u0 * L.qb;
             uint8_t* h = tensor + r.h + (uint64_t)row * r.h_row + u0 * L.hb;
-            uint8_t* s = tensor + r.s + (uint64_t)row * r.s_row + (uint64_t)b * L.sb;
             if (to_repacked) {
                 memcpy(blk, g, L.block_bytes);
                 block_codec(ti->kind, true, blk, q, h, s);
@@ -275,6 +311,11 @@ bool ameva_repack_layout(enum ggml_type type, AmevaRepackLayout* out) {
     if (!ti) return false;
     if (out) *out = ti->layout;
     return true;
+}
+
+bool ameva_repack_tiled(enum ggml_type type) {
+    const TypeInfo* ti = find(type);
+    return ti && tiled(ti->kind);
 }
 
 bool ameva_repack_regions(enum ggml_type type, int64_t K, int64_t rows, AmevaRepackRegions* out) {

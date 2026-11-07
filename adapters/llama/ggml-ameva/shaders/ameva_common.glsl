@@ -111,3 +111,25 @@ vec2 ameva_sincos(float x) {
     if (k == 2) return vec2(-s, -c);
     return vec2(-c, s);
 }
+
+// Index of 32-weight unit u of weight row r of a dispatch in the Q region (in units) and the H region of a repacked
+// weight (ggml-ameva-repack.h), U units per row. Row-major (r * U + u) for most types. q4_K, q5_K and q6_K are stored
+// in 16-row tiles: tile t holds rows 16t .. 16t + 15 and within it unit u of those rows side by side, so the
+// work-items of a warp that each take a different row read contiguous memory (the last tile of the weight holds the
+// rows that are left). On Mali-G78 a warp load that touches one cache line per work-item ran 2.6x (L1) to 8.5x (L2)
+// slower than the same bytes read contiguously, and ameva_mmqb q4_K took 1.66-2.05x longer (ameva-foundation
+// N-20261107-hw-bottleneck section 4.8). The Q and H bindings of a dispatch start at the tile of its first row; qt
+// (push constant) = (weight rows from that tile's first row to the end of the weight) << 4 | (rows of that tile
+// before the dispatch's first row), so a dispatch may start at any row (a row range of a weight).
+#if defined(TYPE_Q4_K) || defined(TYPE_Q5_K) || defined(TYPE_Q6_K)
+#define AMEVA_QTILE
+#endif
+uint qunit(uint r, uint u, uint U, uint qt) {
+#if defined(AMEVA_QTILE)
+    const uint ra = r + (qt & 15u);
+    const uint r0 = ra & ~15u;
+    return r0 * U + u * min(16u, (qt >> 4u) - r0) + (ra & 15u);
+#else
+    return r * U + u;
+#endif
+}

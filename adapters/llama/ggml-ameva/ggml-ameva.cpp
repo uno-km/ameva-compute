@@ -2220,7 +2220,12 @@ static const uint64_t kMmqUnitBytes = 40;
 // keeps the scales out of the unit loop. Galaxy S21, M=512, kernel GOP/s (ameva_mmq_bench, 2026-11-07):
 //   q4_K 9216x2304  ameva_mmq 130   2x4 331   2x8 256   2x16 173   1x8 250   1x4 252   1x16 225
 //   q6_K 2304x9216  ameva_mmq 78    1x8 169   1x4 149   1x16 114   2x4 104   2x8 104   2x16 109
-// (the kernel's private memory predicts the order: 2x4 q4_K 80 bytes, 2x8 144, 2x16 272). Gemma 2 2B prompt on
+// (the kernel's private memory predicts the order: 2x4 q4_K 80 bytes, 2x8 144, 2x16 272). With the weights in
+// 16-row tiles (ggml-ameva-repack.h) and the rows of an invocation LX apart, kernel ms, 3 rotated rounds at 858 MHz:
+//   q4_K 9216x2304 65.4 -> 40.8, 2304x9216 118.3 -> 53.5, 2048x2304 15.75 -> 10.26; q6_K 2304x9216 130.8 -> 100.1;
+//   q5_K 9216x2304 103.8 -> 74.7 (1x8; 2x8 58.7 there, not the default until Mali-G68 is measured: it lost 2x on
+//   the row-major layout of the A53 below). Best layouts did not move for q4_K (2x4) and q6_K (1x8, 1x4 equal).
+// Gemma 2 2B prompt on
 // the S21: 27 t/s with ameva_mmq, 60 with these layouts, Vulkan 40; KL divergence against the CPU backend 6.5e-3
 // (ameva_mmq 5.9e-3, the CPU's own decode path 6.9e-3), greedy text equal to the CPU's for 32 tokens. On Vulkan the
 // family loses (Galaxy A35), and it loses on the Adreno 830 with either API (Galaxy S25, 2026-10-07), so the default is
@@ -2377,6 +2382,37 @@ static bool ameva_mmq_plan(const struct ggml_tensor* node, uint32_t* chunk_rows,
     return true;
 }
 
+// Repacked weights in 16-row tiles (q4_K, q5_K, q6_K; ggml-ameva-repack.h). A dispatch over rows [row, row + n) of
+// `base` binds Q and H from the tile of `row` to the tile of its last row (or the end of the weight) and passes qt, from
+// which its kernel finds unit (r, u) (qunit() in ameva_common.glsl): (rows from that tile to the end of the weight) << 4
+// | (rows of that tile before `row`). Row-major types bind exactly the rows and pass qt = 0.
+struct AmevaQRows {
+    uint64_t row, rows; // the rows of `base` that the Q and H bindings cover
+    uint32_t qt;
+};
+static const char* ameva_qrows(const struct ggml_tensor* base, uint64_t row, uint64_t n, AmevaQRows* out) {
+    if (!ameva_repack_tiled(base->type)) {
+        *out = { row, n, 0u };
+        return nullptr;
+    }
+    const uint64_t t = AMEVA_REPACK_TILE_ROWS, R = (uint64_t)ggml_nrows(base);
+    const uint64_t a0 = row / t * t, a1 = std::min<uint64_t>(R, (row + n + t - 1) / t * t);
+    if (R - a0 >= (1ull << 28)) return "16-row-tiled weight of 2^28 rows or more (push constant qt)";
+    *out = { a0, a1 - a0, (uint32_t)(((R - a0) << 4) | (row - a0)) };
+    return nullptr;
+}
+
+// Rows per dispatch slice of a tiled weight: whole tiles, with room for the up to 30 rows that the bindings of a slice
+// add at its two ends (ameva_qrows) within the binding span the slice size was computed for.
+static const char* ameva_tile_slice_rows(const struct ggml_tensor* base, uint64_t n, uint32_t* rows_per_slice) {
+    if (!ameva_repack_tiled(base->type) || *rows_per_slice >= n) return nullptr;
+    const uint32_t t = AMEVA_REPACK_TILE_ROWS;
+    const uint32_t r = *rows_per_slice > 3 * t ? *rows_per_slice - 2 * t : *rows_per_slice;
+    *rows_per_slice = r / t * t;
+    if (*rows_per_slice == 0) return "dispatch slice of a 16-row-tiled weight below one tile";
+    return nullptr;
+}
+
 // MUL_MAT with ameva_mmq: per chunk of activation rows, ameva_quant_a8 fills the scratch buffer (int8 values at 0,
 // scales and half sums after them), then ameva_mmq runs over the weight slices. With AMEVA_MMQB and a weight type
 // that has a variant, the two kernels are ameva_quant_a8b and ameva_mmqb (the scratch has the same two regions; the
@@ -2409,7 +2445,8 @@ static const char* enc_mul_mat_mmq(AmevaRecorder& rec, const struct ggml_tensor*
     uint64_t slice_cap = std::min<uint64_t>(span / R.q_row, 65535ull * gn);
     const uint64_t mac_rows = (uint64_t)(kDispatchMac / ((double)chunk_rows * (double)K));
     slice_cap = std::min<uint64_t>(slice_cap, std::max<uint64_t>(gn, mac_rows / gn * gn));
-    const uint32_t rows_per_slice = (uint32_t)std::max<uint64_t>(1, std::min<uint64_t>((uint64_t)N, slice_cap));
+    uint32_t rows_per_slice = (uint32_t)std::max<uint64_t>(1, std::min<uint64_t>((uint64_t)N, slice_cap));
+    if (const char* te = ameva_tile_slice_rows(base, N, &rows_per_slice)) return te;
     const uint32_t s1 = st(src1, 1), sd = st(node, 1);
     const char* e = nullptr;
     for (uint32_t m0 = 0; m0 < M; m0 += chunk_rows) {
@@ -2438,18 +2475,20 @@ static const char* enc_mul_mat_mmq(AmevaRecorder& rec, const struct ggml_tensor*
         for (uint32_t n0 = 0; n0 < N; n0 += rows_per_slice) {
             const uint32_t nc = std::min(rows_per_slice, N - n0);
             const uint64_t row = first_row + n0;
+            AmevaQRows qr;
+            if (const char* te = ameva_qrows(base, row, nc, &qr)) return te;
             AmevaBind w[3];
-            e = ameva_bind_span(base, R.q + row * R.q_row, (uint64_t)nc * R.q_row, L.qb == 8 ? 8 : 16, &w[0]);
+            e = ameva_bind_span(base, R.q + qr.row * R.q_row, qr.rows * R.q_row, L.qb == 8 ? 8 : 16, &w[0]);
             if (!e) e = ameva_bind_span(base, R.s + row * R.s_row, (uint64_t)nc * R.s_row, 2, &w[2]);
             if (!e) {
-                if (R.h_row) e = ameva_bind_span(base, R.h + row * R.h_row, (uint64_t)nc * R.h_row, L.hb == 8 ? 8 : 4, &w[1]);
+                if (R.h_row) e = ameva_bind_span(base, R.h + qr.row * R.h_row, qr.rows * R.h_row, L.hb == 8 ? 8 : 4, &w[1]);
                 else w[1] = w[2];
             }
             AmevaBind bd;
             if (!e) e = ameva_bind_span(node, ((uint64_t)m0 * sd + n0) * 4, ((uint64_t)(mc - 1) * sd + nc) * 4, 4, &bd);
             if (e) return e;
-            const uint32_t pc[10] = { mc, K, nc, w[0].elem, R.h_row ? w[1].elem : 0u, w[2].elem * 2,
-                                      0u, ad_elem, bd.elem, sd };
+            const uint32_t pc[11] = { mc, K, nc, w[0].elem, R.h_row ? w[1].elem : 0u, w[2].elem * 2,
+                                      0u, ad_elem, bd.elem, sd, qr.qt };
             const AcBufferBinding bind[6] = { w[0].b, w[1].b, w[2].b, bs.b, bs.b, bd.b };
             const AmevaBind reads[4] = { w[0], w[1], w[2], bs };
             e = ameva_record(rec, kernel, reads, 4, &bd, 1, bind, 6, pc, sizeof(pc),
@@ -2590,24 +2629,27 @@ static const char* enc_mul_mat_mmvq(AmevaRecorder& rec, const struct ggml_tensor
     }
     const uint32_t rows_per_wg = (64u / tpr) * rows;
     const uint64_t span = ameva_max_binding_span();
-    const uint32_t rows_per_slice = (uint32_t)std::max<uint64_t>(
+    uint32_t rows_per_slice = (uint32_t)std::max<uint64_t>(
         1, std::min<uint64_t>({ (uint64_t)N, span / R.q_row, 65535ull * rows_per_wg }));
+    if (const char* te = ameva_tile_slice_rows(base, N, &rows_per_slice)) return te;
     for (uint32_t n0 = 0; n0 < N; n0 += rows_per_slice) {
         const uint32_t nc = std::min(rows_per_slice, N - n0);
         const uint64_t row = first_row + n0;
+        AmevaQRows qr;
+        if (const char* te = ameva_qrows(base, row, nc, &qr)) return te;
         AmevaBind w[3];
-        e = ameva_bind_span(base, R.q + row * R.q_row, (uint64_t)nc * R.q_row, L.qb == 8 ? 8 : 16, &w[0]);
+        e = ameva_bind_span(base, R.q + qr.row * R.q_row, qr.rows * R.q_row, L.qb == 8 ? 8 : 16, &w[0]);
         if (!e) e = ameva_bind_span(base, R.s + row * R.s_row, (uint64_t)nc * R.s_row, 2, &w[2]);
         if (!e) {
-            if (R.h_row) e = ameva_bind_span(base, R.h + row * R.h_row, (uint64_t)nc * R.h_row, L.hb == 8 ? 8 : 4, &w[1]);
+            if (R.h_row) e = ameva_bind_span(base, R.h + qr.row * R.h_row, qr.rows * R.h_row, L.hb == 8 ? 8 : 4, &w[1]);
             else w[1] = w[2]; // no high bits: binding 1 is not read
         }
         AmevaBind bd;
         if (!e) e = ameva_bind_span(node, (uint64_t)n0 * 4, (uint64_t)nc * 4, 4, &bd);
         if (e) return e;
-        const uint32_t pc[12] = { K, nc, w[0].elem, R.h_row ? w[1].elem : 0u, w[2].elem * 2, 0u,
+        const uint32_t pc[13] = { K, nc, w[0].elem, R.h_row ? w[1].elem : 0u, w[2].elem * 2, 0u,
                                   ad_off, bd.elem, tpr, ep ? ep->mode : 0u,
-                                  ep ? be.elem + n0 : 0u, ep ? beo.elem + n0 : 0u };
+                                  ep ? be.elem + n0 : 0u, ep ? beo.elem + n0 : 0u, qr.qt };
         const AcBufferBinding bind[8] = { w[0].b, w[1].b, w[2].b, bs.b, bs.b, bd.b, ep ? be.b : bd.b,
                                           ep ? beo.b : bd.b };
         const AmevaBind reads[5] = { w[0], w[1], w[2], bs, be };
@@ -3047,12 +3089,15 @@ static const char* ameva_qmv_tune_shape(const struct ggml_tensor* node, AmevaQmv
     uint64_t rows64 = std::min<uint64_t>(N, kQmvTuneRows);
     rows64 = std::min<uint64_t>(rows64, ameva_max_binding_span() / R.q_row);
     rows64 = std::min<uint64_t>(rows64, 65535);
-    const uint32_t nt = (uint32_t)std::max<uint64_t>(1, rows64);
+    uint32_t nt = (uint32_t)std::max<uint64_t>(1, rows64);
+    if (const char* te = ameva_tile_slice_rows(base, N, &nt)) return te;
+    AmevaQRows qr;
+    if (const char* te = ameva_qrows(base, first_row, nt, &qr)) return te;
     AmevaBind w[3];
-    const char* e = ameva_bind_span(base, R.q + first_row * R.q_row, (uint64_t)nt * R.q_row, L.qb == 8 ? 8 : 16, &w[0]);
+    const char* e = ameva_bind_span(base, R.q + qr.row * R.q_row, qr.rows * R.q_row, L.qb == 8 ? 8 : 16, &w[0]);
     if (!e) e = ameva_bind_span(base, R.s + first_row * R.s_row, (uint64_t)nt * R.s_row, 2, &w[2]);
     if (!e) {
-        if (R.h_row) e = ameva_bind_span(base, R.h + first_row * R.h_row, (uint64_t)nt * R.h_row, L.hb == 8 ? 8 : 4, &w[1]);
+        if (R.h_row) e = ameva_bind_span(base, R.h + qr.row * R.h_row, qr.rows * R.h_row, L.hb == 8 ? 8 : 4, &w[1]);
         else w[1] = w[2];
     }
     if (e) return e;
@@ -3133,16 +3178,16 @@ static const char* ameva_qmv_tune_shape(const struct ggml_tensor* node, AmevaQmv
             const uint32_t rpw = qmv_rows_per_wg(cfg);
             if (cfg.i8) {
                 const AcBufferBinding bind[8] = { w[0].b, w[1].b, w[2].b, bq, bq, bd, bd, bd };
-                const uint32_t pc[12] = { K, nt, w[0].elem, R.h_row ? w[1].elem : 0u, w[2].elem * 2, 0u,
+                const uint32_t pc[13] = { K, nt, w[0].elem, R.h_row ? w[1].elem : 0u, w[2].elem * 2, 0u,
                                           U * fam.ad_units, 0u,
-                                          (uint32_t)cfg.tpr, 0u, 0u, 0u };
+                                          (uint32_t)cfg.tpr, 0u, 0u, 0u, qr.qt };
                 r = ac_runtime_batch_dispatch_bindings(batch, cands[c].k, bind, 8, pc, sizeof(pc),
                                                        { (nt + rpw - 1) / rpw, 1, 1 });
                 continue;
             }
             const AcBufferBinding bind[7] = { w[0].b, w[1].b, w[2].b, ba, bd, ba, bd };
-            const uint32_t pc[14] = { 1u, K, nt, w[0].elem, R.h_row ? w[1].elem : 0u, w[2].elem * 2, 0u, 0u, K, nt,
-                                      cfg.mali ? 32u : (uint32_t)cfg.tpr, 0u, 0u, 0u };
+            const uint32_t pc[15] = { 1u, K, nt, w[0].elem, R.h_row ? w[1].elem : 0u, w[2].elem * 2, 0u, 0u, K, nt,
+                                      cfg.mali ? 32u : (uint32_t)cfg.tpr, 0u, 0u, 0u, qr.qt };
             r = ac_runtime_batch_dispatch_bindings(batch, cands[c].k, bind, 7, pc, sizeof(pc), { (nt + rpw - 1) / rpw, 1, 1 });
         }
         if (r == AC_SUCCESS) r = ac_runtime_batch_flush(batch); // bounded submissions
@@ -3493,7 +3538,10 @@ static const char* enc_mul_mat(AmevaRecorder& rec, const struct ggml_tensor* nod
         const uint64_t mac_rows = (uint64_t)(kDispatchMac / ((double)M * (double)K));
         slice_cap = std::min<uint64_t>(slice_cap, std::max<uint64_t>(64, mac_rows & ~63ull));
     }
-    const uint32_t rows_per_slice = (uint32_t)std::max<uint64_t>(1, std::min<uint64_t>((uint64_t)N, slice_cap));
+    uint32_t rows_per_slice = (uint32_t)std::max<uint64_t>(1, std::min<uint64_t>((uint64_t)N, slice_cap));
+    if (base) {
+        if (const char* te = ameva_tile_slice_rows(base, N, &rows_per_slice)) return te;
+    }
     const uint32_t s1 = fq_blk ? K : s1_src, sd = st(node, 1);
     // activation/output rows per dispatch: at most kDispatchMac multiply-accumulates and one binding for the rows of
     // src1 and of dst it touches; whole 8-row tiles when the 8-column kernel runs
@@ -3508,15 +3556,17 @@ static const char* enc_mul_mat(AmevaRecorder& rec, const struct ggml_tensor* nod
     for (uint32_t n0 = 0; n0 < N; n0 += rows_per_slice) {
         const uint32_t nc = std::min(rows_per_slice, N - n0);
         AmevaBind w[3]; // ggml layout: w[0] = the rows; repacked: Q, H, S of the rows
+        AmevaQRows qr = {};
         if (base) {
             if (r2 * r3 > 1 || src1->ne[2] > 1 || src1->ne[3] > 1) return "batched qmm with repacked weights";
             const uint64_t row = first_row + n0;
+            if (const char* te = ameva_qrows(base, row, nc, &qr)) return te;
             // vector elements of the Q and H bindings (shaders/ameva_qmv.comp QVEC, HVEC); S in bytes, read at even
             // addresses
-            e = ameva_bind_span(base, R.q + row * R.q_row, (uint64_t)nc * R.q_row, L.qb == 8 ? 8 : 16, &w[0]);
+            e = ameva_bind_span(base, R.q + qr.row * R.q_row, qr.rows * R.q_row, L.qb == 8 ? 8 : 16, &w[0]);
             if (!e) e = ameva_bind_span(base, R.s + row * R.s_row, (uint64_t)nc * R.s_row, 2, &w[2]);
             if (!e) {
-                if (R.h_row) e = ameva_bind_span(base, R.h + row * R.h_row, (uint64_t)nc * R.h_row, L.hb == 8 ? 8 : 4, &w[1]);
+                if (R.h_row) e = ameva_bind_span(base, R.h + qr.row * R.h_row, qr.rows * R.h_row, L.hb == 8 ? 8 : 4, &w[1]);
                 else w[1] = w[2]; // no high bits: binding 1 is not read
             }
         } else {
@@ -3547,15 +3597,15 @@ static const char* enc_mul_mat(AmevaRecorder& rec, const struct ggml_tensor* nod
             const AcDim3 grid = { (nc + rows_per_wg - 1) / rows_per_wg, (mc + cols_per_wg - 1) / cols_per_wg, 1 };
             const double mac = (double)mc * nc * K;
             if (gemm) {
-                const uint32_t pc[10] = { mc, K, nc, w[0].elem, R.h_row ? w[1].elem : 0u, w[2].elem * 2,
-                                          b1.elem, bd.elem, s1, sd };
+                const uint32_t pc[11] = { mc, K, nc, w[0].elem, R.h_row ? w[1].elem : 0u, w[2].elem * 2,
+                                          b1.elem, bd.elem, s1, sd, qr.qt };
                 const AcBufferBinding bind[5] = { w[0].b, w[1].b, w[2].b, b1.b, bd.b };
                 const AmevaBind reads[4] = { w[0], w[1], w[2], b1 };
                 e = ameva_record(rec, kernel, reads, 4, &bd, 1, bind, 5, pc, sizeof(pc), grid, mac);
             } else if (base) {
-                const uint32_t pc[14] = { mc, K, nc, w[0].elem, R.h_row ? w[1].elem : 0u, w[2].elem * 2,
+                const uint32_t pc[15] = { mc, K, nc, w[0].elem, R.h_row ? w[1].elem : 0u, w[2].elem * 2,
                                           b1.elem, bd.elem, s1, sd, tpr, ep ? ep->mode : 0u,
-                                          ep ? be.elem + n0 : 0u, ep ? beo.elem + n0 : 0u };
+                                          ep ? be.elem + n0 : 0u, ep ? beo.elem + n0 : 0u, qr.qt };
                 const AcBufferBinding bind[7] = { w[0].b, w[1].b, w[2].b, b1.b, bd.b, ep ? be.b : b1.b,
                                                   ep ? beo.b : bd.b };
                 const AmevaBind reads[5] = { w[0], w[1], w[2], b1, be };

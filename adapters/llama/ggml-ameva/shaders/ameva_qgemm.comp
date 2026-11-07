@@ -36,6 +36,7 @@ layout(push_constant) uniform PushConstants {
     uint M, K, N, q_off;
     uint h_off, s_off, a_off, d_off;
     uint s1, sd;
+    uint qt; // weight rows from the first 16-row tile of the binding << 4 | rows before the first row (qunit)
 } pc;
 
 #define BN 64u // weight rows per tile
@@ -71,7 +72,7 @@ void main() {
         if (tid < 64u) {
             const uint b = u / UPB;
             vec4 w[8];
-            decode(pc.q_off + (drow * U + u) * QPER, pc.h_off + drow * U + u, pc.s_off + drow * s_row + b * SB,
+            decode(pc.q_off + qunit(drow, u, U, pc.qt) * QPER, pc.h_off + qunit(drow, u, U, pc.qt), pc.s_off + drow * s_row + b * SB,
                    u - b * UPB, w);
             [[unroll]] for (uint i = 0u; i < 8u; ++i) {
                 const uint k = 4u * (i & 3u) + 16u * (i >> 2u); // w[i] holds weights k .. k + 3 of the unit

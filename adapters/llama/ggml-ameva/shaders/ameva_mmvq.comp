@@ -58,6 +58,7 @@ layout(push_constant) uniform PushConstants {
     uint K, N, q_off, h_off;
     uint s_off, aq_off, ad_off, d_off;
     uint tpr, ep_mode, e_off, eo_off;
+    uint qt; // weight rows from the first 16-row tile of the binding << 4 | rows before the first row (qunit)
 } pc;
 
 #if defined(TYPE_Q2_K) || defined(TYPE_Q3_K) || defined(TYPE_Q6_K)
@@ -73,9 +74,20 @@ void main() {
     const uint tid = gl_LocalInvocationID.x;
     qdecode_init(tid);
     const uint tpr = pc.tpr;
+#if defined(AMEVA_QTILE)
+    // 16-row tiles (qunit, ameva_common.glsl): the invocations of a warp take consecutive rows and the same units, so
+    // they read a tile contiguously; the k-parts of a row are G invocations apart and an invocation's rows G apart
+    const uint G = 64u / tpr;
+    const uint g = tid % G;
+    const uint lane = tid / G;
+    const uint RS = G, PS = G;
+    const uint row0 = gl_WorkGroupID.x * G * uint(ROWS) + g;
+#else
     const uint g = tid / tpr;
     const uint lane = tid - g * tpr;
+    const uint RS = 1u, PS = 1u;
     const uint row0 = (gl_WorkGroupID.x * (64u / tpr) + g) * uint(ROWS);
+#endif
     const uint U = pc.K >> 5u;
     const uint s_row = (pc.K / BLOCK_ELEMS) * SB;
 
@@ -98,11 +110,11 @@ void main() {
         const float sa0 = da * float(bitfieldExtract(int(e.y), 0, 16));
         const float sa1 = da * float(bitfieldExtract(int(e.y), 16, 16));
         [[unroll]] for (uint r = 0u; r < uint(ROWS); ++r) {
-            const uint n = row0 + r;
+            const uint n = row0 + r * RS;
             if (n < pc.N) {
                 uint v[8];
                 vec2 sc, mc;
-                decode_i8(pc.q_off + (n * U + u) * QPER, pc.h_off + n * U + u, pc.s_off + n * s_row + b * SB,
+                decode_i8(pc.q_off + qunit(n, u, U, pc.qt) * QPER, pc.h_off + qunit(n, u, U, pc.qt), pc.s_off + n * s_row + b * SB,
                           u - b * UPB, v, sc, mc);
 #ifdef EMU_DOT
                 uint d0 = 0u, d1 = 0u, s0 = 0u, s1 = 0u;
@@ -138,14 +150,14 @@ void main() {
     for (uint st = tpr >> 1u; st > 0u; st >>= 1u) {
         if (lane < st) {
             [[unroll]] for (uint r = 0u; r < uint(ROWS); ++r) {
-                red[r * 64u + tid] += red[r * 64u + tid + st];
+                red[r * 64u + tid] += red[r * 64u + tid + st * PS];
             }
         }
         barrier();
     }
     if (lane == 0u) {
         [[unroll]] for (uint r = 0u; r < uint(ROWS); ++r) {
-            const uint n = row0 + r;
+            const uint n = row0 + r * RS;
             if (n < pc.N) {
                 const float val = red[r * 64u + tid];
                 dst[pc.d_off + n] = val;

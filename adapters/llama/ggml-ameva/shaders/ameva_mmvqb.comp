@@ -55,6 +55,7 @@ layout(push_constant) uniform PushConstants {
     uint K, N, q_off, h_off;
     uint s_off, aq_off, ab_off, d_off;
     uint tpr, ep_mode, e_off, eo_off;
+    uint qt; // weight rows from the first 16-row tile of the binding << 4 | rows before the first row (qunit)
 } pc;
 
 #include "ameva_blk.glsl"
