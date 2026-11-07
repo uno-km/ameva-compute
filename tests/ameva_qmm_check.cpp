@@ -78,11 +78,17 @@ static void quant_a8_ref(const float* x, int K, int blk, std::vector<double>& xq
     }
 }
 
-// whether AMEVA_MMQB selects ameva_mmqb for the weight type (the rule of ggml-ameva.cpp)
-static bool mmqb_selected(enum ggml_type type) {
+// whether AMEVA_MMQB selects ameva_mmqb for the weight type (the rule of ggml-ameva.cpp). Unset on the OpenCL
+// backend it selects the three types by default, provided the int8 MMQ path runs at all: `mmq_ran` (that case's
+// mmq counter moved) stands for the engine's MMQ switch.
+static bool mmqb_selected(enum ggml_type type, bool mmq_ran) {
     const char* e = getenv("AMEVA_MMQB");
-    if (!e || !*e || strcmp(e, "0") == 0) return false;
     if (type != GGML_TYPE_Q4_K && type != GGML_TYPE_Q5_K && type != GGML_TYPE_Q6_K) return false;
+    if (!e || !*e) {
+        const char* b = getenv("AMEVA_BACKEND");
+        return b && strcmp(b, "opencl") == 0 && mmq_ran;
+    }
+    if (strcmp(e, "0") == 0) return false;
     if (!strchr(e, '=')) return true;
     return (std::string(",") + e).find(std::string(",") + ggml_type_name(type) + "=") != std::string::npos;
 }
@@ -164,7 +170,7 @@ static Result run_case(ggml_backend_t be, enum ggml_type type, int M, int N, int
     res.mmq = d_mmq == 1;
     res.mmqb = d_mmqb == 1;
     static const bool mmq_required = getenv("AMEVA_MMQ") && strcmp(getenv("AMEVA_MMQ"), "1") == 0;
-    const bool mmqb_want = mmqb_selected(type);
+    const bool mmqb_want = mmqb_selected(type, res.mmq);
     if (d_repacked != (expect_repacked ? 1 : 0)) res.why = "repacked tensor count did not move as expected";
     else if (d_qmv != (expect_repacked ? 1 : 0)) res.why = "qmv MUL_MAT count did not move as expected";
     else if (d_mmq != 0 && d_mmq != 1) res.why = "mmq MUL_MAT count moved by more than one";

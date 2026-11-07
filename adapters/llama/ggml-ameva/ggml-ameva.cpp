@@ -2207,12 +2207,23 @@ static const uint64_t kMmqUnitBytes = 40;
 // MMQB (shaders/ameva_mmqb.comp): for the MUL_MATs that run ameva_mmq on a q4_K, q5_K or q6_K weight, the same
 // product with one activation scale per 256 elements (shaders/ameva_quant_a8b.comp) and integer accumulation over the
 // block, without shared memory. The scratch of a chunk has the size ameva_mmq's has (320 bytes per 256 elements).
-//   AMEVA_MMQB unset or 0   off (ameva_mmq)
+//   AMEVA_MMQB unset        OpenCL with MMQ: on, q4_K=2x4,q6_K=1x8,q5_K=1x8 (one line on stderr); Vulkan: off
+//   0                       off (ameva_mmq)
 //   1                       the first layout of the build, for the three weight types
 //   <w>x<a>                 w weight rows and a activation rows per invocation, for the three weight types
 //   <type>=<w>x<a>[,...]    per weight type (q4_K=2x8,q6_K=1x8); a type that is not named stays on ameva_mmq
 // A layout the build does not have aborts, and so does the switch without MMQ.
-// Off unless asked for: which layout is fastest, and whether it beats ameva_mmq, differs per device and weight type.
+// Why on by default on OpenCL (ameva-foundation N-20261107-hw-bottleneck): on Mali-G78 a local-memory load with an
+// address per lane moves about 10 bytes per clock and core, 2.4 times less than a global load that hits L1
+// (cl_hw_bench), so ameva_mmq, which stages its tiles in shared memory, is bound by those loads (its inner loop alone
+// tops out at 25-32 % of the int8 ceiling, and the kernel reaches 5.6 %). ameva_mmqb reads through the caches and
+// keeps the scales out of the unit loop. Galaxy S21, M=512, kernel GOP/s (ameva_mmq_bench, 2026-11-07):
+//   q4_K 9216x2304  ameva_mmq 130   2x4 331   2x8 256   2x16 173   1x8 250   1x4 252   1x16 225
+//   q6_K 2304x9216  ameva_mmq 78    1x8 169   1x4 149   1x16 114   2x4 104   2x8 104   2x16 109
+// (the kernel's private memory predicts the order: 2x4 q4_K 80 bytes, 2x8 144, 2x16 272). Gemma 2 2B prompt on
+// the S21: 27 t/s with ameva_mmq, 60 with these layouts, Vulkan 40; KL divergence against the CPU backend 6.5e-3
+// (ameva_mmq 5.9e-3, the CPU's own decode path 6.9e-3), greedy text equal to the CPU's for 32 tokens. On Vulkan the
+// family loses (Galaxy A35), so the default does not apply there.
 // Mali-G68 r32p1 (Galaxy A53), OpenCL, 352 activation rows x 2048 x 2048, kernel time in ms, 2026-10-07:
 //   q4_K  ameva_mmq 27.8-28.3   2x8 18.8-19.8   2x16 20.4-21.2   2x4 22.5   1x8 30.5   1x16 29.4   1x4 35.5
 //   q6_K  ameva_mmq 33.0-33.7   1x8 31.9-32.0   1x16 33.6        2x8 61-68  2x16 59-64  2x4 71-96
@@ -2224,8 +2235,12 @@ static const std::vector<int>& ameva_mmqb_selection(void) {
     static std::vector<int> sel; // indices into kAmevaMmqbVariants, at most one per weight type
     static std::once_flag once;
     std::call_once(once, [] {
-        const char* e = getenv("AMEVA_MMQB");
-        if (!e || !*e || strcmp(e, "0") == 0) return;
+        const char* env = getenv("AMEVA_MMQB");
+        if (env && strcmp(env, "0") == 0) return;
+        const bool by_default = !env || !*env;
+        // the default: OpenCL with MMQ only (without MMQ the prompt path has already said that it runs f32 kernels)
+        if (by_default && (!ameva_backend_is_opencl() || !ameva_mmq_enabled())) return;
+        const char* e = by_default ? "q4_K=2x4,q6_K=1x8,q5_K=1x8" : env;
         const char* usage = "ggml-ameva: AMEVA_MMQB must be 0, 1, <weight rows>x<activation rows> or "
                             "<type>=<weight rows>x<activation rows>[,...] (got \"%s\")";
         // the variants of the layout, of one weight type or (type == nullptr) of every type of the family
@@ -2273,8 +2288,9 @@ static const std::vector<int>& ameva_mmqb_selection(void) {
             const AmevaMmqbVariant& v = kAmevaMmqbVariants[s];
             what += std::string(what.empty() ? "" : ", ") + v.type_name + " " + std::to_string(v.drw) + "x" + std::to_string(v.dra);
         }
-        fprintf(stderr, "ggml-ameva: MMQB on (AMEVA_MMQB=%s): prompt MUL_MAT of %s run ameva_mmqb (int8 activations per "
-                        "256 elements)\n", e, what.c_str());
+        fprintf(stderr, "ggml-ameva: MMQB on (%s%s%s): prompt MUL_MAT of %s run ameva_mmqb (int8 activations per "
+                        "256 elements)\n", by_default ? "OpenCL default " : "AMEVA_MMQB=", e,
+                by_default ? "; AMEVA_MMQB=0 runs ameva_mmq" : "", what.c_str());
     });
     return sel;
 }
