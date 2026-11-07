@@ -10,8 +10,10 @@
 //   mmi     the inner loop of shaders/ameva_mmq.comp (64 x 32 tile, 128 work-items, 4 x 4 outputs each, 16 packed
 //           int8 dot products per 32-bit word of a 32-element unit) on data that stays in local memory:
 //           EPI=0 integer sums only, EPI=1 with the float scale step of the kernel; BAR=1 adds its two barriers
-// MHz (default: /sys/kernel/gpu/gpu_max_clock / 1000) converts seconds to clocks; the clock the governor actually
-// ran is sampled after every test (/sys/kernel/gpu/gpu_clock) and printed, so that a throttled test is visible.
+//   gls     16-byte loads of a matrix walked row by row by each work-item (the weight stream of ameva_mmqb), the
+//           rows stored row-major (one cache line per lane and load) or in 16-row tiles (contiguous per warp)
+// MHz (default: the cap, gpu_cap_mhz) converts seconds to clocks; the clock the governor actually ran is sampled after
+// every test (gpu_now_mhz, -1 where the node cannot be read) and printed, so that a throttled test is visible.
 // Each figure is the median kernel time (event profiling) of REPS runs after one warm-up run.
 // Build: clang -O2 -I<OpenCL headers> -o cl_hw_bench cl_hw_bench.c -lOpenCL
 #define CL_TARGET_OPENCL_VERSION 300
@@ -34,6 +36,25 @@ static const char* kSrc =
     "        a0 ^= src[idx & mask]; a1 ^= src[(idx + gs) & mask]; a2 ^= src[(idx + 2 * gs) & mask];\n"
     "        a3 ^= src[(idx + 3 * gs) & mask];\n"
     "        idx += 4 * gs;\n"
+    "    }\n"
+    "    out[g] = a0 ^ a1 ^ a2 ^ a3;\n"
+    "}\n"
+    // gls: 16-byte loads of a matrix of `rows` rows of `upr` 16-byte units, each work-item walking one row (row g %
+    // rows) unit by unit, as a weight row is read by ameva_mmqb. tile=0: row-major, so the lanes of a warp touch one
+    // cache line each per load; tile=1: the same bytes with the units of 16 consecutive rows next to each other, so
+    // 16 lanes read 256 contiguous bytes per load. upr must be a power of two and rows a multiple of 16.
+    "__kernel void gls(__global const uint4* src, __global uint4* out, int iters, int rows, int upr, int tile) {\n"
+    "    const int g = get_global_id(0), r = g % rows, m = upr - 1;\n"
+    "    uint4 a0 = (uint4)(0), a1 = (uint4)(0), a2 = (uint4)(0), a3 = (uint4)(0);\n"
+    "    for (int i = 0; i < iters; i += 4) {\n"
+    "        const int u0 = i & m, u1 = (i + 1) & m, u2 = (i + 2) & m, u3 = (i + 3) & m;\n"
+    "        if (tile) {\n"
+    "            const int b = (r >> 4) * upr * 16 + (r & 15);\n"
+    "            a0 ^= src[b + 16 * u0]; a1 ^= src[b + 16 * u1]; a2 ^= src[b + 16 * u2]; a3 ^= src[b + 16 * u3];\n"
+    "        } else {\n"
+    "            const int b = r * upr;\n"
+    "            a0 ^= src[b + u0]; a1 ^= src[b + u1]; a2 ^= src[b + u2]; a3 ^= src[b + u3];\n"
+    "        }\n"
     "    }\n"
     "    out[g] = a0 ^ a1 ^ a2 ^ a3;\n"
     "}\n"
@@ -111,6 +132,24 @@ static const char* kSrc =
     "    out[4 * g + 0] = acc0 + convert_float4(j0); out[4 * g + 1] = acc1 + convert_float4(j1);\n"
     "    out[4 * g + 2] = acc2 + convert_float4(j2); out[4 * g + 3] = acc3 + convert_float4(j3);\n"
     "}\n"
+    "#endif\n"
+    // shf: sub_group_shuffle of 32-bit values, four independent chains per work-item (ALU=1: the same chains with an
+    // xor-add in place of the shuffle, the arithmetic baseline)
+    "#ifdef HAS_SHUFFLE\n"
+    "#pragma OPENCL EXTENSION cl_khr_subgroup_shuffle : enable\n"
+    "__kernel void shf(__global uint* out, int iters) {\n"
+    "    const uint l = get_sub_group_local_id(), n = get_sub_group_size();\n"
+    "    uint a = get_global_id(0), b = a * 3u, c = a * 5u, d = a * 7u;\n"
+    "    for (int i = 0; i < iters; ++i) {\n"
+    "#if ALU\n"
+    "        a = (a ^ l) + (uint)i; b = (b ^ (l + 3u)) + (uint)i; c = (c ^ (l + 5u)) + (uint)i; d = (d ^ (l + 7u)) + (uint)i;\n"
+    "#else\n"
+    "        a = sub_group_shuffle(a, (l + 1u) % n) + (uint)i; b = sub_group_shuffle(b, (l + 3u) % n) + (uint)i;\n"
+    "        c = sub_group_shuffle(c, (l + 5u) % n) + (uint)i; d = sub_group_shuffle(d, (l + 7u) % n) + (uint)i;\n"
+    "#endif\n"
+    "    }\n"
+    "    out[get_global_id(0)] = a ^ b ^ c ^ d;\n"
+    "}\n"
     "#endif\n";
 
 static int cmp_u64(const void* a, const void* b) {
@@ -142,6 +181,24 @@ static long read_long(const char* path) {
     return v;
 }
 
+// GPU clock in MHz: Exynos Mali (/sys/kernel/gpu: gpu_clock in MHz, gpu_max_clock in kHz), Qualcomm Adreno
+// (/sys/class/kgsl/kgsl-3d0: gpuclk and max_gpuclk in Hz). -1 where the node is absent or not readable (Adreno gpuclk
+// is not readable by an app on the S20), printed as such.
+// Samsung's Snapdragon kernels also have /sys/kernel/gpu, with gpu_max_clock in MHz (S20: 587), so kgsl is asked first.
+static int is_kgsl(void) { return read_long("/sys/class/kgsl/kgsl-3d0/max_gpuclk") > 0; }
+static long gpu_now_mhz(void) {
+    if (is_kgsl()) {
+        const long v = read_long("/sys/class/kgsl/kgsl-3d0/gpuclk");
+        return v > 0 ? v / 1000000 : -1;
+    }
+    return read_long("/sys/kernel/gpu/gpu_clock");
+}
+static long gpu_cap_mhz(void) {
+    if (is_kgsl()) return read_long("/sys/class/kgsl/kgsl-3d0/max_gpuclk") / 1000000;
+    const long v = read_long("/sys/kernel/gpu/gpu_max_clock");
+    return v > 0 ? v / 1000 : -1;
+}
+
 static cl_context ctx;
 static cl_device_id dev;
 
@@ -170,7 +227,7 @@ static void kinfo(cl_kernel k, const char* label) {
 int main(int argc, char** argv) {
     long mhz = argc > 1 ? atol(argv[1]) : 0;
     const int reps = argc > 2 ? atoi(argv[2]) : 7;
-    if (mhz <= 0) mhz = read_long("/sys/kernel/gpu/gpu_max_clock") / 1000;
+    if (mhz <= 0) mhz = gpu_cap_mhz();
     if (mhz <= 0 || reps < 1) { fprintf(stderr, "usage: cl_hw_bench [MHz] [REPS >= 1]\n"); return 2; }
     cl_platform_id plat; cl_int err;
     CHECK(clGetPlatformIDs(1, &plat, NULL));
@@ -183,8 +240,10 @@ int main(int argc, char** argv) {
     clGetDeviceInfo(dev, CL_DEVICE_MAX_COMPUTE_UNITS, sizeof(cus), &cus, NULL);
     clGetDeviceInfo(dev, CL_DEVICE_LOCAL_MEM_SIZE, sizeof(lmem), &lmem, NULL);
     const int i8 = strstr(ext, "cl_arm_integer_dot_product_accumulate_int8") != NULL;
-    printf("HW_DEVICE name=\"%s\" compute_units=%u clock_mhz=%ld local_mem=%llu i8dot=%d reps=%d\n", name, cus, mhz,
-           (unsigned long long)lmem, i8, reps);
+    const int shuf = strstr(ext, "cl_khr_subgroup_shuffle ") != NULL || strstr(ext, "cl_khr_subgroup_shuffle") != NULL;
+    printf("HW_DEVICE name=\"%s\" compute_units=%u clock_mhz=%ld local_mem=%llu i8dot=%d subgroups=%d shuffle=%d "
+           "reps=%d\n", name, cus, mhz, (unsigned long long)lmem, i8, strstr(ext, "cl_khr_subgroups") != NULL, shuf,
+           reps);
     ctx = clCreateContext(NULL, 1, &dev, NULL, NULL, &err); CHECK(err);
     const cl_queue_properties qp[] = { CL_QUEUE_PROPERTIES, CL_QUEUE_PROFILING_ENABLE, 0 };
     cl_command_queue q = clCreateCommandQueueWithProperties(ctx, dev, qp, &err); CHECK(err);
@@ -220,7 +279,7 @@ int main(int argc, char** argv) {
             const double ms = median_ms(q, k, gitems, 64, reps);
             const double bytes = (double)gitems * iters * 4 * widths[w].bytes;
             printf("HW gld width=%d set=%ld B/clk/core=%.2f GB/s=%.1f ms=%.3f clk_now=%ld\n", widths[w].bytes,
-                   sets[s], bytes / (ms * clk_per_ms), bytes / ms / 1e6, ms, read_long("/sys/kernel/gpu/gpu_clock"));
+                   sets[s], bytes / (ms * clk_per_ms), bytes / ms / 1e6, ms, gpu_now_mhz());
         }
         // lld at the same width: own address per lane, then one address for every lane
         cl_kernel kl = clCreateKernel(p, "lld", &err); CHECK(err);
@@ -232,9 +291,32 @@ int main(int argc, char** argv) {
             const double loads = (double)gitems * iters * 4;
             printf("HW lld width=%d bcast=%d B/clk/core=%.2f lane_loads/clk/core=%.2f ms=%.3f clk_now=%ld\n",
                    widths[w].bytes, bc, loads * widths[w].bytes / (ms * clk_per_ms), loads / (ms * clk_per_ms), ms,
-                   read_long("/sys/kernel/gpu/gpu_clock"));
+                   gpu_now_mhz());
         }
         clReleaseKernel(kl); clReleaseKernel(k); clReleaseProgram(p);
+    }
+
+    // gls: the same bytes read row-major (one cache line per lane and load) and in 16-row tiles (contiguous), 64
+    // units of 16 bytes per row (1 KiB, a q4_K row of K = 2048), working sets 4 KiB .. 16 MiB
+    {
+        snprintf(opts, sizeof(opts), "-DT=uint -DLN=1024");
+        cl_program p = build(opts);
+        cl_kernel k = clCreateKernel(p, "gls", &err); CHECK(err);
+        const int upr = 64, iters = 256;
+        const int rowsv[] = { 16, 64, 256, 1024, 4096, 16384 };
+        for (int s = 0; s < 6; ++s) {
+            for (int tile = 0; tile < 2; ++tile) {
+                CHECK(clSetKernelArg(k, 0, sizeof(src), &src)); CHECK(clSetKernelArg(k, 1, sizeof(out), &out));
+                CHECK(clSetKernelArg(k, 2, sizeof(int), &iters)); CHECK(clSetKernelArg(k, 3, sizeof(int), &rowsv[s]));
+                CHECK(clSetKernelArg(k, 4, sizeof(int), &upr)); CHECK(clSetKernelArg(k, 5, sizeof(int), &tile));
+                const double ms = median_ms(q, k, gitems, 64, reps);
+                const double bytes = (double)gitems * iters * 16;
+                printf("HW gls layout=%s set=%ld B/clk/core=%.2f GB/s=%.1f ms=%.3f clk_now=%ld\n",
+                       tile ? "tile16" : "rowmajor", (long)rowsv[s] * upr * 16, bytes / (ms * clk_per_ms),
+                       bytes / ms / 1e6, ms, gpu_now_mhz());
+            }
+        }
+        clReleaseKernel(k); clReleaseProgram(p);
     }
 
     // bar
@@ -249,12 +331,28 @@ int main(int argc, char** argv) {
             const double ms = median_ms(q, k, gitems, wgs[i], reps);
             const double wg_iters = (double)(gitems / wgs[i]) * iters;
             printf("HW bar wg=%zu core_clk_per_wg_iteration=%.1f (2 barriers + 1 local load/store) ms=%.3f clk_now=%ld\n",
-                   wgs[i], ms * clk_per_ms / wg_iters, ms, read_long("/sys/kernel/gpu/gpu_clock"));
+                   wgs[i], ms * clk_per_ms / wg_iters, ms, gpu_now_mhz());
         }
         clReleaseKernel(k); clReleaseProgram(p);
     }
 
+    // shf: shuffles per clock and core (lane operations), and the ALU baseline of the same chains
+    if (!shuf) printf("HW_SKIP shf reason=device lacks cl_khr_subgroup_shuffle\n");
+    for (int alu = 0; shuf && alu < 2; ++alu) {
+        snprintf(opts, sizeof(opts), "-DT=uint -DLN=1024 -DHAS_SHUFFLE -DALU=%d", alu);
+        cl_program p = build(opts);
+        cl_kernel k = clCreateKernel(p, "shf", &err); CHECK(err);
+        const int iters = 1024;
+        CHECK(clSetKernelArg(k, 0, sizeof(out), &out)); CHECK(clSetKernelArg(k, 1, sizeof(int), &iters));
+        const double ms = median_ms(q, k, gitems, 64, reps);
+        const double ops = (double)gitems * iters * 4;
+        printf("HW shf alu=%d lane_ops/clk/core=%.2f ms=%.3f clk_now=%ld\n", alu, ops / (ms * clk_per_ms), ms,
+               gpu_now_mhz());
+        clReleaseKernel(k); clReleaseProgram(p);
+    }
+
     // mmi
+    if (!i8) printf("HW_SKIP mmi reason=device lacks cl_arm_integer_dot_product_accumulate_int8\n");
     if (i8) {
         for (int v = 0; v < 4; ++v) {
             const int epi = v & 1, bar = v >> 1;
@@ -272,7 +370,7 @@ int main(int argc, char** argv) {
             const double ms = median_ms(q, k, items, 128, reps);
             const double dots = (double)items * iters * 128; // packed dot products (8 ops each)
             printf("HW mmi epi=%d bar=%d GOP/s=%.1f dot4/clk/core=%.2f ms=%.3f clk_now=%ld\n", epi, bar,
-                   dots * 8 / ms / 1e6, dots / (ms * clk_per_ms), ms, read_long("/sys/kernel/gpu/gpu_clock"));
+                   dots * 8 / ms / 1e6, dots / (ms * clk_per_ms), ms, gpu_now_mhz());
             clReleaseMemObject(o2); clReleaseKernel(k); clReleaseProgram(p);
         }
     }
