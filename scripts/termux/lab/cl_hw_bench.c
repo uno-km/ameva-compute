@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define CHECK(x) do { cl_int e_ = (x); if (e_ != CL_SUCCESS) { fprintf(stderr, "FAIL %s = %d (line %d)\n", #x, e_, __LINE__); exit(1); } } while (0)
 
@@ -258,6 +259,38 @@ int main(int argc, char** argv) {
     }
     const size_t gitems = (size_t)cus * 1024;
     cl_mem out = clCreateBuffer(ctx, CL_MEM_READ_WRITE, gitems * 64, NULL, &err); CHECK(err);
+
+    // HW_STREAM_SECONDS=S: only a sustained 16-byte read stream over the whole 64 MiB buffer for S seconds (gld,
+    // launched back to back), the GPU side of the decode roofline; run next to cpu_bw_bench (STREAM=1) it gives what
+    // the two pull together. Prints HW_STREAM GB/s and the launches.
+    const char* stream_env = getenv("HW_STREAM_SECONDS");
+    if (stream_env && atof(stream_env) > 0) {
+        const double secs = atof(stream_env);
+        cl_program p = build("-DT=uint4 -DLN=256");
+        cl_kernel k = clCreateKernel(p, "gld", &err); CHECK(err);
+        const int iters = 64, mask = (int)(big / 16) - 1;
+        CHECK(clSetKernelArg(k, 0, sizeof(src), &src)); CHECK(clSetKernelArg(k, 1, sizeof(out), &out));
+        CHECK(clSetKernelArg(k, 2, sizeof(int), &iters)); CHECK(clSetKernelArg(k, 3, sizeof(int), &mask));
+        const size_t local = 64;
+        const double per_launch = (double)gitems * iters * 4 * 16;
+        CHECK(clEnqueueNDRangeKernel(q, k, 1, NULL, &gitems, &local, 0, NULL, NULL)); // warm-up
+        CHECK(clFinish(q));
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        const double t0 = ts.tv_sec + ts.tv_nsec * 1e-9;
+        double t = t0;
+        long launches = 0;
+        while (t - t0 < secs) {
+            for (int i = 0; i < 8; ++i) CHECK(clEnqueueNDRangeKernel(q, k, 1, NULL, &gitems, &local, 0, NULL, NULL));
+            CHECK(clFinish(q));
+            launches += 8;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            t = ts.tv_sec + ts.tv_nsec * 1e-9;
+        }
+        printf("HW_STREAM GB/s=%.2f seconds=%.2f launches=%ld clk_now=%ld\n", per_launch * launches / (t - t0) / 1e9,
+               t - t0, launches, gpu_now_mhz());
+        return 0;
+    }
 
     static const struct { const char* t; int bytes; } widths[] = {
         { "uint", 4 }, { "uint2", 8 }, { "uint4", 16 }, { "uint8", 32 }, { "uint16", 64 } };

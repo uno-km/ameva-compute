@@ -60,9 +60,10 @@ if [[ " $STAGES " == *" hw "* ]]; then
         say "SUITE_FAIL stage=hw reason=build failed ($(grep -m1 error "$OUT/hw_build.log"))"; failed=1
     else
         # Mali: Termux's ICD loader with an ICD file naming libGLES_mali.so. Adreno: the vendor libOpenCL.so in place of
-        # the loader (through the loader clGetPlatformIDs returns -30 on the S20, 2026-11-07).
+        # the loader (through the loader clGetPlatformIDs returns -30 on the S20), /system/lib64 first (the S25's
+        # system liblog needs the system libc++, 2026-11-07).
         mkdir -p "$OUT/icd"; echo "$v" > "$OUT/icd/vendor.icd"
-        if [ "$(gpu_family)" = adreno ]; then CLENV=(LD_LIBRARY_PATH=/vendor/lib64:/system/lib64)
+        if [ "$(gpu_family)" = adreno ]; then CLENV=(LD_LIBRARY_PATH=/system/lib64:/vendor/lib64)
         else CLENV=(OCL_ICD_VENDORS=$OUT/icd LD_LIBRARY_PATH=$PREFIX/lib:/system/lib64:/vendor/lib64:/vendor/lib64/egl); fi
         w=$(gpu_gate_wait "$CAP_TARGET" "$TMU_MAX" "$COOL_MAX"); sleep 20
         mhz=$(( ${CAP_TARGET/NA/0} / 1000 ))

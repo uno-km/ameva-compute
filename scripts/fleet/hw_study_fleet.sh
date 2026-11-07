@@ -48,7 +48,7 @@ cmd_kit() {
     local mark; mark=$($SSH "$BUILD_DEV" "strings ~/$BUILD_DIR/libggml-ameva.so | grep -c 'Mali OpenCL default'")
     # the sources of this tree with LF line ends (the Windows working tree may be CRLF)
     local f
-    for f in cl_hw_bench.c gpu_sysfs.sh hw_study_suite.sh llm_plugin_ab.sh; do
+    for f in cl_hw_bench.c cpu_bw_bench.c gpu_sysfs.sh hw_study_suite.sh llm_plugin_ab.sh decode_roofline.sh; do
         sed 's/\r$//' "$ROOT/scripts/termux/lab/$f" > "$tmp/kit/src/$f"
     done
     cp -r "$ROOT/include/CL" "$tmp/kit/src/include/"
