@@ -410,7 +410,10 @@ def main():
                     if QMV_ABLATE not in ("1", "2", "3"):
                         fail("AMEVA_BUILD_QMV_ABLATE must be 1, 2 or 3 (got %r)" % QMV_ABLATE)
                     defs.append("ABLATE=%s" % QMV_ABLATE)
-                data, rsize = compile_module(args, vsrc, defs, spv, cl["qmv"])
+                # loop pragmas in the OpenCL C of the 8-column GEMV (M>1): private memory 176 -> 128 bytes and GPU time
+                # 0.29-0.81x (median 0.58, lower in 5 of 5 rotated rounds) on Mali-G78; in llama-completion only the
+                # 2-token warm-up graph runs it (ameva-foundation N-20261107-opencl-forced-unroll section 9)
+                data, rsize = compile_module(args, vsrc, defs, spv, cl["qmv"], cl_unroll=cols == 8)
                 if rsize is not None and rsize != vpush:
                     fail("ameva_qmv %s: reflection says %d push-constant bytes, source %d" % (name, rsize, vpush))
                 if spec_defaults(data):

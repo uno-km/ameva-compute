@@ -12,6 +12,9 @@
 #     (default 64) generated tokens, greedy, -c 2048 -b/-ub 512, FA on, -t THREADS (default 4).
 # Prints one line per run: LAB round= pos= var= pp_tps= tg_tps= text= (sha256 of the generated text, which must be
 # equal for builds that compute the same arithmetic) tmu0= tmu1= cap0= cap1=.
+# PROFILE_RE=<awk regex> runs with AMEVA_PROFILE=2 and adds sel_gpu_ms= (GPU time of the AMEVA_PROFILE kinds that
+# match) and all_gpu_ms=; the timestamps cost time, so take t/s from a pass without it. The profile counts the
+# warm-up graph too (llama-completion decodes BOS+EOS before the prompt; --no-warmup removes it).
 set -u
 LAB=$HOME/abi-lab
 M=${1:?model}
@@ -43,7 +46,7 @@ for r in $(seq 1 "$ROUNDS"); do
         RT="$dir"
         [ -d "$LAB/rt098" ] && RT="$LAB/rt098:$dir"
         t0=$(rd "$TMU"); c0=$(rd "$CAP")
-        AMEVA_BACKEND=$api GGML_BACKEND_PATH="$dir/libggml-ameva.so" LD_LIBRARY_PATH="$RT" timeout 900 llama-completion \
+        AMEVA_PROFILE=${PROFILE_RE:+2} AMEVA_BACKEND=$api GGML_BACKEND_PATH="$dir/libggml-ameva.so" LD_LIBRARY_PATH="$RT" timeout 900 llama-completion \
             -m "$M" --device AMEVA0 -ngl 99 --fit off -fa on -no-cnv --temp 0 --top-k 1 --seed 42 -t "$THREADS" \
             -f "$P" -n "$N" -c 2048 -b 512 -ub 512 > "$LAB/results/lab_run.out" 2> "$LAB/results/lab_run.log" < /dev/null
         rc=$?
@@ -51,8 +54,15 @@ for r in $(seq 1 "$ROUNDS"); do
         pp=$(grep "prompt eval time" "$LAB/results/lab_run.log" | grep -oE "[0-9.]+ tokens per second" | awk '{print $1}')
         tg=$(grep -E "[^t] eval time" "$LAB/results/lab_run.log" | grep -v prompt | grep -oE "[0-9.]+ tokens per second" | awk '{print $1}')
         txt=$(sha256sum < "$LAB/results/lab_run.out" | cut -c1-12)
+        prof=""
+        if [ -n "${PROFILE_RE:-}" ]; then
+            prof=$(grep 'AMEVA_PROFILE kind=' "$LAB/results/lab_run.log" | awk -v re="$PROFILE_RE" '
+                { k = $0; sub(/.*kind="/, "", k); sub(/".*/, "", k); g = $0; sub(/.*gpu_ms=/, "", g); sub(/ .*/, "", g)
+                  all += g; if (k ~ re) sel += g }
+                END { printf " sel_gpu_ms=%.1f all_gpu_ms=%.1f", sel, all }')
+        fi
         echo "LAB round=$r pos=$p var=$name rc=$rc pp_tps=${pp:-NA} tg_tps=${tg:-NA} text=$txt tmu0=$t0 tmu1=$t1 cap0=$c0" \
-             "cap1=$c1 cool_wait=$waited"
+             "cap1=$c1 cool_wait=$waited$prof"
     done
 done
 echo "LAB_END $(date +%F_%T)"
