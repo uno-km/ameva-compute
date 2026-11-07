@@ -822,12 +822,43 @@ bool ac_vk_submission_is_submitted(const AcVkSubmission* s) {
     return s && s->state == SUB_SUBMITTED;
 }
 
+/* AMEVA_VK_WAIT (experiment, read once): "block" (default) waits in vkWaitForFences, the thread sleeps until the
+   driver wakes it; "spin" reads the fence status in a loop with about 20 us of clock reads between reads, one CPU
+   core busy while the GPU works (as AMEVA_CL_WAIT=spin of the OpenCL backend). Any other value fails the wait. */
+static int vk_wait_mode(void) {
+    static const int mode = [] {
+        const char* e = getenv("AMEVA_VK_WAIT");
+        if (!e || !*e || !strcmp(e, "block")) return 0;
+        if (!strcmp(e, "spin")) {
+            fprintf(stderr, "ac_runtime(vulkan): fences are waited by spinning (AMEVA_VK_WAIT=spin)\n");
+            return 1;
+        }
+        fprintf(stderr, "ac_runtime(vulkan): AMEVA_VK_WAIT must be block or spin (got \"%s\")\n", e);
+        return -1;
+    }();
+    return mode;
+}
+
+static VkResult vk_wait_fence(VkDevice device, VkFence fence, uint64_t timeout_ns) {
+    if (vk_wait_mode() == 0) return vkWaitForFences(device, 1, &fence, VK_TRUE, timeout_ns);
+    if (vk_wait_mode() < 0) return VK_ERROR_INITIALIZATION_FAILED;
+    const uint64_t t0 = get_time_ns();
+    for (;;) {
+        const VkResult r = vkGetFenceStatus(device, fence);
+        if (r != VK_NOT_READY) return r;
+        const uint64_t t = get_time_ns();
+        if (t - t0 >= timeout_ns) return VK_TIMEOUT;
+        while (get_time_ns() - t < 20000) {}
+    }
+}
+
 AcResult ac_vk_submission_wait(AcVkSubmission* s, uint64_t timeout_ns) {
     if (!s) return AC_ERR_NULL_POINTER;
     if (s->state != SUB_SUBMITTED) return AC_ERR_INVALID_ARGUMENT;
     if (s->signaled) return AC_SUCCESS;
     if (s->device_lost) return AC_ERR_DRIVER_CRASH_OR_LOST;
-    VkResult r = vkWaitForFences(s->ctx->device, 1, &s->fence, VK_TRUE, timeout_ns);
+    VkResult r = vk_wait_fence(s->ctx->device, s->fence, timeout_ns);
+    if (r == VK_ERROR_INITIALIZATION_FAILED) return AC_ERR_INVALID_ARGUMENT;
     if (r == VK_TIMEOUT) return AC_ERR_LAUNCH_TIMEOUT;
     if (r == VK_ERROR_DEVICE_LOST) {
         s->device_lost = true;
@@ -1101,8 +1132,9 @@ static AcResult sub_collect_flushed(AcVkSubmission* s, bool wait) {
     while (!s->flushed.empty()) {
         VkResult r = vkGetFenceStatus(s->ctx->device, s->flushed_fences.front());
         if (r == VK_NOT_READY && wait && s->flushed.size() > kMaxPendingFlushes) {
-            r = vkWaitForFences(s->ctx->device, 1, &s->flushed_fences.front(), VK_TRUE, kPendingFlushTimeoutNs);
+            r = vk_wait_fence(s->ctx->device, s->flushed_fences.front(), kPendingFlushTimeoutNs);
             if (r == VK_TIMEOUT) return AC_ERR_LAUNCH_TIMEOUT;
+            if (r == VK_ERROR_INITIALIZATION_FAILED) return AC_ERR_INVALID_ARGUMENT;
         }
         if (r == VK_NOT_READY) return AC_SUCCESS;
         if (r != VK_SUCCESS) return AC_ERR_DRIVER_CRASH_OR_LOST;

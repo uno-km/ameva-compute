@@ -5,6 +5,7 @@
 # protocol (research program, ameva-foundation 03_core/docs/research/RESEARCH_PROGRAM.md):
 #   - VARIANTS (space separated): "vk" (AMEVA_BACKEND=vulkan), "cl" (OpenCL, built-in kernel text) or
 #     "<name>:<dir>" (OpenCL with AMEVA_CL_SOURCE_DIR=<dir>, the kernel text under test).
+#     "vkspin" (Vulkan, AMEVA_VK_WAIT=spin) and "clsleep" (OpenCL, AMEVA_CL_WAIT=sleep): the other way of waiting.
 #   - ROUNDS rounds (default 5); round r runs the variants rotated by r, so that each variant runs in every position
 #     of the order and a drift over the session (heat) does not favour one of them.
 #   - before every run: wait (at most COOL_MAX seconds, default 120) until the GPU temperature (Exynos
@@ -38,6 +39,8 @@ venv() {
     case "$1" in
         vk) envs=(AMEVA_BACKEND=vulkan) ;;
         cl) envs=(AMEVA_BACKEND=opencl) ;;
+        vkspin) envs=(AMEVA_BACKEND=vulkan AMEVA_VK_WAIT=spin) ;;
+        clsleep) envs=(AMEVA_BACKEND=opencl AMEVA_CL_WAIT=sleep) ;;
         *:*) envs=(AMEVA_BACKEND=opencl "AMEVA_CL_SOURCE_DIR=${1#*:}") ;;
         *) echo "AB_FAIL bad variant $1"; exit 1 ;;
     esac
