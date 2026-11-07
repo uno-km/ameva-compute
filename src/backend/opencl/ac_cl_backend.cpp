@@ -218,6 +218,7 @@ struct AcClContext {
     uint32_t subgroup_size = 0;
     uint32_t integer_dot = 0, integer_dot_accelerated = 0;
     bool wait_spin = true; /* AMEVA_CL_WAIT, see ac_cl_event_wait */
+    bool arm_sched = false; /* cl_arm_scheduling_controls (AMEVA_CL_KERNEL_INFO reports what it offers) */
     /* program binaries by sha256(device, driver, options, entry point, source) */
     std::mutex cache_mutex;
     std::unordered_map<std::string, std::vector<unsigned char>> binaries;
@@ -352,6 +353,42 @@ AcResult ac_cl_context_create(AcClContext** out_ctx) {
             c->integer_dot_accelerated = acc.signed_accelerated ? 1u : 0u;
     }
 #endif
+    c->arm_sched = has_extension(c->extensions, "cl_arm_scheduling_controls");
+    if (const char* e = getenv("AMEVA_CL_KERNEL_INFO")) {
+        if (*e && *e != '0') {
+            // AMEVA_CL_KERNEL_INFO=1: the device, its driver, the Arm vendor extensions and (cl_arm_scheduling_controls)
+            // what the driver lets an application control: register allocation, warp limits, flush thread, batching
+            std::string arm;
+            for (size_t p = 0; (p = c->extensions.find("cl_arm_", p)) != std::string::npos;) {
+                const size_t q = c->extensions.find(' ', p);
+                arm += c->extensions.substr(p, q == std::string::npos ? std::string::npos : q - p) + " ";
+                p = q == std::string::npos ? c->extensions.size() : q;
+            }
+            fprintf(stderr, "ac_runtime(opencl): DEVICE_INFO name=\"%s\" driver=\"%s\" arm_ext=\"%s\"\n", c->name.c_str(),
+                    c->driver.c_str(), arm.c_str());
+#ifdef CL_DEVICE_SCHEDULING_CONTROLS_CAPABILITIES_ARM
+            if (c->arm_sched) {
+                cl_bitfield caps = 0;
+                cl_uint max_warps = 0;
+                cl_int regs[8] = { 0 };
+                size_t regs_bytes = 0;
+                g_api.clGetDeviceInfo(c->device, CL_DEVICE_SCHEDULING_CONTROLS_CAPABILITIES_ARM, sizeof(caps), &caps,
+                                      nullptr);
+                g_api.clGetDeviceInfo(c->device, CL_DEVICE_MAX_WARP_COUNT_ARM, sizeof(max_warps), &max_warps, nullptr);
+                g_api.clGetDeviceInfo(c->device, CL_DEVICE_SUPPORTED_REGISTER_ALLOCATIONS_ARM, sizeof(regs), regs,
+                                      &regs_bytes);
+                std::string rl;
+                for (size_t i = 0; i < regs_bytes / sizeof(cl_int) && i < 8; ++i) rl += std::to_string(regs[i]) + " ";
+                fprintf(stderr, "ac_runtime(opencl): SCHED_CONTROLS caps=0x%llx (batching=%d wg_batch=%d "
+                        "wg_batch_mod=%d deferred_flush=%d register_alloc=%d warp_limit=%d cu_queue=%d cu_limit=%d) "
+                        "max_warps_per_cu=%u register_allocations=\"%s\"\n", (unsigned long long)caps,
+                        (int)((caps >> 0) & 1), (int)((caps >> 1) & 1), (int)((caps >> 2) & 1), (int)((caps >> 3) & 1),
+                        (int)((caps >> 4) & 1), (int)((caps >> 5) & 1), (int)((caps >> 6) & 1), (int)((caps >> 7) & 1),
+                        (unsigned)max_warps, rl.c_str());
+            }
+#endif
+        }
+    }
     const cl_context_properties cprops[] = { CL_CONTEXT_PLATFORM, (cl_context_properties)c->platform, 0 };
     c->context = g_api.clCreateContext(cprops, 1, &c->device, nullptr, nullptr, &e);
     if (e != CL_SUCCESS || !c->context) {
@@ -605,9 +642,17 @@ AcResult ac_cl_kernel_create(AcClContext* c, const char* source, size_t source_s
         g_api.clGetKernelWorkGroupInfo(k, c->device, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, sizeof(mult), &mult,
                                        nullptr);
         g_api.clGetProgramInfo(prog, CL_PROGRAM_BINARY_SIZES, sizeof(bin), &bin, nullptr);
+        // max_warps: the warps per compute unit this kernel can have resident (cl_arm_scheduling_controls); it falls
+        // when the kernel needs more registers per thread. -1: not reported by this driver.
+        long long warps = -1;
+#ifdef CL_KERNEL_MAX_WARP_COUNT_ARM
+        cl_uint w = 0;
+        if (c->arm_sched && g_api.clGetKernelInfo(k, CL_KERNEL_MAX_WARP_COUNT_ARM, sizeof(w), &w, nullptr) == CL_SUCCESS)
+            warps = w;
+#endif
         fprintf(stderr, "ac_runtime(opencl): KERNEL_INFO name=%s local=%zu max_wg=%zu private=%llu local_mem=%llu "
-                "wg_multiple=%zu binary=%zu source=%zu\n", m->kernel_name, local, kwg, (unsigned long long)pmem,
-                (unsigned long long)lmem, mult, bin, src.size());
+                "wg_multiple=%zu binary=%zu source=%zu max_warps=%lld\n", m->kernel_name, local, kwg,
+                (unsigned long long)pmem, (unsigned long long)lmem, mult, bin, src.size(), warps);
     }
     AcClKernel* ak = new AcClKernel();
     ak->ctx = c;
