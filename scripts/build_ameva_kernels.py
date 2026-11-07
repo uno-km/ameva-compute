@@ -125,7 +125,8 @@ OPS_DEFINED = [("set_rows_q8_0", "set_rows_q", ["QTYPE_Q8_0"]), ("set_rows_q4_0"
                ("mm_f16w", "mm", ["F16", "F16_WORDS"]), ("mm_f16wu", "mm", ["F16", "F16_WORDS", "F16_UNPACK"]),
                ("mm_f16a", "mm", ["F16_A"]), ("mm_f16aw", "mm", ["F16_A", "F16_WORDS"]),
                ("mm_f16awu", "mm", ["F16_A", "F16_WORDS", "F16_UNPACK"]),
-               ("get_rows_q4_0", "get_rows_q", ["Q4_0"]), ("get_rows_q5_0", "get_rows_q", ["Q5_0"])]
+               ("get_rows_q4_0", "get_rows_q", ["Q4_0"]), ("get_rows_q5_0", "get_rows_q", ["Q5_0"]),
+               ("get_rows_q8_0", "get_rows_q", ["Q8_0"]), ("get_rows_q6_k", "get_rows_q", ["Q6_K"])]
 
 # Kernels built as SPIR-V only, in the order of enum AmevaVkKernelId: (kernel name, source, defines).
 # ameva_conv: weights f16 through the exact decoder, f16 through the built-in conversion (f16u; the engine selects it

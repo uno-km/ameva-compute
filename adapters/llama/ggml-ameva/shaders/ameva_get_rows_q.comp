@@ -1,12 +1,13 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
-// AMEVA GET_ROWS for quantized weight types (q4_0, q5_0) with i32 indices and f32 result.
-// Variant: -DQ4_0 or -DQ5_0.
+// AMEVA GET_ROWS for quantized weight types (q4_0, q5_0, q8_0, q6_K) with i32 indices and f32 result.
+// Variant: -DQ4_0, -DQ5_0, -DQ8_0 or -DQ6_K.
 //
 //   dst[c, i10, i11, i12] = dequant(src0[c, idx[i10, i11, i12]])
 //
 // src0 is in the ggml block layout (NOT the AMEVA repacked layout). Each invocation produces one f32 element.
-// Block sizes: q4_0 = 18 bytes / 32 elements; q5_0 = 22 bytes / 32 elements.
+// Block sizes: q4_0 = 18 bytes / 32 elements; q5_0 = 22 bytes / 32 elements; q8_0 = 34 bytes / 32 elements;
+// q6_K = 210 bytes / 256 elements.
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 #include "ameva_common.glsl"
@@ -18,7 +19,7 @@ layout(std430, binding = 2) buffer S { uint status[]; };
 layout(std430, binding = 3) writeonly buffer D { uint d[]; };
 
 layout(push_constant) uniform PushConstants {
-    uint nc;         // ne[0] of src0 (columns, multiple of 32)
+    uint nc;         // ne[0] of src0 (columns, multiple of the block size: 32, q6_K 256)
     uint ne10;       // ne[0] of idx (lookup count per batch)
     uint ne11, ne12; // batch dims
     uint a_off;      // byte offset of src0 from binding start (= ameva_bind(a, 2).elem * 2)
@@ -33,8 +34,10 @@ layout(push_constant) uniform PushConstants {
     uint d_s1;       // dst f32 stride for dim 1
     uint d_s2;       // dst f32 stride for dim 2
     uint d_s3;       // dst f32 stride for dim 3
-    uint src_rows;   // src0 row count (for bounds check)
+    uint src_rows;   // rows of src0 in this binding (a table above one binding is bound in row chunks)
     uint node;       // node id for status
+    uint row0;       // first src0 row of this binding: a chunk takes the indices in [row0, row0 + src_rows)
+    uint total_rows; // src0 row count: an index outside [0, total_rows) is an error (reported by the chunk at row 0)
 } pc;
 
 // Byte read helpers (little-endian, a[] is a uint array from binding start)
@@ -56,17 +59,23 @@ void main() {
     const uint i12 = t / pc.ne11;
 
     const int row = idx[pc.i_off + i10 * pc.i_s0 + i11 * pc.i_s1 + i12 * pc.i_s2];
-    if (row < 0 || uint(row) >= pc.src_rows) {
-        if (c == 0u) {
+    if (row < 0 || uint(row) >= pc.total_rows) {
+        if (c == 0u && pc.row0 == 0u) {
             atomicAdd(status[0], 1u);
             atomicMin(status[1], pc.node);
         }
         return;
     }
+    if (uint(row) < pc.row0 || uint(row) - pc.row0 >= pc.src_rows) return; // another chunk's row
 
-    const uint row_base = pc.a_off + uint(row) * pc.a_nb1 + i11 * pc.a_nb2 + i12 * pc.a_nb3;
+    const uint row_base = pc.a_off + (uint(row) - pc.row0) * pc.a_nb1 + i11 * pc.a_nb2 + i12 * pc.a_nb3;
+#if defined(Q6_K)
+    const uint block    = c / 256u;
+    const uint e        = c & 255u;
+#else
     const uint block    = c / 32u;
     const uint e        = c & 31u;
+#endif
     float val;
 
     // ggml's q4_0 / q5_0 blocks (dequantize_row_q4_0 / _q5_0): byte qs[j] holds element j in its low nibble and
@@ -88,8 +97,31 @@ void main() {
     const uint ql    = e < 16u ? (qs & 0xFu) : (qs >> 4u);
     val = delta * (float(ql | (qh << 4u)) - 16.0);
 
+#elif defined(Q8_0)
+    // q8_0 block: [delta:f16(2), qs[32] int8 (32)] = 34 bytes/block (dequantize_row_q8_0)
+    const uint boff  = row_base + block * 34u;
+    const float delta = ameva_h2f(a_read_u16(boff));
+    const uint qb    = a_read_byte(boff + 2u + e);
+    val = delta * float(int(qb) - (qb >= 128u ? 256 : 0));
+
+#elif defined(Q6_K)
+    // q6_K block: [ql[128], qh[64], scales[16] int8, d:f16] = 210 bytes/block (dequantize_row_q6_K). Element
+    // e = 128 n + 32 q + l (n half, q quarter, l < 32): low 4 bits in ql[64 n + l + 32 (q & 1)] (high nibble when
+    // q >= 2), high 2 bits at bit 2 q of qh[32 n + l], scale scales[8 n + l / 16 + 2 q]; value d * scale * (q6 - 32)
+    const uint boff  = row_base + block * 210u;
+    const uint n     = e >> 7u;
+    const uint qq    = (e >> 5u) & 3u;
+    const uint l     = e & 31u;
+    const uint qlb   = a_read_byte(boff + 64u * n + l + 32u * (qq & 1u));
+    const uint lo    = qq >= 2u ? (qlb >> 4u) : (qlb & 0xFu);
+    const uint hi    = (a_read_byte(boff + 128u + 32u * n + l) >> (2u * qq)) & 3u;
+    const uint scb   = a_read_byte(boff + 192u + 8u * n + (l >> 4u) + 2u * qq);
+    const float scale = float(int(scb) - (scb >= 128u ? 256 : 0));
+    const float delta = ameva_h2f(a_read_u16(boff + 208u));
+    val = delta * scale * float(int(lo | (hi << 4u)) - 32);
+
 #else
-#error "define Q4_0 or Q5_0"
+#error "define Q4_0, Q5_0, Q8_0 or Q6_K"
 #endif
 
     d[pc.d_off + c + i10 * pc.d_s1 + i11 * pc.d_s2 + i12 * pc.d_s3] = floatBitsToUint(val);

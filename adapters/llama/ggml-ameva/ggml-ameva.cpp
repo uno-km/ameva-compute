@@ -1740,12 +1740,15 @@ const char* ameva_op_unsupported_reason(const struct ggml_tensor* op) {
         }
         case GGML_OP_GET_ROWS: {
             const struct ggml_tensor *a = op->src[0], *idx = op->src[1];
-            const bool q_src = a && (a->type == GGML_TYPE_Q4_0 || a->type == GGML_TYPE_Q5_0);
+            const bool q_src = a && (a->type == GGML_TYPE_Q4_0 || a->type == GGML_TYPE_Q5_0 ||
+                                     a->type == GGML_TYPE_Q8_0 || a->type == GGML_TYPE_Q6_K);
             if (!(is_f32(a) || is_f16(a) || q_src) || !is_f32(op)) return "get_rows type pair";
             if (!idx || idx->type != GGML_TYPE_I32) return "get_rows index type";
-            if (q_src && (op->ne[0] % 32 != 0)) return "get_rows quantized src ne[0] not multiple of 32";
+            if (q_src && (op->ne[0] % ggml_blck_size(a->type) != 0)) return "get_rows quantized src ne[0] not a multiple of the block";
             if (!rows_contiguous(a) || !rows_contiguous(op) || !rows_contiguous(idx)) return "rows not contiguous";
-            if (!fits_binding(a) || !fits_binding(op) || !fits_binding(idx)) return "tensor exceeds a buffer binding";
+            // a quantized 2-D table above one binding (a large vocabulary's embedding) is read in row chunks
+            const bool a_fits = fits_binding(a) || (q_src && a->ne[2] == 1 && a->ne[3] == 1 && fits_binding_rows(a));
+            if (!a_fits || !fits_binding(op) || !fits_binding(idx)) return "tensor exceeds a buffer binding";
             if (!fits_kernel_indexing(a) || !fits_kernel_indexing(op) || !fits_kernel_indexing(idx)) return "exceeds 32-bit indexing";
             return nullptr;
         }
@@ -3812,35 +3815,56 @@ static const char* enc_set_rows(AmevaRecorder& rec, const struct ggml_tensor* no
                         (double)ggml_nelements(a));
 }
 
-// GET_ROWS for q4_0 / q5_0 sources (ggml block layout, not repacked): gather + dequantize → f32 dst.
+// GET_ROWS for q4_0 / q5_0 / q8_0 / q6_K sources (ggml block layout, not repacked): gather + dequantize → f32 dst.
 static const char* enc_get_rows_q(AmevaRecorder& rec, const struct ggml_tensor* node) {
     const struct ggml_tensor *a = node->src[0], *idx = node->src[1];
-    const bool q5 = a->type == GGML_TYPE_Q5_0;
-    AcKernel* kernel = ameva_op_kernel(q5 ? AMEVA_K_GET_ROWS_Q5_0 : AMEVA_K_GET_ROWS_Q4_0);
-    if (!kernel) return q5 ? "no ameva_get_rows_q5_0 kernel" : "no ameva_get_rows_q4_0 kernel";
-    AmevaBind ba, bi, bd;
-    // esize=2: ba.elem * 2 = byte offset from the aligned descriptor start
-    const char* e = ameva_bind(a, 2, &ba);
-    if (!e) e = ameva_bind(idx, 4, &bi);
+    AmevaOpKernelId id;
+    switch (a->type) {
+        case GGML_TYPE_Q4_0: id = AMEVA_K_GET_ROWS_Q4_0; break;
+        case GGML_TYPE_Q5_0: id = AMEVA_K_GET_ROWS_Q5_0; break;
+        case GGML_TYPE_Q8_0: id = AMEVA_K_GET_ROWS_Q8_0; break;
+        case GGML_TYPE_Q6_K: id = AMEVA_K_GET_ROWS_Q6_K; break;
+        default: return "get_rows: no kernel for this quantized type";
+    }
+    AcKernel* kernel = ameva_op_kernel(id);
+    if (!kernel) return "no ameva_get_rows_q kernel for this type";
+    AmevaBind bi, bd;
+    const char* e = ameva_bind(idx, 4, &bi);
     if (!e) e = ameva_bind(node, 4, &bd);
     if (e) return e;
     const AmevaBind bs = ameva_status_bind();
-    const uint32_t pc[18] = {
-        (uint32_t)node->ne[0], (uint32_t)idx->ne[0], (uint32_t)idx->ne[1], (uint32_t)idx->ne[2],
-        ba.elem * 2u, (uint32_t)a->nb[1], (uint32_t)a->nb[2], (uint32_t)a->nb[3],
-        bi.elem, (uint32_t)(idx->nb[0] / 4u), (uint32_t)(idx->nb[1] / 4u), (uint32_t)(idx->nb[2] / 4u),
-        bd.elem, st(node, 1), st(node, 2), st(node, 3),
-        (uint32_t)a->ne[1], (uint32_t)rec.node
-    };
-    const AcBufferBinding bind[4] = { ba.b, bi.b, bs.b, bd.b };
-    const AmevaBind reads[2] = { ba, bi };
-    return ameva_record(rec, kernel, reads, 2, &bd, 1, bind, 4, pc, sizeof(pc),
-                        ameva_grid_1d(ggml_nelements(node), 256), (double)ggml_nelements(node));
+    // the table whole, or (2-D, above one binding) in chunks of rows: each dispatch takes the indices in its chunk
+    const uint64_t total = (uint64_t)a->ne[1];
+    const uint64_t chunk = fits_binding(a) ? total : std::max<uint64_t>(1, ameva_max_binding_span() / (uint64_t)a->nb[1]);
+    if (chunk < total && (a->ne[2] != 1 || a->ne[3] != 1)) return "get_rows: a table above one binding must be 2-D";
+    for (uint64_t r0 = 0; r0 < total; r0 += chunk) {
+        const uint64_t rows = std::min<uint64_t>(chunk, total - r0);
+        AmevaBind ba;
+        // esize=2: ba.elem * 2 = byte offset from the aligned descriptor start
+        e = chunk < total ? ameva_bind_span(a, r0 * (uint64_t)a->nb[1], rows * (uint64_t)a->nb[1], 2, &ba)
+                          : ameva_bind(a, 2, &ba);
+        if (e) return e;
+        const uint32_t pc[20] = {
+            (uint32_t)node->ne[0], (uint32_t)idx->ne[0], (uint32_t)idx->ne[1], (uint32_t)idx->ne[2],
+            ba.elem * 2u, (uint32_t)a->nb[1], (uint32_t)a->nb[2], (uint32_t)a->nb[3],
+            bi.elem, (uint32_t)(idx->nb[0] / 4u), (uint32_t)(idx->nb[1] / 4u), (uint32_t)(idx->nb[2] / 4u),
+            bd.elem, st(node, 1), st(node, 2), st(node, 3),
+            (uint32_t)rows, (uint32_t)rec.node, (uint32_t)r0, (uint32_t)total
+        };
+        const AcBufferBinding bind[4] = { ba.b, bi.b, bs.b, bd.b };
+        const AmevaBind reads[2] = { ba, bi };
+        e = ameva_record(rec, kernel, reads, 2, &bd, 1, bind, 4, pc, sizeof(pc),
+                         ameva_grid_1d(ggml_nelements(node), 256), (double)ggml_nelements(node));
+        if (e) return e;
+    }
+    return nullptr;
 }
 
 static const char* enc_get_rows(AmevaRecorder& rec, const struct ggml_tensor* node) {
     const struct ggml_tensor *a = node->src[0], *idx = node->src[1];
-    if (a->type == GGML_TYPE_Q4_0 || a->type == GGML_TYPE_Q5_0) return enc_get_rows_q(rec, node);
+    if (a->type == GGML_TYPE_Q4_0 || a->type == GGML_TYPE_Q5_0 || a->type == GGML_TYPE_Q8_0 ||
+        a->type == GGML_TYPE_Q6_K)
+        return enc_get_rows_q(rec, node);
     AcKernel* kernel = ameva_op_kernel(AMEVA_K_GET_ROWS);
     if (!kernel) return "no ameva_get_rows kernel";
     const bool f16 = a->type == GGML_TYPE_F16;
