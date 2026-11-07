@@ -52,7 +52,9 @@ static void* run(void* p) {
     cpu_set_t s;
     CPU_ZERO(&s);
     CPU_SET(j->core, &s);
-    if (sched_setaffinity(0, sizeof(s), &s) != 0) { fprintf(stderr, "FAIL pin to core %d\n", j->core); exit(1); }
+    // a core in the affinity mask can go offline (the S20 hot-plugs its big cores): the thread then runs unpinned and
+    // says so (CPU_BW_UNPINNED); it is not dropped
+    if (sched_setaffinity(0, sizeof(s), &s) != 0) printf("CPU_BW_UNPINNED core=%d (offline or refused)\n", j->core);
     while (!atomic_load(j->go)) {}
     uint64x2_t acc = vdupq_n_u64(0);
     double bytes = 0;
