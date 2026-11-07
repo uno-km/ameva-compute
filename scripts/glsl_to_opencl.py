@@ -481,23 +481,38 @@ _UNROLL_MARK = "AMEVA_CF_UNROLL"
 _NOUNROLL_MARK = "AMEVA_CF_DONT_UNROLL"
 
 
-def _emit_unroll(text, unroll):
+def _emit_unroll(text, unroll, partial=None):
     """The marks of [[unroll]] / [[dont_unroll]] -> a pragma on a line of its own before the loop they precede
-    (unroll True), or nothing (unroll False)."""
+    (unroll True), or nothing (unroll False). partial {regex: n} (with unroll True): an [[unroll]] loop whose
+    translated header "for (...)" matches regex gets "#pragma unroll n" instead; every regex must match one loop."""
+    partial = partial or {}
+    hits = dict.fromkeys(partial, 0)
+
     def one(mark, pragma, t):
         def rep(m):
-            if not re.match(r"\s*for\s*\(", t[m.end():]):
+            head = re.match(r"\s*(for\s*\([^)]*\))", t[m.end():])
+            if not head:
                 _fail("%s not followed by a for loop" % mark)
-            return ("\n%s\n%s" % (pragma, m.group(1))) if unroll else m.group(1)
+            p = pragma
+            if mark == _UNROLL_MARK:
+                for rx, n in partial.items():
+                    if re.search(rx, head.group(1)):
+                        hits[rx] += 1
+                        p = "#pragma unroll %d" % n
+            return ("\n%s\n%s" % (p, m.group(1))) if unroll else m.group(1)
         return re.sub(r"([ \t]*)%s[ \t]*" % mark, rep, t)
     text = one(_UNROLL_MARK, "#pragma unroll", text)
     text = one(_NOUNROLL_MARK, "#pragma unroll 1", text)
     if _UNROLL_MARK in text or _NOUNROLL_MARK in text:
         _fail("an unroll mark is left in the translation")
+    if unroll:
+        for rx, n in hits.items():
+            if n != 1:
+                _fail("partial unroll %r matches %d [[unroll]] loops, not one" % (rx, n))
     return re.sub(r"\n[ \t]*\n+", "\n", text)
 
 
-def translate(src, unroll=False):
+def translate(src, unroll=False, partial=None):
     """(OpenCL C source without the prelude, binding count, push-constant bytes, local size, takes binding ranges) of
     a preprocessed AMEVA compute shader"""
     src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
@@ -717,7 +732,7 @@ def translate(src, unroll=False):
     text = "\n".join(o for o in out if o) + "\n"
     text = re.sub(r"\n[ \t]*\n+", "\n", text)
     text = _gather_to_vload4(text)
-    text = _emit_unroll(text, unroll)
+    text = _emit_unroll(text, unroll, partial)
     if precise:
         text = "#pragma OPENCL FP_CONTRACT OFF\n" + text
     return text, len(buffers), 4 * len(push_members or []), local, uses_ranges
