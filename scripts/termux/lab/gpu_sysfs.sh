@@ -29,7 +29,9 @@ gpu_cap_khz() {
 gpu_now_mhz() {
     case $(gpu_family) in
         mali) _gs_rd /sys/kernel/gpu/gpu_clock ;;
-        adreno) local v; v=$(_gs_rd /sys/class/kgsl/kgsl-3d0/gpuclk); [ "$v" = NA ] && echo NA || echo $((v / 1000000)) ;;
+        # gpuclk (Hz) is not readable by an app on the S20; clock_mhz is
+        adreno) local v; v=$(_gs_rd /sys/class/kgsl/kgsl-3d0/gpuclk)
+                if [ "$v" != NA ]; then echo $((v / 1000000)); else _gs_rd /sys/class/kgsl/kgsl-3d0/clock_mhz; fi ;;
         *) echo NA ;;
     esac
 }
@@ -58,4 +60,16 @@ gpu_gate_wait() {
         sleep 5; w=$((w + 5))
     done
     echo "$w"
+}
+# gpu_clock_watch_start FILE / gpu_clock_watch_stop: sample the current GPU clock (MHz) every 0.5 s into FILE while a
+# run is timed (a sampler on the phone, killed by stop; not a wait loop); gpu_clock_watch_summary FILE prints
+# "clk_med=<MHz> clk_min=<MHz> clk_n=<samples>" (NA when the node is unreadable)
+gpu_clock_watch_start() {
+    : > "$1"
+    ( while :; do gpu_now_mhz >> "$1"; sleep 0.5; done ) > /dev/null 2>&1 &
+    _GS_WATCH=$!
+}
+gpu_clock_watch_stop() { [ -n "${_GS_WATCH:-}" ] && kill "$_GS_WATCH" 2> /dev/null; wait "$_GS_WATCH" 2> /dev/null; _GS_WATCH=; }
+gpu_clock_watch_summary() {
+    grep -E "^[0-9]+$" "$1" | sort -n | awk '{a[NR] = $1} END {if (NR) printf "clk_med=%d clk_min=%d clk_n=%d\n", a[int((NR + 1) / 2)], a[1], NR; else print "clk_med=NA clk_min=NA clk_n=0"}'
 }
