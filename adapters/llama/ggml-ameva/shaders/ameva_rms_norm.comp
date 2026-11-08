@@ -13,6 +13,17 @@ layout(std430, binding = 0) readonly buffer A { uint a[]; };
 layout(std430, binding = 1) writeonly buffer D { uint d[]; };
 layout(std430, binding = 2) readonly buffer W { uint w[]; };   // norm weight (any range when mul == 0)
 layout(std430, binding = 3) writeonly buffer O { uint o[]; };  // y * w (any range when mul == 0)
+#if !defined(AMEVA_OPENCL)
+// The same bindings as 16-byte vectors (Vulkan allows several variables at one binding). One row per workgroup means
+// one workgroup on the whole GPU in token generation: with word loads a lane waited on ne0 / 128 loads in sequence
+// (18 for Gemma 2's 2304; 68.6 us per dispatch on the Adreno 650 of the Galaxy S20, 105 dispatches per token).
+// Rows whose offsets and length are multiples of 4 elements take vector loads and stores, 4x fewer per lane. The sums
+// are the same products added in another order (f32 rounding only, as the tree reduction already is).
+layout(std430, binding = 0) readonly buffer A4 { uvec4 a4[]; };
+layout(std430, binding = 1) writeonly buffer D4 { uvec4 d4[]; };
+layout(std430, binding = 2) readonly buffer W4 { uvec4 w4[]; };
+layout(std430, binding = 3) writeonly buffer O4 { uvec4 o4[]; };
+#endif
 
 layout(push_constant) uniform PushConstants {
     uint ne0, ne1, ne2, nrows;
@@ -34,6 +45,32 @@ void main() {
     const uint i3 = row / (pc.ne1 * pc.ne2);
     const uint ab = pc.a_off + i1 * pc.a_s1 + i2 * pc.a_s2 + i3 * pc.a_s3;
     const uint db = pc.d_off + i1 * pc.d_s1 + i2 * pc.d_s2 + i3 * pc.d_s3;
+    const uint ob = pc.o_off + i1 * pc.o_s1 + i2 * pc.o_s2 + i3 * pc.o_s3;
+#if !defined(AMEVA_OPENCL)
+    // uniform across the workgroup (one row)
+    const bool vec = ((pc.ne0 | ab | db) & 3u) == 0u && (pc.mul == 0u || ((ob | pc.w_off) & 3u) == 0u);
+    if (vec) {
+        const uint n4 = pc.ne0 >> 2u;
+        vec4 s4 = vec4(0.0);
+        for (uint k = tid; k < n4; k += 128u) {
+            const vec4 x = uintBitsToFloat(a4[(ab >> 2u) + k]);
+            s4 += x * x;
+        }
+        red[tid] = (s4.x + s4.y) + (s4.z + s4.w);
+        barrier();
+        for (uint st = 64u; st > 0u; st >>= 1u) {
+            if (tid < st) red[tid] += red[tid + st];
+            barrier();
+        }
+        const float scale4 = 1.0 / sqrt(red[0] / float(pc.ne0) + uintBitsToFloat(pc.eps));
+        for (uint k = tid; k < n4; k += 128u) {
+            const vec4 y = uintBitsToFloat(a4[(ab >> 2u) + k]) * scale4;
+            d4[(db >> 2u) + k] = floatBitsToUint(y);
+            if (pc.mul != 0u) o4[(ob >> 2u) + k] = floatBitsToUint(y * uintBitsToFloat(w4[(pc.w_off >> 2u) + k]));
+        }
+        return;
+    }
+#endif
     float s = 0.0;
     for (uint k = tid; k < pc.ne0; k += 128u) {
         const float x = uintBitsToFloat(a[ab + k]);
@@ -47,7 +84,6 @@ void main() {
     }
     const float mean = red[0] / float(pc.ne0);
     const float scale = 1.0 / sqrt(mean + uintBitsToFloat(pc.eps));
-    const uint ob = pc.o_off + i1 * pc.o_s1 + i2 * pc.o_s2 + i3 * pc.o_s3;
     for (uint k = tid; k < pc.ne0; k += 128u) {
         const float y = uintBitsToFloat(a[ab + k]) * scale;
         d[db + k] = floatBitsToUint(y);

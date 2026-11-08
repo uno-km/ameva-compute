@@ -34,6 +34,11 @@
 layout(std430, binding = 0) readonly buffer BufQ { QVEC qv[]; };
 layout(std430, binding = 1) readonly buffer BufH { HVEC hv[]; };
 layout(std430, binding = 2) readonly buffer BufS { uint sw[]; };
+#if (defined(TYPE_Q4_K) || defined(TYPE_Q5_K)) && !defined(AMEVA_OPENCL)
+// the same binding as 16-byte vectors: a q4_K / q5_K block's S fields (16 bytes) in one load when they start at a
+// multiple of 16 bytes (Vulkan allows several variables at one binding; the OpenCL translation keeps the word loads)
+layout(std430, binding = 2) readonly buffer BufS4 { uvec4 sw4[]; };
+#endif
 
 uint s_last; // last word of the S binding: a clamped word only feeds bytes outside the field being read
 uint sw_at(uint wi) { return sw[min(wi, s_last)]; }
@@ -45,6 +50,17 @@ uint sld32(uint a) {
 }
 uint sld16(uint a) { return (sw_at(a >> 2u) >> ((a & 2u) * 8u)) & 0xFFFFu; }
 float sldh(uint a) { return ameva_h2f(sld16(a)); }
+#if defined(TYPE_Q4_K) || defined(TYPE_Q5_K)
+// the 16 bytes of S fields of a q4_K / q5_K block at byte address a (even): d | dmin << 16, then scales[12].
+// 2026-11-08, Adreno 650 (Galaxy S20): the five to eight word loads of these fields per 32-weight unit, each lane of a
+// warp at another row, held the q4_K GEMV at 11-15 GB/s against 24 GB/s for q6_K (two S loads per unit).
+uvec4 s_blk16(uint a) {
+#if !defined(AMEVA_OPENCL)
+    if ((a & 15u) == 0u) return sw4[a >> 4u]; // uniform: a block's fields are 16-byte aligned when s_off is
+#endif
+    return uvec4(sld32(a), sld32(a + 4u), sld32(a + 8u), sld32(a + 12u));
+}
+#endif
 
 vec4 u8x4(uint w) { return vec4(uvec4(w, w >> 8u, w >> 16u, w >> 24u) & 0xFFu); }
 vec4 s8x4(uint w) {
@@ -205,8 +221,9 @@ void decode(uint qi, uint hi, uint sb, uint j, out vec4 w[8]) {
 #elif defined(TYPE_Q4_K) || defined(TYPE_Q5_K)
     // S: d@0 dmin@2 scales[12]@4 (get_scale_min_k4(j)). y = d * sc * q - dmin * m
     const uvec4 q = qv[qi];
-    const float d = sldh(sb), dmin = sldh(sb + 2u);
-    const uint s0 = sld32(sb + 4u), s1 = sld32(sb + 8u), s2 = sld32(sb + 12u);
+    const uvec4 sb4 = s_blk16(sb);
+    const float d = ameva_h2f(sb4.x & 0xFFFFu), dmin = ameva_h2f(sb4.x >> 16u);
+    const uint s0 = sb4.y, s1 = sb4.z, s2 = sb4.w;
     // get_scale_min_k4 without a branch (the lanes of a row hold different j)
     const uint k = 8u * (j & 3u);
     const uint b0 = (s0 >> k) & 0xFFu, b1 = (s1 >> k) & 0xFFu, b2 = (s2 >> k) & 0xFFu;
@@ -365,8 +382,9 @@ void decode_i8(uint qi, uint hi, uint sb, uint j, out uint v[8], out vec2 sc, ou
     mc = vec2(-4.0 * dl0, -4.0 * dl1);
 #elif defined(TYPE_Q4_K) || defined(TYPE_Q5_K)
     const uvec4 q = qv[qi];
-    const float d = sldh(sb), dmin = sldh(sb + 2u);
-    const uint s0 = sld32(sb + 4u), s1 = sld32(sb + 8u), s2 = sld32(sb + 12u);
+    const uvec4 sb4 = s_blk16(sb);
+    const float d = ameva_h2f(sb4.x & 0xFFFFu), dmin = ameva_h2f(sb4.x >> 16u);
+    const uint s0 = sb4.y, s1 = sb4.z, s2 = sb4.w;
     const uint k = 8u * (j & 3u);
     const uint b0 = (s0 >> k) & 0xFFu, b1 = (s1 >> k) & 0xFFu, b2 = (s2 >> k) & 0xFFu;
     const bool lo = j < 4u;

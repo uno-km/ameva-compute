@@ -740,7 +740,8 @@ def translate(src, unroll=False, partial=None):
 
 def preprocess(glslang, path, defines):
     """the shader with includes and macros expanded for one set of defines (glslangValidator -E)"""
-    cmd = [glslang, "-E", "-S", "comp"] + ["-D%s" % d for d in defines] + [path]
+    # AMEVA_OPENCL: shader text that only Vulkan can take (e.g. two buffer variables at one binding) is left out
+    cmd = [glslang, "-E", "-S", "comp", "-DAMEVA_OPENCL"] + ["-D%s" % d for d in defines] + [path]
     p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=os.path.dirname(path) or ".")
     if p.returncode != 0:
         raise TranslateError("%s failed:\n%s%s" % (" ".join(cmd), p.stdout, p.stderr))

@@ -236,7 +236,9 @@ def source_info(path):
     (included files count: a shared include may declare bindings). The local size is None when the source takes it
     from defines."""
     src = read_with_includes(path)
-    bindings = [int(b) for b in re.findall(r"layout\(std430,\s*binding\s*=\s*(\d+)\)", src)]
+    # a binding may be declared more than once (a second view of the same buffer, e.g. as 16-byte vectors; Vulkan only,
+    # inside #if !defined(AMEVA_OPENCL)): count each number once
+    bindings = sorted(set(int(b) for b in re.findall(r"layout\(std430,\s*binding\s*=\s*(\d+)\)", src)))
     if not bindings or sorted(bindings) != list(range(len(bindings))):
         fail("%s: bindings must be numbered 0..n-1, found %s" % (path, bindings))
     m = re.search(r"layout\(push_constant\)\s*uniform\s+\w+\s*\{(.*?)\}", src, re.S)

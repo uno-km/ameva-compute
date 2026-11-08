@@ -599,6 +599,43 @@ static AcKernel* ameva_make_kernel_ex(const char* name, const uint32_t* spirv, s
                                      &meta, AC_KERNEL_SOURCE_BINDING_RANGES };
         res = ac_runtime_kernel_create_from_source(s_ctx, &sdesc, &k);
     } else {
+        // AMEVA_SPV_DIR=<dir> (kernel tuning, the Vulkan counterpart of AMEVA_CL_SOURCE_DIR): <dir>/<kernel name>.spv
+        // replaces the built-in SPIR-V of that kernel and <dir>/<kernel name>.sha256 (its SHA-256, 64 hex digits, as
+        // sha256sum prints it) is the hash the runtime checks it against. Every replacement is announced; a module
+        // without its hash file is refused. The kernel must keep its bindings, push constants and workgroup size.
+        std::vector<uint32_t> spv_words;
+        char spv_sha[65] = "";
+        if (const char* dir = getenv("AMEVA_SPV_DIR")) {
+            const std::string base = std::string(dir) + "/" + name;
+            if (FILE* f = *dir ? fopen((base + ".spv").c_str(), "rb") : nullptr) {
+                std::vector<uint8_t> raw;
+                uint8_t buf[4096];
+                size_t n;
+                while ((n = fread(buf, 1, sizeof(buf), f)) > 0) raw.insert(raw.end(), buf, buf + n);
+                fclose(f);
+                FILE* h = fopen((base + ".sha256").c_str(), "rb");
+                if (!h || fread(spv_sha, 1, 64, h) != 64) {
+                    if (h) fclose(h);
+                    fprintf(stderr, "ggml-ameva: kernel %s: %s.spv without a 64-digit %s.sha256 (AMEVA_SPV_DIR)\n", name,
+                            base.c_str(), base.c_str());
+                    return nullptr;
+                }
+                fclose(h);
+                spv_sha[64] = '\0';
+                if (raw.empty() || raw.size() % 4 != 0) {
+                    fprintf(stderr, "ggml-ameva: kernel %s: %s.spv is not a SPIR-V module (%zu bytes)\n", name,
+                            base.c_str(), raw.size());
+                    return nullptr;
+                }
+                spv_words.resize(raw.size() / 4);
+                memcpy(spv_words.data(), raw.data(), raw.size());
+                spirv = spv_words.data();
+                bytes = raw.size();
+                sha = spv_sha;
+                fprintf(stderr, "ggml-ameva: kernel %s from %s.spv (AMEVA_SPV_DIR, sha256 %.16s)\n", name, base.c_str(),
+                        spv_sha);
+            }
+        }
         AcKernelRuntimeMetadata meta = {
             name, "main", bindings, kBindings, push_bytes, local, 0, sha, 0, nullptr
         };
@@ -2915,6 +2952,25 @@ static int ameva_type_from_name(const char* name) {
     return -1;
 }
 
+// AMEVA_QMV_TUNE_COLD=1 (diagnostic, default 0): GEMV layouts timed with the weight evicted from the caches
+// (ameva_qmv_tune_shape). Measured 2026-11-08 on the Adreno 650 of the Galaxy S20 (Gemma 2 2B): cold times are 6-20 %
+// above warm ones, and the layouts chosen from them gave 0.6 % slower token generation (9.39-9.44 against 9.44-9.51
+// t/s, 3 rounds), so the default stays warm (N-20261108-q4k-gemv-scale-loads).
+static bool ameva_qmv_tune_cold(void) {
+    static const bool cold = [] {
+        const char* e = getenv("AMEVA_QMV_TUNE_COLD");
+        if (!e || !*e || !strcmp(e, "0")) return false;
+        if (!strcmp(e, "1")) return true;
+        GGML_ABORT("ggml-ameva: AMEVA_QMV_TUNE_COLD must be 0 or 1 (got \"%s\")", e);
+    }();
+    return cold;
+}
+// line 1 of the tune file: warm times keep format 2; cold times are another format, so neither file is read for
+// the other mode
+static const char* ameva_qmv_tune_header(void) {
+    return ameva_qmv_tune_cold() ? "ggml-ameva-qmv-tune 3 cold\n" : "ggml-ameva-qmv-tune 2\n";
+}
+
 static std::string ameva_qmv_tune_path(void) {
     const char* e = getenv("AMEVA_QMV_TUNE_FILE");
     if (e && strcmp(e, "0") == 0) return std::string();
@@ -2930,7 +2986,7 @@ static std::string ameva_qmv_tune_path(void) {
                                                           : "/.cache/ameva/ggml-ameva-qmv-tune.txt");
 }
 
-// Tune file: line 1 "ggml-ameva-qmv-tune 2", line 2 "device <s_device_key> <device name>", then one line per shape:
+// Tune file: line 1 "ggml-ameva-qmv-tune 2" ("3 cold" with AMEVA_QMV_TUNE_COLD=1; ameva_qmv_tune_header), line 2 "device <s_device_key> <device name>", then one line per shape:
 // <type> <K> <N> <ameva_qmv SPIR-V id> <mali_qmv SPIR-V id> <ameva_mmvq SPIR-V id> <mali> <rows> <tpr> <us>
 // <default us> <i8 state> <i8 rows> <i8 tpr> <i8 us>  (i8 state: AMEVA_I8_*).
 // Read once (caller holds s_tune_mutex). A file of another device, driver or format, or one that does not parse, is
@@ -2955,7 +3011,7 @@ static void ameva_qmv_tune_file_read(void) {
     while (!bad && fgets(line, sizeof(line), f)) {
         ++ln;
         if (ln == 1) {
-            if (strcmp(line, "ggml-ameva-qmv-tune 2\n") != 0) bad = "another format";
+            if (strcmp(line, ameva_qmv_tune_header()) != 0) bad = "another format";
             continue;
         }
         if (ln == 2) {
@@ -3006,7 +3062,7 @@ static void ameva_qmv_tune_file_read(void) {
 // caller holds s_tune_mutex
 static void ameva_qmv_tune_file_write(void) {
     if (s_tune_path.empty()) return;
-    std::string out = "ggml-ameva-qmv-tune 2\ndevice " + s_device_key + " " + s_device_name + "\n";
+    std::string out = std::string(ameva_qmv_tune_header()) + "device " + s_device_key + " " + s_device_name + "\n";
     char line[320];
     for (const AmevaQmvShape& s : s_qmv_shapes) {
         char qs[24], ms[24], vs[24];
@@ -3145,13 +3201,39 @@ static const char* ameva_qmv_tune_shape(const struct ggml_tensor* node, AmevaQmv
         }
     }
 
+    // Cold weights (AMEVA_QMV_TUNE_COLD=1, diagnostic): in token generation the other weights pass between two uses
+    // of a weight, while this measurement repeats one weight. The question was whether a weight that fits in the caches
+    // (q4_K 1024x2304, 1.3 MB: 97 us here, 246 us in the per-dispatch profile of token generation on the Adreno 650)
+    // is timed too fast; cold it took 113 us, and the 246 us are the profile's attribution (see ameva_qmv_tune_cold).
+    // Before every timed dispatch an RMS_NORM over a separate 32 MiB buffer (read and written in place) evicts the
+    // caches; its time is not counted (each dispatch's time runs from the end of the one before it).
+    const bool cold = ameva_qmv_tune_cold();
+    static const uint32_t kEvictRow = 4096, kEvictRows = 2048; // 32 MiB of f32
+    Owned evict;
+    AcKernel* evict_k = nullptr;
+    if (cold) {
+        evict_k = ameva_op_kernel(AMEVA_K_RMS_NORM);
+        if (!evict_k) return "cache eviction for the GEMV measurement: no ameva_rms_norm kernel (AMEVA_QMV_TUNE_COLD=0 times warm)";
+        const AcBufferDesc edesc = { AC_ABI_VERSION, sizeof(AcBufferDesc), (size_t)kEvictRow * kEvictRows * 4,
+                                     AC_BUFFER_USAGE_STORAGE, 0 };
+        if (ac_runtime_buffer_create(s_ctx, &edesc, &evict.buf) != AC_SUCCESS) {
+            evict.buf = nullptr;
+            return "cache eviction buffer for the GEMV measurement unavailable (AMEVA_QMV_TUNE_COLD=0 times warm)";
+        }
+        ameva_increment_buffer_create_count();
+        const std::vector<float> ones((size_t)kEvictRow * kEvictRows, 1.0f);
+        if (ac_runtime_buffer_write(evict.buf, 0, ones.data(), ones.size() * 4) != AC_SUCCESS)
+            return "cache eviction buffer write failed";
+    }
+    const uint32_t step = cold ? 2u : 1u; // dispatches per timed layout: [eviction,] the layout
+
     // Rounds of every layout in turn (a warm-up round first), one submission per round (bounded GPU time per
     // submission) and one barrier between dispatches so that each runs alone. A dispatch's time runs from the end of
     // the dispatch before it, so the first dispatch of a submission also counts the gap since the previous submission:
     // each round therefore starts with an extra dispatch of the default layout whose time is not used. With ameva_mmvq
     // layouts the second dispatch of a round quantizes the activation row; its time is added to theirs.
     const uint32_t lead = with_i8 ? 2u : 1u;
-    const uint32_t per_round = nc + lead, nd = per_round * (1 + kQmvTuneRounds);
+    const uint32_t per_round = nc * step + lead, nd = per_round * (1 + kQmvTuneRounds);
     const AcBatchDesc batch_desc = { AC_ABI_VERSION, sizeof(AcBatchDesc), nd,
                                      AC_BATCH_FLAG_EXPLICIT_BARRIERS | AC_BATCH_FLAG_DISPATCH_TIMESTAMPS };
     AcCommandBatch* batch = nullptr;
@@ -3163,9 +3245,19 @@ static const char* ameva_qmv_tune_shape(const struct ggml_tensor* node, AmevaQmv
     if (r != AC_SUCCESS) return "batch for the GEMV measurement could not be begun";
     for (uint32_t round = 0; round <= kQmvTuneRounds && r == AC_SUCCESS; ++round) {
         for (uint32_t j = 0; j < per_round && r == AC_SUCCESS; ++j) {
-            const uint32_t c = j < lead ? 0 : j - lead; // j == 0: the lead dispatch of the round
+            const uint32_t c = j < lead ? 0 : (j - lead) / step; // j == 0: the lead dispatch of the round
             if (round || j) r = ac_runtime_batch_barrier(batch);
             if (r != AC_SUCCESS) break;
+            if (cold && j >= lead && (j - lead) % step == 0) {
+                const uint32_t ne = kEvictRow * kEvictRows;
+                const uint32_t pce[19] = { kEvictRow, kEvictRows, 1u, kEvictRows, 0u, kEvictRow, ne, ne,
+                                           0u, kEvictRow, ne, ne, fbits(1e-6f), 0u, 0u, 0u, 0u, 0u, 0u };
+                const AcBufferBinding be = { evict.buf, 0, (uint64_t)ne * 4 };
+                const AcBufferBinding binde[4] = { be, be, be, be };
+                r = ac_runtime_batch_dispatch_bindings(batch, evict_k, binde, 4, pce, sizeof(pce),
+                                                       ameva_grid_groups(kEvictRows));
+                continue;
+            }
             const AcBufferBinding ba = { owned.buf, 0, a_bytes }, bq = { owned.buf, a_bytes, q_bytes };
             if (with_i8 && j == 1) {
                 const uint32_t pcq[6] = { 1u, K, 0u, K, 0u, U * fam.ad_units };
@@ -3231,7 +3323,8 @@ static const char* ameva_qmv_tune_shape(const struct ggml_tensor* node, AmevaQmv
         quant_us = us[kQmvTuneRounds / 2];
     }
     for (uint32_t c = 0; c < nc; ++c) {
-        for (uint32_t round = 1; round <= kQmvTuneRounds; ++round) us[round - 1] = times[round * per_round + lead + c] / 1e3;
+        for (uint32_t round = 1; round <= kQmvTuneRounds; ++round)
+            us[round - 1] = times[round * per_round + lead + c * step + step - 1] / 1e3;
         std::sort(us.begin(), us.end());
         cands[c].median_us = us[kQmvTuneRounds / 2] + (cands[c].c.i8 ? quant_us : 0.0);
         if (c == 0) continue;
