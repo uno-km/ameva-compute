@@ -2040,7 +2040,7 @@ struct AmevaRange {
 
 // Submission sizing. Mobile drivers reset the GPU when one submission runs for seconds (S25: a 256-token Llama-1B
 // prompt as one 4 s submission never completed), so the batch is flushed to the queue once the recorded work reaches
-// kFlushMac multiply-accumulates or kFlushDispatches dispatches; one dispatch never exceeds kDispatchMac (large
+// kFlushMac multiply-accumulates or ameva_flush_dispatches() dispatches; one dispatch never exceeds kDispatchMac (large
 // MUL_MATs and attention are split). Flushing early also lets the GPU start while the rest is recorded.
 // AMEVA_FLUSH_MAC / AMEVA_DISPATCH_MAC=<multiply-accumulates> (experiment): replace the two budgets
 static double ameva_env_mac(const char* name, double def) {
@@ -2054,7 +2054,31 @@ static double ameva_env_mac(const char* name, double def) {
 }
 static const double kFlushMac = ameva_env_mac("AMEVA_FLUSH_MAC", 4e9);
 static const double kDispatchMac = ameva_env_mac("AMEVA_DISPATCH_MAC", 4e9);
-static const uint32_t kFlushDispatches = 128;
+// Dispatch budget of one submission. 128 by default: flushing early lets the GPU run while the rest of the graph is
+// recorded, which is faster on the Qualcomm Adreno driver and on Mali (token generation, 3 alternating rounds,
+// 2026-11-08: one submission per token instead was 18 % slower for Qwen2.5 0.5B on the Galaxy S25, 6 % for Gemma 2 2B
+// on the S21's Vulkan, 10 % for Qwen on the S21's OpenCL). With Mesa's Turnip driver (Galaxy S20) every submission
+// costs milliseconds of CPU time (recording a Qwen token took 35 ms with three submissions, 4 ms with one) and the GPU
+// waits in between, so its clock governor stays at 400-441 of 587 MHz; there the budget is 65536 (one submission per
+// token; the multiply-accumulate budget kFlushMac still splits large prompt graphs): Qwen 21.4-22.7 -> 29.4-29.5 t/s,
+// Llama 3.2 1B 20.8-20.9 -> 21.6-21.7, same text. AMEVA_FLUSH_DISPATCHES=<n> (16..65536) replaces the budget.
+static uint32_t ameva_flush_dispatches(void) {
+    static const uint32_t n = [] {
+        const char* e = getenv("AMEVA_FLUSH_DISPATCHES");
+        if (e && *e) {
+            char* end = nullptr;
+            const unsigned long v = strtoul(e, &end, 10);
+            if (!end || *end || v < 16 || v > 65536) {
+                GGML_ABORT("ggml-ameva: AMEVA_FLUSH_DISPATCHES must be 16..65536 (got \"%s\")", e);
+            }
+            fprintf(stderr, "ggml-ameva: AMEVA_FLUSH_DISPATCHES=%lu\n", v);
+            return (uint32_t)v;
+        }
+        // read after the context exists (first graph): the device name is known by then
+        return (!ameva_backend_is_opencl() && strstr(s_device_name, "Turnip")) ? 65536u : 128u;
+    }();
+    return n;
+}
 
 struct AmevaRecorder {
     AcCommandBatch* batch = nullptr;
@@ -2134,7 +2158,7 @@ static const char* ameva_record(AmevaRecorder& rec, AcKernel* kernel, const Amev
     if (rec.profile_kinds) rec.kinds.push_back(rec.kind);
     rec.mac_since_flush += mac;
     rec.mac_total += mac;
-    if (++rec.dispatches_since_flush >= kFlushDispatches || rec.mac_since_flush >= kFlushMac) {
+    if (++rec.dispatches_since_flush >= ameva_flush_dispatches() || rec.mac_since_flush >= kFlushMac) {
         // the hazard state stays: a barrier recorded later also covers the flushed commands
         const uint64_t tf = ameva_now_ns();
         AcResult fr = ac_runtime_batch_flush(rec.batch);
