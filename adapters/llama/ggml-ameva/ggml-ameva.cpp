@@ -2268,7 +2268,8 @@ static const uint64_t kMmqUnitBytes = 40;
 // MMQB (shaders/ameva_mmqb.comp): for the MUL_MATs that run ameva_mmq on a q4_K, q5_K or q6_K weight, the same
 // product with one activation scale per 256 elements (shaders/ameva_quant_a8b.comp) and integer accumulation over the
 // block, without shared memory. The scratch of a chunk has the size ameva_mmq's has (320 bytes per 256 elements).
-//   AMEVA_MMQB unset        Mali on OpenCL with MMQ: on, q4_K=2x4,q6_K=1x8,q5_K=1x8 (one line on stderr); otherwise off
+//   AMEVA_MMQB unset        Mali on OpenCL with MMQ: on (one line on stderr), Mali-G68 q4_K=2x8,q6_K=2x8,q5_K=2x8,
+//                           other Mali q4_K=2x4,q6_K=1x8,q5_K=2x8; otherwise off
 //   0                       off (ameva_mmq)
 //   1                       the first layout of the build, for the three weight types
 //   <w>x<a>                 w weight rows and a activation rows per invocation, for the three weight types
@@ -2296,6 +2297,12 @@ static const uint64_t kMmqUnitBytes = 40;
 //   q6_K  ameva_mmq 33.0-33.7   1x8 31.9-32.0   1x16 33.6        2x8 61-68  2x16 59-64  2x4 71-96
 //   q5_K  ameva_mmq 31.9-33.6   1x16 34.2       1x8 34.4-34.7    2x8 62-64  2x16 59-67  2x4 78-90
 // (two weight rows per invocation pay for q4_K only; why the other two types double with them is not known).
+// The same phone with the weights in 16-row tiles, M=512, kernel ms, 3 rounds at 897 MHz (2026-11-08, hw_study):
+//   q4_K 9216x2304  ameva_mmq 191   2x4 140   2x8 130   2x16 140   1x8 210   1x4 215   1x16 234
+//   q4_K 2304x9216  ameva_mmq 207   2x4 169   2x8 155   2x16 165   1x8 311   1x4 241   1x16 322
+//   q6_K 2304x9216  ameva_mmq 221   2x4 309   2x8 206   2x16 193-211  1x8 279   1x4 360   1x16 295
+//   q5_K 9216x2304  ameva_mmq 194   2x4 210   2x8 153   2x16 148   1x8 223   1x4 257   1x16 240
+// so on the G68 the previous default (1x8) made q6_K and q5_K 15-26 % slower than ameva_mmq; 2x8 is the G68 default.
 // Accuracy: the activations are rounded to int8 per 256 elements (ggml's Q8_K, what the CPU backend multiplies these
 // weight types with; measured on real models with AMEVA_ACT_FQ, docs/design/opencl-prompt-path.md, stage A).
 static const std::vector<int>& ameva_mmqb_selection(void) {
@@ -2308,7 +2315,11 @@ static const std::vector<int>& ameva_mmqb_selection(void) {
         // the default: Mali on OpenCL with MMQ only (without MMQ the prompt path has already said that it runs f32
         // kernels)
         if (by_default && (!ameva_backend_is_opencl() || !strstr(s_device_name, "Mali") || !ameva_mmq_enabled())) return;
-        const char* e = by_default ? "q4_K=2x4,q6_K=1x8,q5_K=1x8" : env;
+        // Mali-G68 (Galaxy A53/A35): two weight rows by eight activation rows for the three types; other Mali
+        // (measured on the G78 of the S21): q4_K 2x4, q6_K 1x8, q5_K 2x8 (see the tables above)
+        const char* e = !by_default ? env
+                        : strstr(s_device_name, "G68") ? "q4_K=2x8,q6_K=2x8,q5_K=2x8"
+                                                       : "q4_K=2x4,q6_K=1x8,q5_K=2x8";
         const char* usage = "ggml-ameva: AMEVA_MMQB must be 0, 1, <weight rows>x<activation rows> or "
                             "<type>=<weight rows>x<activation rows>[,...] (got \"%s\")";
         // the variants of the layout, of one weight type or (type == nullptr) of every type of the family

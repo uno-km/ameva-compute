@@ -4,7 +4,8 @@
 # llm_plugin_ab.sh MODEL.gguf: prompt processing and token generation of llama-completion on AMEVA0 for several builds
 # of the plugin and backends, under the measurement protocol of the research program (grade A, ameva-foundation
 # 03_core/docs/research/RESEARCH_PROGRAM.md section 3 item 7):
-#   - VARIANTS (space separated) "<name>:<plugin dir>:<vulkan|opencl>"; the plugin is <plugin dir>/libggml-ameva.so.
+#   - VARIANTS (space separated) "<name>:<plugin dir>:<vulkan|opencl|cpu>"; the plugin is <plugin dir>/libggml-ameva.so.
+#     "cpu" runs the CPU backend (--device none) with CPU_THREADS threads (default THREADS) as the reference.
 #     An optional fourth field holds environment settings of that variant, separated by ";" (a comma is part of values such as
 #     AMEVA_MMQB=q4_K=2x4,q6_K=1x8), e.g. "mmqb:DIR:opencl:AMEVA_MMQB=q4_K=2x4,q6_K=1x8;AMEVA_FUSE=1").
 #   - ROUNDS rounds (default 5), the variants rotated by the round number.
@@ -54,8 +55,12 @@ for r in $(seq 1 "$ROUNDS"); do
         RT="$dir"
         [ -d "${GGML_RT:-$LAB/rt098}" ] && RT="${GGML_RT:-$LAB/rt098}:$dir"
         t0=$(gpu_temp_c); c0=$(gpu_cap_khz)
-        env "${E[@]}" AMEVA_PROFILE=${PROFILE_RE:+2} AMEVA_BACKEND=$api GGML_BACKEND_PATH="$dir/libggml-ameva.so" LD_LIBRARY_PATH="$RT" timeout 900 llama-completion \
-            -m "$M" --device AMEVA0 -ngl 99 --fit off -fa on -no-cnv --temp 0 --top-k 1 --seed 42 -t "$THREADS" \
+        # api "cpu": the same binary and libraries with --device none (CPU backend, CPU_THREADS threads), the
+        # reference the GPU variants are judged against within the same rounds
+        if [ "$api" = cpu ]; then DEV=(--device none -ngl 0); TH=${CPU_THREADS:-$THREADS}; BK=vulkan
+        else DEV=(--device AMEVA0 -ngl 99); TH=$THREADS; BK=$api; fi
+        env "${E[@]}" AMEVA_PROFILE=${PROFILE_RE:+2} AMEVA_BACKEND=$BK GGML_BACKEND_PATH="$dir/libggml-ameva.so" LD_LIBRARY_PATH="$RT" timeout 900 llama-completion \
+            -m "$M" "${DEV[@]}" --fit off -fa on -no-cnv --temp 0 --top-k 1 --seed 42 -t "$TH" \
             -f "$P" -n "$N" -c 2048 -b 512 -ub 512 > "$OUTD/lab_run.out" 2> "$OUTD/lab_run.log" < /dev/null
         rc=$?
         t1=$(gpu_temp_c); c1=$(gpu_cap_khz)
@@ -71,7 +76,7 @@ for r in $(seq 1 "$ROUNDS"); do
                 END { printf " sel_gpu_ms=%.1f all_gpu_ms=%.1f", sel, all }')
         fi
         echo "LAB round=$r pos=$p var=$name rc=$rc pp_tps=${pp:-NA} tg_tps=${tg:-NA} text=$txt tmu0=$t0 tmu1=$t1 cap0=$c0" \
-             "cap1=$c1 valid=$valid cool_wait=$waited$prof"
+             "cap1=$c1 valid=$valid cool_wait=$waited cpus=$(grep Cpus_allowed_list /proc/self/status | awk '{print $2}')$prof"
     done
 done
 echo "LAB_END $(date +%F_%T)"
