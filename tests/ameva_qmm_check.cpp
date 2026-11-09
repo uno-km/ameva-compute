@@ -78,6 +78,8 @@ static void quant_a8_ref(const float* x, int K, int blk, std::vector<double>& xq
     }
 }
 
+bool ameva_backend_is_opencl(void); // ggml-ameva.cpp
+
 // whether AMEVA_MMQB selects ameva_mmqb for the weight type (the rule of ggml-ameva.cpp). Unset, the engine selects
 // the three types on Mali with the OpenCL backend and MMQ on: `mmq_ran` (that case's mmq counter moved) stands for the
 // MMQ switch, and on OpenCL MMQ needs Arm's int8 dot product extension, so OpenCL + MMQ is Mali here.
@@ -85,8 +87,7 @@ static bool mmqb_selected(enum ggml_type type, bool mmq_ran) {
     const char* e = getenv("AMEVA_MMQB");
     if (type != GGML_TYPE_Q4_K && type != GGML_TYPE_Q5_K && type != GGML_TYPE_Q6_K) return false;
     if (!e || !*e) {
-        const char* b = getenv("AMEVA_BACKEND");
-        return b && strcmp(b, "opencl") == 0 && mmq_ran;
+        return ameva_backend_is_opencl() && mmq_ran; // the engine's choice: AMEVA_BACKEND, or auto (Mali-G68)
     }
     if (strcmp(e, "0") == 0) return false;
     if (!strchr(e, '=')) return true;

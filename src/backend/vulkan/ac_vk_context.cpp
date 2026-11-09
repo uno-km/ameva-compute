@@ -8,6 +8,167 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "ac_vk_int_dot_probe_spv.h"
+
+/* Known-answer test of the signed packed int8 dot product on this device: compiles a small kernel, runs 16 products
+   through it (the extremes of int8 and pseudo-random patterns) and compares them with a scalar reference. Returns 1
+   when every product is right; otherwise 0 and the reason in `why`. Used when the operation is called without
+   VK_KHR_shader_integer_dot_product being offered, so that a driver that refuses it or computes it wrong is detected. */
+static int ac_vk_int_dot_probe(VkPhysicalDevice phys, VkDevice dev, VkQueue queue, VkCommandPool pool, char* why,
+                               size_t why_size) {
+    int ok = 0;
+    VkBuffer buf = VK_NULL_HANDLE;
+    VkDeviceMemory mem = VK_NULL_HANDLE;
+    VkShaderModule sm = VK_NULL_HANDLE;
+    VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
+    VkDescriptorPool dp = VK_NULL_HANDLE;
+    VkPipelineLayout pl = VK_NULL_HANDLE;
+    VkPipeline pipe = VK_NULL_HANDLE;
+    VkCommandBuffer cb = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+    do {
+        VkBufferCreateInfo bi = {};
+        bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bi.size = 48 * sizeof(int32_t);
+        bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        if (vkCreateBuffer(dev, &bi, NULL, &buf) != VK_SUCCESS) { snprintf(why, why_size, "vkCreateBuffer"); break; }
+        VkMemoryRequirements mr;
+        vkGetBufferMemoryRequirements(dev, buf, &mr);
+        VkPhysicalDeviceMemoryProperties mp;
+        vkGetPhysicalDeviceMemoryProperties(phys, &mp);
+        const VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        uint32_t ti = mp.memoryTypeCount;
+        for (uint32_t i = 0; i < mp.memoryTypeCount; ++i) {
+            if ((mr.memoryTypeBits & (1u << i)) && (mp.memoryTypes[i].propertyFlags & want) == want) { ti = i; break; }
+        }
+        if (ti == mp.memoryTypeCount) { snprintf(why, why_size, "no host-visible coherent memory"); break; }
+        VkMemoryAllocateInfo ai = {};
+        ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        ai.allocationSize = mr.size;
+        ai.memoryTypeIndex = ti;
+        if (vkAllocateMemory(dev, &ai, NULL, &mem) != VK_SUCCESS || vkBindBufferMemory(dev, buf, mem, 0) != VK_SUCCESS) {
+            snprintf(why, why_size, "buffer memory");
+            break;
+        }
+        int32_t* d = NULL;
+        if (vkMapMemory(dev, mem, 0, VK_WHOLE_SIZE, 0, (void**)&d) != VK_SUCCESS) { snprintf(why, why_size, "vkMapMemory"); break; }
+        static const uint32_t edge[4][2] = { { 0x80808080u, 0x80808080u }, { 0x7F7F7F7Fu, 0x80808080u },
+                                             { 0x7F7F7F7Fu, 0x7F7F7F7Fu }, { 0x01FF80FEu, 0xFF7F02C3u } };
+        uint32_t x = 0x12345678u;
+        int32_t expect[16];
+        for (int i = 0; i < 16; ++i) {
+            uint32_t a, b;
+            if (i < 4) { a = edge[i][0]; b = edge[i][1]; }
+            else { x = x * 1664525u + 1013904223u; a = x; x = x * 1664525u + 1013904223u; b = x; }
+            d[i] = (int32_t)a;
+            d[16 + i] = (int32_t)b;
+            d[32 + i] = 0x5A5A5A5A;
+            int32_t e = 0;
+            for (int k = 0; k < 4; ++k) e += (int32_t)(int8_t)(a >> (8 * k)) * (int32_t)(int8_t)(b >> (8 * k));
+            expect[i] = e;
+        }
+        VkShaderModuleCreateInfo si = {};
+        si.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        si.codeSize = sizeof(kAcVkIntDotProbeSpv);
+        si.pCode = kAcVkIntDotProbeSpv;
+        VkResult r = vkCreateShaderModule(dev, &si, NULL, &sm);
+        if (r != VK_SUCCESS) { snprintf(why, why_size, "vkCreateShaderModule refused the kernel (%d)", (int)r); break; }
+        VkDescriptorSetLayoutBinding lb = {};
+        lb.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        lb.descriptorCount = 1;
+        lb.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        VkDescriptorSetLayoutCreateInfo li = {};
+        li.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        li.bindingCount = 1;
+        li.pBindings = &lb;
+        VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 };
+        VkDescriptorPoolCreateInfo pi = {};
+        pi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        pi.maxSets = 1;
+        pi.poolSizeCount = 1;
+        pi.pPoolSizes = &ps;
+        if (vkCreateDescriptorSetLayout(dev, &li, NULL, &dsl) != VK_SUCCESS || vkCreateDescriptorPool(dev, &pi, NULL, &dp) != VK_SUCCESS) {
+            snprintf(why, why_size, "descriptor layout or pool");
+            break;
+        }
+        VkPipelineLayoutCreateInfo pli = {};
+        pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pli.setLayoutCount = 1;
+        pli.pSetLayouts = &dsl;
+        if (vkCreatePipelineLayout(dev, &pli, NULL, &pl) != VK_SUCCESS) { snprintf(why, why_size, "pipeline layout"); break; }
+        VkDescriptorSetAllocateInfo dai = {};
+        dai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dai.descriptorPool = dp;
+        dai.descriptorSetCount = 1;
+        dai.pSetLayouts = &dsl;
+        VkDescriptorSet ds = VK_NULL_HANDLE;
+        if (vkAllocateDescriptorSets(dev, &dai, &ds) != VK_SUCCESS) { snprintf(why, why_size, "descriptor set"); break; }
+        VkDescriptorBufferInfo dbi = { buf, 0, VK_WHOLE_SIZE };
+        VkWriteDescriptorSet w = {};
+        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet = ds;
+        w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w.pBufferInfo = &dbi;
+        vkUpdateDescriptorSets(dev, 1, &w, 0, NULL);
+        VkComputePipelineCreateInfo ci = {};
+        ci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        ci.stage.module = sm;
+        ci.stage.pName = "main";
+        ci.layout = pl;
+        r = vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &ci, NULL, &pipe);
+        if (r != VK_SUCCESS) { snprintf(why, why_size, "the driver refused the kernel (vkCreateComputePipelines %d)", (int)r); break; }
+        VkCommandBufferAllocateInfo cai = {};
+        cai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cai.commandPool = pool;
+        cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cai.commandBufferCount = 1;
+        VkCommandBufferBeginInfo bgi = {};
+        bgi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        if (vkAllocateCommandBuffers(dev, &cai, &cb) != VK_SUCCESS || vkBeginCommandBuffer(cb, &bgi) != VK_SUCCESS) {
+            snprintf(why, why_size, "command buffer");
+            break;
+        }
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pl, 0, 1, &ds, 0, NULL);
+        vkCmdDispatch(cb, 1, 1, 1);
+        VkMemoryBarrier mb = {};
+        mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+        VkFenceCreateInfo fi = {};
+        fi.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        VkSubmitInfo sub = {};
+        sub.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        sub.commandBufferCount = 1;
+        sub.pCommandBuffers = &cb;
+        if (vkEndCommandBuffer(cb) != VK_SUCCESS || vkCreateFence(dev, &fi, NULL, &fence) != VK_SUCCESS ||
+            vkQueueSubmit(queue, 1, &sub, fence) != VK_SUCCESS) {
+            snprintf(why, why_size, "submission");
+            break;
+        }
+        r = vkWaitForFences(dev, 1, &fence, VK_TRUE, 5000000000ull);
+        if (r != VK_SUCCESS) { snprintf(why, why_size, "the kernel did not finish (%d)", (int)r); break; }
+        int bad = -1;
+        for (int i = 0; i < 16 && bad < 0; ++i) if (d[32 + i] != expect[i]) bad = i;
+        if (bad >= 0) { snprintf(why, why_size, "wrong result at %d: %d, expected %d", bad, d[32 + bad], expect[bad]); break; }
+        ok = 1;
+    } while (0);
+    if (cb) vkFreeCommandBuffers(dev, pool, 1, &cb);
+    if (fence) vkDestroyFence(dev, fence, NULL);
+    if (pipe) vkDestroyPipeline(dev, pipe, NULL);
+    if (pl) vkDestroyPipelineLayout(dev, pl, NULL);
+    if (dp) vkDestroyDescriptorPool(dev, dp, NULL);
+    if (dsl) vkDestroyDescriptorSetLayout(dev, dsl, NULL);
+    if (sm) vkDestroyShaderModule(dev, sm, NULL);
+    if (mem) vkFreeMemory(dev, mem, NULL);
+    if (buf) vkDestroyBuffer(dev, buf, NULL);
+    return ok;
+}
+
 extern "C" {
 
 AcResult ac_vk_context_create(AcVkContext** out_ctx) {
@@ -138,17 +299,6 @@ AcResult ac_vk_context_create(AcVkContext** out_ctx) {
             }
         }
     }
-    /* Experiment, outside the Vulkan specification (AC_VK_FORCE_INT_DOT=1): report packed int8 dot products to the
-       caller on a device that does not offer the extension, so that kernels with OpSDotKHR reach the driver's
-       compiler. Mali-G68 r32p1 and Mali-G78 r38p0 expose the operation through OpenCL only. Announced on stderr. */
-    if (!intDot) {
-        const char* forceIntDot = getenv("AC_VK_FORCE_INT_DOT");
-        if (forceIntDot && strcmp(forceIntDot, "1") == 0) {
-            intDot = 1;
-            fprintf(stderr, "ac_runtime: AC_VK_FORCE_INT_DOT=1: integer dot product forced on, the driver does not offer "
-                            "VK_KHR_shader_integer_dot_product (experiment, outside the Vulkan specification)\n");
-        }
-    }
     deviceCreateInfo.enabledExtensionCount = deviceExtensionCount;
     deviceCreateInfo.ppEnabledExtensionNames = deviceExtensionCount ? deviceExtensions : NULL;
 
@@ -172,6 +322,36 @@ AcResult ac_vk_context_create(AcVkContext** out_ctx) {
         vkDestroyDevice(device, NULL);
         vkDestroyInstance(instance, NULL);
         return AC_ERR_DRIVER_INIT_FAILED;
+    }
+
+    /* Packed int8 dot product on a device that does not offer VK_KHR_shader_integer_dot_product (outside the Vulkan
+       specification). Mali-G78 with driver 38 exposes the operation through OpenCL only, yet its Vulkan compiler accepts
+       it: Galaxy S21 r38p0, prompt 1.8-2.3x, generation +10-16 % (2026-11-09); Mali-G68 r32p1 refuses the kernels.
+       Unset: on for that driver only, after a known-answer test, announced on stderr, and off (with the reason) when the
+       test fails. AC_VK_FORCE_INT_DOT=1: any device, failure of the test is an error. =0: off. */
+    if (!intDot) {
+        const char* forceIntDot = getenv("AC_VK_FORCE_INT_DOT");
+        const bool forceOn = forceIntDot && strcmp(forceIntDot, "1") == 0;
+        const bool forceOff = forceIntDot && strcmp(forceIntDot, "0") == 0;
+        const bool listed = selectedProps.vendorID == 0x13B5u && strstr(selectedProps.deviceName, "Mali-G78") != NULL &&
+                            VK_VERSION_MAJOR(selectedProps.driverVersion) == 38;
+        if (forceOn || (listed && !forceOff)) {
+            char why[160] = "";
+            if (ac_vk_int_dot_probe(selectedDevice, device, computeQueue, commandPool, why, sizeof(why))) {
+                intDot = 1;
+                fprintf(stderr, "ac_runtime: int8 dot product on Vulkan without VK_KHR_shader_integer_dot_product (%s, "
+                                "known-answer test passed, outside the Vulkan specification; AC_VK_FORCE_INT_DOT=0 turns it off)\n",
+                        forceOn ? "AC_VK_FORCE_INT_DOT=1" : selectedProps.deviceName);
+            } else if (forceOn) {
+                fprintf(stderr, "ac_runtime: AC_VK_FORCE_INT_DOT=1: known-answer test failed: %s\n", why);
+                vkDestroyCommandPool(device, commandPool, NULL);
+                vkDestroyDevice(device, NULL);
+                vkDestroyInstance(instance, NULL);
+                return AC_ERR_DRIVER_INIT_FAILED;
+            } else {
+                fprintf(stderr, "ac_runtime: int8 dot product stays off on Vulkan: known-answer test failed: %s\n", why);
+            }
+        }
     }
 
     AcVkContext* ctx = (AcVkContext*)calloc(1, sizeof(AcVkContext));

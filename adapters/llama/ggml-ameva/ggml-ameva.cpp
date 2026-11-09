@@ -328,16 +328,41 @@ static AcBuffer* s_scratch = nullptr;
 static uint64_t s_scratch_bytes = 0;
 static std::mutex s_mutex;          // context, kernel and status-buffer creation, teardown
 
-// AMEVA_BACKEND selects the ac_runtime backend of this process: "vulkan" (default) or "opencl"
+// AMEVA_BACKEND selects the ac_runtime backend of this process: "auto" (default), "vulkan" or "opencl"
 // (docs/design/opencl-prompt-path.md, stage B: the same graph engine and the same kernels, translated to OpenCL C,
 // on AC_BACKEND_OPENCL; Mali exposes its int8 dot product there and not in Vulkan). Any other value aborts: a
 // request for a backend is never answered with another one.
+// AMEVA_BACKEND unset or "auto": the backend measured to be the faster one on this GPU. Mali-G68 runs OpenCL (Galaxy A53
+// r32p1 and A35 r38p1 against release 2.8.1 on Vulkan, 2026-11-09: generation +15..+53 %; prompt +12..+148 %, except
+// Qwen2.5 0.5B on the A35, -39 %); every other GPU runs Vulkan, including Mali-G78 (known-answer-tested int8 dot product
+// in ac_vk_context.cpp, ahead of OpenCL on the prompt on the Galaxy S21). The choice is printed. The OpenCL context is
+// created here once to see that the device has it; without it, the run stays on Vulkan and says so.
+static bool ameva_auto_backend_is_opencl(void) {
+    AcContext* probe = nullptr;
+    AcContextDesc vk = { AC_ABI_VERSION, sizeof(AcContextDesc), AC_BACKEND_VULKAN, 0 };
+    if (ac_runtime_context_create(&vk, &probe) != AC_SUCCESS) return false;
+    char name[128] = "?";
+    (void)ac_runtime_context_get_device_name(probe, name, sizeof(name));
+    ac_runtime_context_destroy(probe);
+    if (!strstr(name, "Mali-G68")) return false;
+    AcContextDesc cl = { AC_ABI_VERSION, sizeof(AcContextDesc), AC_BACKEND_OPENCL, 0 };
+    probe = nullptr;
+    const AcResult res = ac_runtime_context_create(&cl, &probe);
+    if (res != AC_SUCCESS) {
+        fprintf(stderr, "ggml-ameva: %s: OpenCL is the default here but its context failed (code %d); running on Vulkan\n", name, res);
+        return false;
+    }
+    ac_runtime_context_destroy(probe);
+    fprintf(stderr, "ggml-ameva: %s: OpenCL by default (AMEVA_BACKEND=vulkan selects Vulkan)\n", name);
+    return true;
+}
 bool ameva_backend_is_opencl(void) {
     static const bool cl = [] {
         const char* e = getenv("AMEVA_BACKEND");
-        if (!e || !*e || strcmp(e, "vulkan") == 0) return false;
+        if (!e || !*e || strcmp(e, "auto") == 0) return ameva_auto_backend_is_opencl();
+        if (strcmp(e, "vulkan") == 0) return false;
         if (strcmp(e, "opencl") == 0) return true;
-        GGML_ABORT("ggml-ameva: AMEVA_BACKEND must be \"vulkan\" or \"opencl\" (got \"%s\")", e);
+        GGML_ABORT("ggml-ameva: AMEVA_BACKEND must be \"auto\", \"vulkan\" or \"opencl\" (got \"%s\")", e);
     }();
     return cl;
 }
