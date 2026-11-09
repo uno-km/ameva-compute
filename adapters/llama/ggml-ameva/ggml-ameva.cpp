@@ -1350,6 +1350,10 @@ static const char* mul_mat_qmm_reason(const struct ggml_tensor* op) {
     if (src0->ne[2] > b2 || src0->ne[3] > b3) return "src0 batch larger than src1";
     if (b2 % src0->ne[2] != 0 || b3 % src0->ne[3] != 0) return "batch not broadcast-compatible";
     if (b2 * b3 > 4096) return "more than 4096 batch matrices";
+    // Repacked weights have no batched kernel. With AMEVA_REPACK_ALL=1 the weight becomes repacked at its first write,
+    // usually after this question (test-backend-ops asks first): decline here, not at graph_compute.
+    if (b2 * b3 > 1 && (ameva_repacked_base(src0) || (ameva_repack_all_enabled() && ameva_qmv_has_type(src0->type))))
+        return "batched MUL_MAT on repacked weights";
     // Batched non-unit: require full tensors fit in one binding so enc_mul_mat_qmm can use one binding.
     if (b2 * b3 > 1) {
         const size_t span = ameva_max_binding_span();
