@@ -503,15 +503,18 @@ def main():
                 mmvqe.append((name, rows, var, len(data), hashlib.sha256(data).hexdigest()))
                 print("mmvqe %-6s rows=%d %6d bytes sha256=%s" % (name, rows, len(data), mmvqe[-1][4]))
         fsrc = os.path.join(SHADERS, "ameva_flash_attn.comp")
+        fsrc_r1 = os.path.join(SHADERS, "ameva_flash_attn_r1.comp")
         fbind, fpush, flocal = source_info(fsrc)
         if fpush > 128:
             fail("flash_attn: %d push-constant bytes exceed the runtime limit of 128" % fpush)
+        if source_info(fsrc_r1) != (fbind, fpush, flocal):
+            fail("ameva_flash_attn_r1.comp and ameva_flash_attn.comp disagree on bindings, push constants or local size")
         fa_list, fa_experiment = fa_variants()
         for dmax, bq, bk, rpi, dunroll in fa_list:
             fa_check(dmax, bq, bk, rpi, dunroll)
             tag = "d%d_q%d_k%d_r%d_u%d" % (dmax, bq, bk, rpi, dunroll)
             spv = os.path.join(tmp, "fa_%s.spv" % tag)
-            data, rsize = compile_module(args, fsrc, ["DMAX=%du" % dmax, "BQ=%du" % bq, "BK=%du" % bk, "RPI=%du" % rpi,
+            data, rsize = compile_module(args, fsrc_r1 if rpi == 1 and dunroll == 1 else fsrc, ["DMAX=%du" % dmax, "BQ=%du" % bq, "BK=%du" % bk, "RPI=%du" % rpi,
                                                       "DUNROLL=%du" % dunroll], spv, cl["fa"])
             if rsize is not None and rsize != fpush:
                 fail("ameva_flash_attn d%d: reflection says %d push-constant bytes, source %d" % (dmax, rsize, fpush))

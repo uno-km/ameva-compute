@@ -20,7 +20,7 @@ for m in ${MODELS:-qwen2.5-0.5b-instruct-q4_k_m Llama-3.2-1B-Instruct-Q4_K_M qwe
     f=$D/$m.gguf
     [ -s "$f" ] || f=$(find "$HOME" -name "$m.gguf" -size +100M 2>/dev/null | head -1)
     [ -s "$f" ] || { echo "LADDER_SKIP model=$m reason=not_on_phone" >> "$O/info"; continue; }
-    VARIANTS="gpu:$K/bin:$API cpu:$K/bin:cpu" ROUNDS=${ROUNDS:-5} OUTD=$O/$m GGML_RT=$K/rt CORPUS=$K/src/prompt_corpus.txt \
+    VARIANTS="${LADDER_VARIANTS:-gpu:$K/bin:$API cpu:$K/bin:cpu}" ROUNDS=${ROUNDS:-5} OUTD=$O/$m GGML_RT=$K/rt CORPUS=$K/src/prompt_corpus.txt \
         bash "$K/src/llm_plugin_ab2.sh" "$f" > "$O/$m.log" 2>&1 || { rc=1; echo "LADDER_FAIL model=$m" >> "$O/info"; }
 done
 echo $rc > "$O/done.rc"

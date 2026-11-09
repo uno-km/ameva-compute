@@ -53,7 +53,9 @@ SUBSETS = (
 LAB = re.compile(r"^LAB round=(\d+) .*var=(\S+) rc=(\d+) pp_tps=(\S+) tg_tps=(\S+) text=(\S+) .*valid=(\d)(.*)$")
 
 
-def load(ev: Path):
+def load(ev: Path, core_scope="device"):
+    """core_scope "device" keeps the widest core set of the phone (fits across models need one condition);
+    "model" keeps it per model (comparisons of builds within one model and session)."""
     runs = []
     for dev_dir in sorted(p for p in ev.iterdir() if p.is_dir()):
         for log in sorted(dev_dir.glob("*.log")):
@@ -82,11 +84,12 @@ def load(ev: Path):
             r["valid"] = 0
     # the same for the core set: a phone whose Termux went to the background mid-run continues on fewer cores
     # (A53 0-7 -> 0-2, 2026-11-08), which is another condition for the CPU and for the GPU's host thread
+    key = (lambda r: r["dev"]) if core_scope == "device" else (lambda r: (r["dev"], r["model"]))
     wide = {}
     for r in runs:
-        wide[r["dev"]] = max(wide.get(r["dev"], 0), ncores(r["cpus"]))
+        wide[key(r)] = max(wide.get(key(r), 0), ncores(r["cpus"]))
     for r in runs:
-        if ncores(r["cpus"]) < wide[r["dev"]]:
+        if ncores(r["cpus"]) < wide[key(r)]:
             r["valid"] = 0
     return runs
 
