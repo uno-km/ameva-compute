@@ -7,6 +7,8 @@
 //   MODE split: prompt on GPU_DEVICE (default AMEVA0), state transfer, N tokens on the CPU with THREADS threads
 //   MODE gpu:   prompt and generation on GPU_DEVICE
 //   MODE cpu:   prompt and generation on the CPU
+//   MODE xfer:  prompt on the CPU, state transfer to a second CPU context, generation there (the transfer itself must
+//               be lossless: the generated tokens equal those of MODE cpu)
 // Greedy decoding, context 2048, batch 512, flash attention on. One result line:
 //   SPLIT mode= prompt_tokens= pp_tps= state_bytes= state_read_ms= state_write_ms= tg_tps= gen_hash= vmhwm_mb=
 // tg_tps counts the N-1 tokens decoded after the first sampled token (the same convention as llama-completion). Any
@@ -78,7 +80,8 @@ int main(int argc, char** argv) {
     const char* gpu_name = argc > 6 ? argv[6] : "AMEVA0";
     const bool prompt_gpu = mode == "split" || mode == "gpu";
     const bool gen_gpu = mode == "gpu";
-    if (!prompt_gpu && mode != "cpu") die("mode must be split, gpu or cpu");
+    const bool transfer = mode == "split" || mode == "xfer";
+    if (!prompt_gpu && mode != "cpu" && mode != "xfer") die("mode must be split, gpu, cpu or xfer");
 
     FILE* pf = fopen(argv[2], "rb");
     if (!pf) die("cannot open the prompt file");
@@ -137,7 +140,7 @@ int main(int argc, char** argv) {
     llama_context* cg = cp;
     size_t state_bytes = 0;
     double read_ms = 0, write_ms = 0;
-    if (mode == "split") {
+    if (transfer) {
         cg = make_ctx(model_cpu, threads);
         const size_t sz = llama_state_seq_get_size(cp, 0);
         if (!sz) die("state size is zero");
