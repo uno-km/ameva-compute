@@ -73,6 +73,8 @@ struct GenInputs {
     std::string prompt, negative, sampler, scheduler, hiresUpscaler;
     int outW = 0, outH = 0;
     std::vector<uint8_t> init, control, ip;
+    std::vector<uint8_t> refStore[AMEVA_SD_MAX_REF_IMAGES];
+    std::string refArgs;
     std::vector<std::string> loraPathStore;
     std::vector<const char*> loraPaths;
     std::vector<float> loraMults;
@@ -142,6 +144,45 @@ struct GenInputs {
             gp.ip_adapter_strength = fF("ipAdapterStrength");
             if ((size_t)gp.ip_adapter_width * (size_t)gp.ip_adapter_height * 3 != ip.size()) return false;
         }
+        // Reference images: refImages (Array<ByteArray>), refWidths / refHeights (IntArray), refImageArgs.
+        // Copied out of the JVM arrays here; every JNI local reference taken below is released.
+        jobjectArray refA = (jobjectArray)env->GetObjectField(p, env->GetFieldID(c, "refImages", "[[B"));
+        jintArray refW = (jintArray)env->GetObjectField(p, env->GetFieldID(c, "refWidths", "[I"));
+        jintArray refH = (jintArray)env->GetObjectField(p, env->GetFieldID(c, "refHeights", "[I"));
+        refArgs = fS("refImageArgs");
+        if (env->ExceptionCheck()) return false;
+        gp.ref_image_args = refArgs.c_str();
+        bool refOk = true;
+        if (refA != nullptr) {
+            const jsize n = env->GetArrayLength(refA);
+            if (refW == nullptr || refH == nullptr || env->GetArrayLength(refW) != n || env->GetArrayLength(refH) != n) {
+                refOk = false;
+            } else {
+                // More than AMEVA_SD_MAX_REF_IMAGES is passed on as a count, so the C layer reports it.
+                gp.ref_count = (int)n;
+                const jsize fill = n < AMEVA_SD_MAX_REF_IMAGES ? n : AMEVA_SD_MAX_REF_IMAGES;
+                jint wv[AMEVA_SD_MAX_REF_IMAGES] = {0}, hv[AMEVA_SD_MAX_REF_IMAGES] = {0};
+                env->GetIntArrayRegion(refW, 0, fill, wv);
+                env->GetIntArrayRegion(refH, 0, fill, hv);
+                for (jsize i = 0; i < fill && refOk; ++i) {
+                    jbyteArray one = (jbyteArray)env->GetObjectArrayElement(refA, i);
+                    if (one != nullptr) {
+                        refStore[i] = bytes(env, one);
+                        gp.ref_rgb[i] = refStore[i].data();
+                        gp.ref_size[i] = refStore[i].size();
+                        env->DeleteLocalRef(one);
+                    } // a null element stays a NULL ref_rgb: the C layer refuses it
+                    gp.ref_width[i] = wv[i];
+                    gp.ref_height[i] = hv[i];
+                }
+            }
+            env->DeleteLocalRef(refA);
+        } else if (refW != nullptr || refH != nullptr) {
+            refOk = false;
+        }
+        if (refW != nullptr) env->DeleteLocalRef(refW);
+        if (refH != nullptr) env->DeleteLocalRef(refH);
+        if (!refOk || env->ExceptionCheck()) return false;
         gp.hires_scale = fF("hiresScale");
         gp.hires_steps = fI("hiresSteps");
         gp.hires_denoise = fF("hiresDenoise");
@@ -235,10 +276,10 @@ Java_com_ameva_amuda_diffusion_AmevaDiffusion_nativeLoadEx(
     jint nThreads, jint budgetMode, jfloat budgetFraction, jint tePlacement, jint vaePlacement,
     jint diffusionParams, jboolean enableMmap) {
     // paths order (AmevaDiffusion.kt LoadOptions.pathArray): model, diffusion, llm, clipL, t5xxl, vae,
-    // taesd, clipVision, ipAdapter, controlNet, motionModule, photoMaker.
-    const int kPaths = 12;
+    // taesd, clipVision, ipAdapter, controlNet, motionModule, photoMaker, llmVision.
+    const int kPaths = 13;
     if (paths == nullptr || env->GetArrayLength(paths) != kPaths) {
-        throwAmudaException(env, AMEVA_SD_ERR_INVALID_ARGUMENT, "nativeLoadEx: path array must have 12 entries");
+        throwAmudaException(env, AMEVA_SD_ERR_INVALID_ARGUMENT, "nativeLoadEx: path array must have 13 entries");
         return 0;
     }
     std::string p[kPaths];
@@ -260,6 +301,7 @@ Java_com_ameva_amuda_diffusion_AmevaDiffusion_nativeLoadEx(
     opts.control_net_path = p[9].c_str();
     opts.motion_module_path = p[10].c_str();
     opts.photo_maker_path = p[11].c_str();
+    opts.llm_vision_path = p[12].c_str();
     opts.backend_plugin_path = plugin.c_str();
     opts.cache_dir = cache.c_str();
     opts.n_threads = (int)nThreads;
@@ -289,7 +331,7 @@ Java_com_ameva_amuda_diffusion_AmevaDiffusion_nativeGenerate(
     if (!in.read(env, params)) {
         if (!env->ExceptionCheck()) {
             throwAmudaException(env, AMEVA_SD_ERR_INVALID_ARGUMENT,
-                                "GenerateParams: loraPaths/loraMultipliers length or ipAdapter size mismatch");
+                                "GenerateParams: loraPaths/loraMultipliers length, ipAdapter size, or refImages/refWidths/refHeights length mismatch");
         }
         return nullptr;
     }

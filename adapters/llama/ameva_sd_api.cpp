@@ -33,6 +33,9 @@ struct AmevaSd {
     sd_ctx_t* ctx = nullptr;
     std::atomic<bool> cancel_requested{false};
     std::string placement; // see ameva_sd_placement()
+    // Loaded through diffusion_model_path (multi-file model). Reference images are refused otherwise: a
+    // single-file checkpoint is an SD1/SDXL/SD3 pipeline that has no reference-image path in sd.cpp.
+    bool multi_file_model = false;
 };
 
 namespace {
@@ -317,6 +320,7 @@ AmevaSdStatus ameva_sd_load_ex(
     params.model_path = nonEmpty(opts->model_path) ? opts->model_path : nullptr;
     params.diffusion_model_path = nonEmpty(opts->diffusion_model_path) ? opts->diffusion_model_path : nullptr;
     params.llm_path = nonEmpty(opts->llm_path) ? opts->llm_path : nullptr;
+    params.llm_vision_path = nonEmpty(opts->llm_vision_path) ? opts->llm_vision_path : nullptr;
     params.clip_l_path = nonEmpty(opts->clip_l_path) ? opts->clip_l_path : nullptr;
     params.t5xxl_path = nonEmpty(opts->t5xxl_path) ? opts->t5xxl_path : nullptr;
     params.vae_path = nonEmpty(opts->vae_path) ? opts->vae_path : nullptr;
@@ -326,6 +330,13 @@ AmevaSdStatus ameva_sd_load_ex(
     params.control_net_path = nonEmpty(opts->control_net_path) ? opts->control_net_path : nullptr;
     params.motion_module_path = nonEmpty(opts->motion_module_path) ? opts->motion_module_path : nullptr;
     params.photo_maker_path = nonEmpty(opts->photo_maker_path) ? opts->photo_maker_path : nullptr;
+    if (nonEmpty(opts->llm_vision_path) && !nonEmpty(opts->llm_path)) {
+        setMsg(err_buf, err_buf_size, "ameva_sd_load_ex: invalid argument (%s)",
+               "llm_vision_path requires llm_path (the VLM text encoder it belongs to)");
+        freeSd(sd);
+        return AMEVA_SD_ERR_INVALID_ARGUMENT;
+    }
+    sd->multi_file_model = nonEmpty(opts->diffusion_model_path);
     if (nonEmpty(opts->ip_adapter_path) && !nonEmpty(opts->clip_vision_path)) {
         setMsg(err_buf, err_buf_size, "ameva_sd_load_ex: invalid argument (%s)",
                "ip_adapter_path requires clip_vision_path (CLIP-Vision ViT-H/14)");
@@ -407,7 +418,7 @@ AmevaSdStatus ameva_sd_load_ex(
                     int64_t total = 0;
                     const char* failed = nullptr;
                     if (!sumFileSizes({opts->model_path, opts->diffusion_model_path, opts->llm_path,
-                                       opts->clip_l_path, opts->t5xxl_path, opts->vae_path,
+                                       opts->llm_vision_path, opts->clip_l_path, opts->t5xxl_path, opts->vae_path,
                                        opts->taesd_path, opts->clip_vision_path, opts->ip_adapter_path,
                                        opts->control_net_path, opts->motion_module_path,
                                        opts->photo_maker_path}, &total, &failed)) {
@@ -448,7 +459,8 @@ AmevaSdStatus ameva_sd_load_ex(
                     int64_t files = 0;
                     const char* failed = nullptr;
                     const bool sized = sumFileSizes({opts->model_path, opts->diffusion_model_path, opts->llm_path,
-                                                     opts->clip_l_path, opts->t5xxl_path, opts->vae_path,
+                                                     opts->llm_vision_path, opts->clip_l_path, opts->t5xxl_path,
+                                                     opts->vae_path,
                                                      opts->taesd_path, opts->clip_vision_path, opts->ip_adapter_path,
                                                      opts->control_net_path, opts->motion_module_path,
                                                      opts->photo_maker_path}, &files, &failed);
@@ -472,7 +484,8 @@ AmevaSdStatus ameva_sd_load_ex(
                         if (!ggufParts(opts->model_path, &parts)) parts.diffusion = sz(opts->model_path); // counted whole
                         peak = std::max({parts.diffusion + inDiffusion, parts.text_encoder, parts.vae,
                                          sz(opts->diffusion_model_path) + inDiffusion,
-                                         sz(opts->llm_path), sz(opts->clip_l_path) + sz(opts->t5xxl_path),
+                                         sz(opts->llm_path) + sz(opts->llm_vision_path),
+                                         sz(opts->clip_l_path) + sz(opts->t5xxl_path),
                                          sz(opts->clip_vision_path), sz(opts->vae_path), sz(opts->photo_maker_path)});
                         // Time-share keeps one module resident at a time; graph-cut sizes each segment by its
                         // params + compute + cut inputs/outputs against max_vram, so a smaller reserve suffices here
@@ -625,11 +638,97 @@ namespace {
 struct ExtraInputs {
     std::vector<sd_lora_t> loras;
     std::vector<uint8_t> control;
+    // Reference images: pixel copies and the sd_image_t descriptors sd.cpp reads, alive for the whole call.
+    std::vector<uint8_t> refPixels[AMEVA_SD_MAX_REF_IMAGES];
+    std::vector<sd_image_t> refImages;
+    std::string refArgs;
 };
 
+constexpr int kMaxRefSide = 16384;
+
+/** key=value pairs separated by commas; every pair needs a non-empty key and value. */
+bool refArgsWellFormed(const char* args, std::string* why) {
+    std::string s = args;
+    size_t pos = 0;
+    while (pos <= s.size()) {
+        size_t end = s.find(',', pos);
+        if (end == std::string::npos) end = s.size();
+        const std::string tok = s.substr(pos, end - pos);
+        const size_t eq = tok.find('=');
+        if (eq == std::string::npos || eq == 0 || eq + 1 >= tok.size()) {
+            *why = "ref_image_args: '" + tok + "' is not key=value";
+            return false;
+        }
+        pos = end + 1;
+    }
+    return true;
+}
+
+/** Validates reference images and fills ref_images / ref_images_count / ref_image_args. */
+AmevaSdStatus applyReferenceImages(const AmevaSd* sd, const AmevaSdGenerateParams* gp, sd_img_gen_params_t* params,
+                                   ExtraInputs* keep, char* err_buf, size_t err_buf_size) {
+    if (gp->ref_count == 0) {
+        if (nonEmpty(gp->ref_image_args)) {
+            setMsg(err_buf, err_buf_size, "ameva_sd_generate: invalid argument (%s)", "ref_image_args given without reference images");
+            return AMEVA_SD_ERR_INVALID_ARGUMENT;
+        }
+        return AMEVA_SD_OK; // sd_img_gen_params_t keeps its defaults: the path without reference images is untouched
+    }
+    if (gp->ref_count < 0 || gp->ref_count > AMEVA_SD_MAX_REF_IMAGES) {
+        setMsg(err_buf, err_buf_size, "ameva_sd_generate: invalid argument (%s)", "ref_count must be 0..3");
+        return AMEVA_SD_ERR_INVALID_ARGUMENT;
+    }
+    if (!sd->multi_file_model) {
+        setMsg(err_buf, err_buf_size, "ameva_sd_generate: invalid argument (%s)",
+               "reference images need a model loaded through diffusion_model_path (image-edit model); a single-file checkpoint has no reference-image path");
+        return AMEVA_SD_ERR_INVALID_ARGUMENT;
+    }
+    for (int i = 0; i < gp->ref_count; ++i) {
+        if (gp->ref_rgb[i] == nullptr) {
+            setMsg(err_buf, err_buf_size, "ameva_sd_generate: invalid argument (%s)", "ref_rgb[i] is NULL");
+            return AMEVA_SD_ERR_INVALID_ARGUMENT;
+        }
+        const int w = gp->ref_width[i], h = gp->ref_height[i];
+        if (w <= 0 || h <= 0 || w > kMaxRefSide || h > kMaxRefSide) {
+            setMsg(err_buf, err_buf_size, "ameva_sd_generate: invalid argument (%s)", "ref_width/ref_height must be 1..16384");
+            return AMEVA_SD_ERR_INVALID_ARGUMENT;
+        }
+        if (gp->ref_size[i] != (size_t)w * (size_t)h * 3) {
+            setMsg(err_buf, err_buf_size, "ameva_sd_generate: invalid argument (%s)", "ref_size[i] must be ref_width*ref_height*3");
+            return AMEVA_SD_ERR_INVALID_ARGUMENT;
+        }
+    }
+    if (nonEmpty(gp->ref_image_args)) {
+        std::string why;
+        if (!refArgsWellFormed(gp->ref_image_args, &why)) {
+            setMsg(err_buf, err_buf_size, "ameva_sd_generate: invalid argument (%s)", why.c_str());
+            return AMEVA_SD_ERR_INVALID_ARGUMENT;
+        }
+        keep->refArgs = gp->ref_image_args;
+    }
+    keep->refImages.resize((size_t)gp->ref_count);
+    for (int i = 0; i < gp->ref_count; ++i) {
+        keep->refPixels[i].assign(gp->ref_rgb[i], gp->ref_rgb[i] + gp->ref_size[i]);
+        sd_image_t img = {};
+        img.width = (uint32_t)gp->ref_width[i];
+        img.height = (uint32_t)gp->ref_height[i];
+        img.channel = 3;
+        img.data = keep->refPixels[i].data();
+        keep->refImages[(size_t)i] = img;
+    }
+    params->ref_images = keep->refImages.data();
+    params->ref_images_count = gp->ref_count;
+    params->ref_image_args = keep->refArgs.c_str();
+    return AMEVA_SD_OK;
+}
+
 /** Validates and fills LoRA / CLIP skip / ControlNet / IP-Adapter fields. */
-AmevaSdStatus applyExtras(const AmevaSdGenerateParams* gp, sd_img_gen_params_t* params, ExtraInputs* keep,
-                          char* err_buf, size_t err_buf_size) {
+AmevaSdStatus applyExtras(const AmevaSd* sd, const AmevaSdGenerateParams* gp, sd_img_gen_params_t* params,
+                          ExtraInputs* keep, char* err_buf, size_t err_buf_size) {
+    {
+        AmevaSdStatus st = applyReferenceImages(sd, gp, params, keep, err_buf, err_buf_size);
+        if (st != AMEVA_SD_OK) return st;
+    }
     if (gp->lora_count < 0 || (gp->lora_count > 0 && (gp->lora_paths == nullptr || gp->lora_multipliers == nullptr))) {
         setMsg(err_buf, err_buf_size, "ameva_sd_generate: invalid argument (%s)", "lora_paths/lora_multipliers/lora_count");
         return AMEVA_SD_ERR_INVALID_ARGUMENT;
@@ -812,7 +911,7 @@ AmevaSdStatus ameva_sd_generate(
     }
     ExtraInputs extras;
     {
-        AmevaSdStatus st = applyExtras(gp, &params, &extras, err_buf, err_buf_size);
+        AmevaSdStatus st = applyExtras(sd, gp, &params, &extras, err_buf, err_buf_size);
         if (st != AMEVA_SD_OK) return st;
     }
 
@@ -886,6 +985,11 @@ AmevaSdStatus ameva_sd_generate_video(
     }
     if (gp->duty_cycle_percent < 1 || gp->duty_cycle_percent > 100 || !std::isfinite(gp->cfg_scale)) {
         setMsg(err_buf, err_buf_size, "ameva_sd_generate_video: invalid argument (%s)", "duty_cycle_percent or cfg_scale");
+        return AMEVA_SD_ERR_INVALID_ARGUMENT;
+    }
+    if (gp->ref_count != 0 || nonEmpty(gp->ref_image_args)) {
+        setMsg(err_buf, err_buf_size, "ameva_sd_generate_video: invalid argument (%s)",
+               "reference images are not supported by ameva_sd_generate_video");
         return AMEVA_SD_ERR_INVALID_ARGUMENT;
     }
     const size_t frameSize = (size_t)gp->width * (size_t)gp->height * 3;

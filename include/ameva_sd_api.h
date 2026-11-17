@@ -215,6 +215,10 @@ typedef struct {
     const char* motion_module_path;
     /** PhotoMaker weights (SDXL). */
     const char* photo_maker_path;
+    /** Vision tower (mmproj GGUF) of the VLM text encoder given as llm_path, e.g. the Qwen2.5-VL / Qwen3-VL
+     *  mmproj of an image-edit model. sd.cpp loads it into the text encoder (llm_vision_path), so it is placed
+     *  and budgeted with the text encoder. Requires llm_path (else AMEVA_SD_ERR_INVALID_ARGUMENT). */
+    const char* llm_vision_path;
 } AmevaSdLoadOptions;
 
 /** Fills defaults: struct_size, budget_mode DEFAULT, budget_fraction 0.95, GPU placements,
@@ -236,6 +240,9 @@ AmevaSdStatus ameva_sd_load_ex(
 /** Called once per sampling step from the generating thread. [seconds_for_step] is the measured
  *  wall time of that step, excluding any duty-cycle idle time. */
 typedef void (*AmevaSdProgressFn)(int step, int steps, float seconds_for_step, void* user_data);
+
+/** Maximum number of reference images in AmevaSdGenerateParams (ref_count). */
+#define AMEVA_SD_MAX_REF_IMAGES 3
 
 typedef struct {
     /** Must be sizeof(AmevaSdGenerateParams); set by ameva_sd_generate_params_init(). */
@@ -301,6 +308,22 @@ typedef struct {
     float hires_denoise;
     /** sd.cpp hires upscaler name (latent, latent_nearest, latent_bicubic, lanczos, ...); NULL/"": latent. */
     const char* hires_upscaler;
+    /** Reference images for image-edit / composition models (sd.cpp ref_images: FLUX.2, Qwen-Image-Edit,
+     *  FLUX Kontext, Z-Image omni, ...). 0: none. 1..AMEVA_SD_MAX_REF_IMAGES: ref_rgb[i] is packed RGB8 of
+     *  ref_width[i]*ref_height[i]*3 bytes (any size, 1..16384 per side) and ref_size[i] must equal that
+     *  byte count. A count outside 0..AMEVA_SD_MAX_REF_IMAGES, a NULL pointer, a size mismatch, or a model
+     *  loaded through model_path (a single-file checkpoint) instead of diffusion_model_path is refused with
+     *  AMEVA_SD_ERR_INVALID_ARGUMENT; reference images are never dropped silently. Not used by
+     *  ameva_sd_generate_video() (refused there too when ref_count != 0). */
+    int ref_count;
+    const uint8_t* ref_rgb[AMEVA_SD_MAX_REF_IMAGES];
+    int ref_width[AMEVA_SD_MAX_REF_IMAGES];
+    int ref_height[AMEVA_SD_MAX_REF_IMAGES];
+    size_t ref_size[AMEVA_SD_MAX_REF_IMAGES];
+    /** sd.cpp reference-image arguments, comma-separated key=value pairs (docs/edit.md in sd.cpp), e.g.
+     *  "preset=qwen_layered" or "pass_to_vlm=true,pass_to_dit=true". NULL/"": the model's default preset.
+     *  Syntax is checked here (AMEVA_SD_ERR_INVALID_ARGUMENT); key and value names are sd.cpp's. */
+    const char* ref_image_args;
 } AmevaSdGenerateParams;
 
 /** Fills defaults: struct_size, 512x512, 20 steps, seed -1, strength 0.75, duty 100. */

@@ -114,7 +114,7 @@ class AmevaDiffusion private constructor(private val handle: Long) : AutoCloseab
             val paths = arrayOf(options.modelPath, options.diffusionModelPath, options.llmPath,
                 options.clipLPath, options.t5xxlPath, options.vaePath, options.taesdPath,
                 options.clipVisionPath, options.ipAdapterPath, options.controlNetPath,
-                options.motionModulePath, options.photoMakerPath)
+                options.motionModulePath, options.photoMakerPath, options.llmVisionPath)
             return AmevaDiffusion(nativeLoadEx(paths, plugin, cache, options.nThreads,
                 options.gpuBudgetMode.ordinal, options.budgetFraction,
                 options.textEncoderPlacement.ordinal, options.vaePlacement.ordinal,
@@ -205,6 +205,9 @@ class AmevaDiffusion private constructor(private val handle: Long) : AutoCloseab
         var motionModulePath: String? = null
         /** PhotoMaker (SDXL). */
         var photoMakerPath: String? = null
+        /** Vision tower (mmproj GGUF) of the VLM given as [llmPath] (Qwen2.5-VL / Qwen3-VL mmproj of an
+         *  image-edit model). Needs [llmPath]; placed and budgeted with the text encoder. */
+        var llmVisionPath: String? = null
     }
 
     /** Called on the generating thread once per progress unit (sampling step, VAE tile, or
@@ -264,6 +267,16 @@ class AmevaDiffusion private constructor(private val handle: Long) : AutoCloseab
         var hiresDenoise: Float = 0f
         /** null: latent. */
         var hiresUpscaler: String? = null
+        /** Reference images for image-edit / composition models (FLUX.2, Qwen-Image-Edit, ...), 1..3 of them
+         *  (0 or null: none). Each is packed RGB8 of refWidths[i]*refHeights[i]*3 bytes, any size. [refImages],
+         *  [refWidths] and [refHeights] must have the same length. A model loaded through
+         *  [LoadOptions.modelPath] (single-file checkpoint) rejects them: AmudaException, never ignored. */
+        var refImages: Array<ByteArray>? = null
+        var refWidths: IntArray? = null
+        var refHeights: IntArray? = null
+        /** sd.cpp reference-image arguments, comma-separated key=value ("preset=qwen_layered",
+         *  "pass_to_vlm=true,pass_to_dit=true"); null: the model's default preset. */
+        var refImageArgs: String? = null
     }
 
     private val genLock = Any()
