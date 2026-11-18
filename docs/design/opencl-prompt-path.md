@@ -359,3 +359,29 @@ true인 MUL_MAT은 가중치를 매 그래프 복사해 GPU에서 실행). OpenC
 - 결과가 기준 안이면 단계 B(레거시 OpenCL 엔진 적합성 확인 → AC OpenCL 백엔드 → 프롬프트 연산 이식)로 넘어간다.
 
 이 설계는 2.8.1 게시가 끝난 뒤 본격 구현한다(사용자 결정: 2.8.1 우선).
+
+#### q5_0 prompt product on OpenCL is 2.5x slower than the same GLSL on Vulkan (Galaxy A35, 2026-11-18)
+
+Candidate backend `c0dbdca`, Qwen2.5-0.5B Q4_K_M, a 1500-byte prompt, `AMEVA_PROFILE=2`, warm program cache (a cold
+cache puts the driver's first-dispatch compile into the average: SWIGLU, ADD and ROPE read 10x too slow in the first
+run and normal in the second and third; read the second run).
+
+- GPU time per dispatch, Vulkan against OpenCL: `ameva_mmq` q5_0 4864x896 7.85 ms against 20.0-20.7 ms (92 dispatches,
+  55 % of the OpenCL GPU time) and 896x896 1.55 against 3.4-3.7 ms (10 %). q6_K and q4_K on OpenCL (`ameva_mmqb`) are
+  13.5 and 9.1 ms against 10.4 and 7.5 ms of Vulkan `ameva_mmq`, 1.2-1.3x slower. Attention is 3x faster on OpenCL
+  (4.8 against 14.3 ms per dispatch).
+- The kernel's resources do not show a private-memory problem: `ameva_mmq_q5_0` private 128 bytes, local memory 4608
+  bytes (`AMEVA_CL_KERNEL_INFO`).
+- Bisection of the translated text with `AMEVA_CL_SOURCE_DIR` (4864x896, microseconds; results of the variants are wrong
+  on purpose): original 19,414-20,300; no barriers 24,096 (slower); no accumulation loop 9,843; no decode 10,698;
+  `#pragma unroll` on the six constant-bound loops 21,978; `arm_dot_acc` instead of `arm_dot` + add 23,426; both
+  20,761. The decode and the accumulation each take about half, each alone as long as Vulkan's whole kernel; barriers,
+  loop unrolling and the dot form are not the cause. Data: `ameva-runtime docs/handover/evidence/20261118-stage2-rc290/q5_0_opencl_a35/`.
+- What this rules out: a "block-integer" q5_0 kernel. The ameva_mmqb trick needs the weight scale to be a small integer
+  per 32 weights under one f16 per 256-weight block (q4_K, q5_K, q6_K); q5_0 has an f16 scale per 32 weights.
+- What is left: the whole kernel is slow on the OpenCL compiler (decode stores and accumulation loads through `__local`
+  with component-wise stores, 128 invocations, two barriers per 32-weight unit), or a kernel with another structure
+  (no shared memory, more activation rows per invocation to amortise the decode) is needed. The latter changes the
+  host geometry and is a new kernel family (about 49 places in ggml-ameva.cpp for ameva_mmqb). Estimated, not
+  measured: q5_0 at Vulkan's speed would take the OpenCL GPU time of this prompt from about 3.3 s to about 2.0 s, below
+  Vulkan's 2.4 s.
