@@ -49,6 +49,30 @@ const struct ggml_tensor* ameva_repacked_base(const struct ggml_tensor* t);
 // GGML_BACKEND_BUFFER_USAGE_WEIGHTS. Idempotent; returns true if the tensor is (now) repacked.
 bool ameva_ensure_weight_repacked(ggml_backend_buffer_t buffer, struct ggml_tensor* tensor);
 
+// ---- load profile (ggml-ameva-buffer.cpp) ----
+// AMEVA_LOAD_PROFILE=1 times the model-load phases inside this backend and prints them at process exit as
+// "AMEVA_LOAD ..." lines. =2 additionally touches every source page of a repacked upload before repacking it, so that
+// the page faults of the source (file I/O on an mmap'ed model) are timed apart from the CPU repack. Off: no clock reads.
+enum AmevaLoadPhase {
+    AMEVA_LOAD_CONTEXT = 0,    // ac_runtime_context_create + limits + pipeline cache load
+    AMEVA_LOAD_ALLOC,          // ac_runtime_buffer_create + get_address (vkAllocateMemory, map; driver zeroes pages)
+    AMEVA_LOAD_SRC_TOUCH,      // =2 only: first touch of the source pages of repacked uploads
+    AMEVA_LOAD_REPACK_CPU,     // ameva_repack_rows (includes source page faults unless =2)
+    AMEVA_LOAD_MAPPED_WRITE,   // staged repacked rows written into the mapped buffer
+    AMEVA_LOAD_MAPPED_READ,    // repacked rows read back (partial writes, late repack)
+    AMEVA_LOAD_PLAIN_WRITE,    // set_tensor of tensors kept in the ggml layout
+    AMEVA_LOAD_SET_REPACKED,   // set_tensor of repacked tensors, whole call (contains the three phases above)
+    AMEVA_LOAD_LATE_REPACK,    // ameva_ensure_weight_repacked, whole call (whisper.cpp marks usage after upload)
+    AMEVA_LOAD_CACHE_READ,     // set_tensor served from the repack cache file (AMEVA_REPACK_CACHE), whole call
+    AMEVA_LOAD_NPHASES
+};
+bool ameva_load_profile_level(void);  // true when AMEVA_LOAD_PROFILE >= 1
+uint64_t ameva_load_now_ns(void);      // 0 when the profile is off
+void ameva_load_add(enum AmevaLoadPhase phase, uint64_t t0_ns, uint64_t bytes);
+void ameva_load_mark_first_graph(void);
+// The load is over (first graph): complete or report the offline repack cache (ggml-ameva-repack-cache.h).
+void ameva_repack_cache_first_graph(void);
+
 // ---- graph engine (ggml-ameva.cpp) ----
 // An ameva_qmv kernel exists for every work shape of this weight type.
 bool ameva_qmv_has_type(enum ggml_type type);

@@ -516,6 +516,7 @@ AcContext* ameva_get_ac_context() {
     if (!s_ctx) {
         const bool cl = ameva_backend_is_opencl();
         AcContextDesc cdesc = { AC_ABI_VERSION, sizeof(AcContextDesc), cl ? AC_BACKEND_OPENCL : AC_BACKEND_VULKAN, 0 };
+        const uint64_t prof_t0 = ameva_load_now_ns();
         AcResult res = ac_runtime_context_create(&cdesc, &s_ctx);
         if (res != AC_SUCCESS) {
             fprintf(stderr, "ggml-ameva: failed to create the %s AcContext (code %d)\n", cl ? "OpenCL" : "Vulkan", res);
@@ -543,6 +544,7 @@ AcContext* ameva_get_ac_context() {
             snprintf(s_device_name, sizeof(s_device_name), "?");
         }
         s_device_key = ameva_device_key(s_ctx);
+        ameva_load_add(AMEVA_LOAD_CONTEXT, prof_t0, 0);
     }
     return s_ctx;
 }
@@ -5294,6 +5296,8 @@ static enum ggml_status ggml_backend_ameva_graph_compute(ggml_backend_t backend,
     if (!cgraph) return GGML_STATUS_FAILED;
     AcContext* ctx = ameva_get_ac_context();
     if (!ctx || !ameva_status_buffer()) return GGML_STATUS_FAILED;
+    ameva_load_mark_first_graph();
+    ameva_repack_cache_first_graph();
 
     std::lock_guard<std::mutex> compute_lock(s_compute_mutex);
     const AmevaFailureInjectionPoint fi = ggml_backend_ameva_get_failure_injection();
