@@ -78,6 +78,26 @@ graph="$(grep -E '^AMUDA_BATCH_GRAPH_KAT=' "$OUT/test_batch_graph_kat.log" || tr
 case "$graph" in AMUDA_BATCH_GRAPH_KAT=PASS*) ;; *) die "test_batch_graph_kat: ${graph:-no result line}" ;; esac
 echo "[build_runtime_backend] batch API KAT: $api result lines passed; $graph"
 
+# C ABI contract (docs/abi/AC_RUNTIME_ABI.md): accepted caller versions, the layout of every public struct and the
+# exported ac_runtime_* functions. A change that docs/abi does not record fails the build; recording it there (with
+# AC_ABI_VERSION raised: the minor for an addition, the major for a change that breaks a caller) is how one is made.
+clang -O2 -I "$ROOT/include" "$ROOT/tests/ac_abi_check.c" "$OUT/libac_runtime.so.2" -Wl,-rpath,"$OUT" \
+    -o "$OUT/ac_abi_check" 2>> "$OUT/build.log" || die "ac_abi_check did not build"
+LD_LIBRARY_PATH="$OUT" timeout 300 "$OUT/ac_abi_check" > "$OUT/ac_abi_check.log" 2>&1 \
+    || die "ac_abi_check: $(grep -E 'FAIL|AC_ABI_CHECK' "$OUT/ac_abi_check.log" | head -3 | paste -sd' ' -)"
+abi="$(grep -E '^AC_ABI_CHECK=' "$OUT/ac_abi_check.log")"
+abi_version="$(sed -n 's/^AC_ABI header \(0x[0-9A-Fa-f]*\).*/\1/p' "$OUT/ac_abi_check.log")"
+grep '^ABI_LAYOUT ' "$OUT/ac_abi_check.log" > "$OUT/abi_layout.txt"
+diff "$ROOT/docs/abi/ac_runtime_layout.txt" "$OUT/abi_layout.txt" > "$OUT/abi_layout.diff" 2>&1 \
+    || die "struct layout differs from docs/abi/ac_runtime_layout.txt ($OUT/abi_layout.diff): record it there and in AC_ABI_VERSION"
+readelf --dyn-syms -W "$OUT/libac_runtime.so.2" | awk '$4 == "FUNC" && $5 == "GLOBAL" && $7 != "UND" {print $8}' \
+    | sed 's/@.*//' | grep '^ac_runtime_' | sort -u > "$OUT/abi_symbols.txt"
+missing="$(comm -23 "$ROOT/docs/abi/ac_runtime_symbols.txt" "$OUT/abi_symbols.txt" | paste -sd' ' -)"
+extra="$(comm -13 "$ROOT/docs/abi/ac_runtime_symbols.txt" "$OUT/abi_symbols.txt" | paste -sd' ' -)"
+[ -z "$missing" ] || die "libac_runtime.so.2 no longer exports: $missing (a removal breaks callers: new major version)"
+[ -z "$extra" ] || die "libac_runtime.so.2 exports functions docs/abi/ac_runtime_symbols.txt does not list: $extra"
+echo "[build_runtime_backend] $abi; struct layout and $(wc -l < "$OUT/abi_symbols.txt") exported ac_runtime_* functions as in docs/abi"
+
 # Registration through the llama.cpp of the bundle, the way the runtime starts it: no LD_LIBRARY_PATH.
 reg="not checked (llama-completion not on PATH)"
 if command -v llama-completion >/dev/null 2>&1; then
@@ -98,6 +118,7 @@ sha() { sha256sum "$1" | cut -d' ' -f1; }
     printf '  "ggml_linked": {"libggml-base.so.0": "%s", "libggml.so.0": "%s"},\n' "$(sha "$(readlink -f "$GGML_BASE")")" "$(sha "$(readlink -f "$GGML_REG")")"
     printf '  "ggml_backend_impl_h_sha256": "%s",\n' "$(sha "$GGML_DIR/src/ggml-backend-impl.h")"
     printf '  "kernel_header_sha256": "%s",\n' "$(sha "$A/ggml_ameva_kernels_spv.h")"
+    printf '  "ac_abi_version": "%s",\n' "$abi_version"
     printf '  "compiler_warnings": %s,\n' "$warnings"
     printf '  "files": {\n'
     printf '    "libggml-ameva.so": {"sha256": "%s", "size": %s, "runpath": "%s", "needed": "%s"},\n' "$(sha "$OUT/libggml-ameva.so")" "$(stat -c %s "$OUT/libggml-ameva.so")" "$runpath" "$(dyn "$OUT/libggml-ameva.so" 'NEEDED')"
@@ -107,6 +128,7 @@ sha() { sha256sum "$1" | cut -d' ' -f1; }
     printf '    "ameva_qmm_check": "%s",\n' "$qmm"
     printf '    "test_batch_api_kat": "%s result lines passed",\n' "$api"
     printf '    "test_batch_graph_kat": "%s",\n' "$graph"
+    printf '    "ac_abi_check": "%s",\n' "$abi"
     printf '    "llama_cpp_registration": "%s"\n' "$reg"
     printf '  }\n'
     printf '}\n'

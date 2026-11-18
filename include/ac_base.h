@@ -26,10 +26,24 @@ extern "C" {
  * @brief AMUDA ABI Version Specification (Major.Minor.Patch -> 0xMMNNPP00)
  */
 #define AC_ABI_VERSION_MAJOR 2u
-#define AC_ABI_VERSION_MINOR 1u
+#define AC_ABI_VERSION_MINOR 3u
 #define AC_ABI_VERSION_PATCH 0u
 
-#define AC_ABI_VERSION 0x00020100u
+#define AC_ABI_VERSION 0x00020300u
+
+/**
+ * @brief Oldest minor version of this major that the runtime still serves (docs/abi/AC_RUNTIME_ABI.md).
+ *
+ * A caller passes the AC_ABI_VERSION of the header it was built with. The runtime accepts it when the major version
+ * is its own and the minor version lies in [AC_ABI_MIN_MINOR, AC_ABI_VERSION_MINOR]: a minor version only adds
+ * functions, flags, enum values and fields appended to structs that say so, so an older caller keeps working with a
+ * newer runtime. A newer caller (minor above the runtime's), another major version, a minor below the floor (2.0:
+ * descriptor layouts changed in 2.1) and any value with bits in the low byte are refused with AC_ERR_INVALID_ARGUMENT.
+ */
+#define AC_ABI_MIN_MINOR 1u
+#define AC_ABI_COMPATIBLE(v) \
+    ((((v) >> 16) == AC_ABI_VERSION_MAJOR) && ((((v) >> 8) & 0xFFu) >= AC_ABI_MIN_MINOR) && \
+     ((((v) >> 8) & 0xFFu) <= AC_ABI_VERSION_MINOR) && (((v) & 0xFFu) == 0u))
 
 /**
  * @brief Supported Hardware Compute Backend Targets

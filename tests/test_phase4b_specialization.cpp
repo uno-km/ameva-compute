@@ -12,7 +12,7 @@
  *   - Qualcomm Snapdragon 8 Gen 1 / Adreno 730 (Samsung Galaxy S22 SM-S901N)
  *
  * Verification Gates:
- *   1. ABI Version Validation (0x00020100 vs 0x00020000 rejection) & SHA-256 FIPS KAT
+ *   1. ABI Version Validation (0x00020300 vs 0x00020000 rejection) & SHA-256 FIPS KAT
  *   2. Schema Validation Rejection Matrix (Duplicate ID, invalid type, min > max, default out-of-bounds, duplicate axis, non-U32 local size, zero local size)
  *   3. Zero Specialization Execution (Schema defaults applied, output element bound checked, parity verified)
  *   4. Bit-Preserving Representation (U32, I32, F32 bit fidelity via validate_spec_bounds)
@@ -186,8 +186,8 @@ int main(void) {
     printf("[Gate 1/10] ABI Version Validation & SHA-256 FIPS KAT...\n");
     {
         /* 1.1 ABI Version value */
-        if (AC_ABI_VERSION != 0x00020100u) {
-            printf("  -> FAIL: AC_ABI_VERSION (0x%08X) != 0x00020100u\n", AC_ABI_VERSION);
+        if (AC_ABI_VERSION != 0x00020300u) {
+            printf("  -> FAIL: AC_ABI_VERSION (0x%08X) != 0x00020300u\n", AC_ABI_VERSION);
             return 1;
         }
 

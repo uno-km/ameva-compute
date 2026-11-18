@@ -15,9 +15,10 @@
  *   - Active Child Tracking: Context destruction is rejected if child buffers, kernels,
  *     or events remain alive.
  *
- * ABI Contract Specification (AMUDA 2.1.0):
- *   In AC_ABI_VERSION 0x00020100, all descriptor struct_size fields require an
- *   exact size match (desc->struct_size == sizeof(DescriptorType)).
+ * ABI Contract Specification (AMUDA 2.3.0, docs/abi/AC_RUNTIME_ABI.md):
+ *   abi_version: the caller's AC_ABI_VERSION; accepted when AC_ABI_COMPATIBLE (same major, minor from
+ *   AC_ABI_MIN_MINOR up to the runtime's). struct_size: exact size match (desc->struct_size == sizeof(DescriptorType)),
+ *   except AcDeviceLimits, whose appended fields are filled only when struct_size covers them.
  *   Specialization constants are fully integrated into kernel metadata and descriptors.
  */
 
@@ -604,6 +605,12 @@ AcResult ac_runtime_batch_get_stats(
 /* AMUDA 2.3 additions: OpenCL backend and backend-neutral host access       */
 /* (descriptor layouts of 2.1 unchanged)                                     */
 /* ========================================================================= */
+/**
+ * @brief The AC_ABI_VERSION the loaded runtime implements. A caller that loads the library at run time compares it
+ *        with its own header before creating a context: the runtime accepts the caller when AC_ABI_COMPATIBLE holds.
+ */
+uint32_t ac_runtime_abi_version(void);
+
 /*
  * AC_BACKEND_OPENCL (docs/design/opencl-prompt-path.md, stage B):
  *   - The vendor OpenCL driver is loaded at context creation (AMEVA_OPENCL_LIBRARY=<path> names it); a missing driver

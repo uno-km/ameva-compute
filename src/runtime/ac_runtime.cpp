@@ -99,7 +99,7 @@ AcResult ac_runtime_context_create(const AcContextDesc* desc, AcContext** out_ct
     if (!desc || !out_ctx) {
         return AC_ERR_NULL_POINTER;
     }
-    if (desc->abi_version != AC_ABI_VERSION) {
+    if (!AC_ABI_COMPATIBLE(desc->abi_version)) {
         return AC_ERR_INVALID_ARGUMENT;
     }
     if (desc->struct_size != sizeof(AcContextDesc)) {
@@ -194,6 +194,8 @@ AcResult ac_runtime_context_destroy(AcContext* ctx) {
     return AC_SUCCESS;
 }
 
+uint32_t ac_runtime_abi_version(void) { return AC_ABI_VERSION; }
+
 AcResult ac_runtime_context_get_backend_kind(const AcContext* ctx, AcBackendKind* out_kind) {
     if (out_kind) {
         *out_kind = AC_BACKEND_UNKNOWN;
@@ -252,7 +254,7 @@ AcResult ac_runtime_buffer_create(AcContext* ctx, const AcBufferDesc* desc, AcBu
     if (!desc || !out_buf) {
         return AC_ERR_NULL_POINTER;
     }
-    if (desc->abi_version != AC_ABI_VERSION) {
+    if (!AC_ABI_COMPATIBLE(desc->abi_version)) {
         return AC_ERR_INVALID_ARGUMENT;
     }
     if (desc->struct_size != sizeof(AcBufferDesc)) {
@@ -591,7 +593,7 @@ AcResult ac_runtime_kernel_create(AcContext* ctx, const AcKernelDesc* desc, AcKe
     if (!desc || !out_kernel) {
         return AC_ERR_NULL_POINTER;
     }
-    if (desc->abi_version != AC_ABI_VERSION) {
+    if (!AC_ABI_COMPATIBLE(desc->abi_version)) {
         return AC_ERR_INVALID_ARGUMENT;
     }
     if (desc->struct_size != sizeof(AcKernelDesc)) {
@@ -935,7 +937,7 @@ AcResult ac_runtime_kernel_create_from_source(AcContext* ctx, const AcKernelSour
     if (!desc || !out_kernel) {
         return AC_ERR_NULL_POINTER;
     }
-    if (desc->abi_version != AC_ABI_VERSION || desc->struct_size != sizeof(AcKernelSourceDesc)) {
+    if (desc->abi_version < 0x00020300u || !AC_ABI_COMPATIBLE(desc->abi_version) || desc->struct_size != sizeof(AcKernelSourceDesc)) {
         return AC_ERR_INVALID_ARGUMENT;
     }
     if (!ctx->cl_ctx) {
@@ -1085,7 +1087,7 @@ AcResult ac_runtime_dispatch(AcContext* ctx, const AcLaunchDesc* desc, AcEvent**
     if (!desc) {
         return AC_ERR_NULL_POINTER;
     }
-    if (desc->abi_version != AC_ABI_VERSION) {
+    if (!AC_ABI_COMPATIBLE(desc->abi_version)) {
         return AC_ERR_INVALID_ARGUMENT;
     }
     if (desc->struct_size != sizeof(AcLaunchDesc)) {
@@ -1356,7 +1358,7 @@ AcResult ac_runtime_batch_dispatch(
     if (kernel->magic != AC_MAGIC_KERNEL) {
         return AC_ERR_INVALID_ARGUMENT;
     }
-    if (launch->abi_version != AC_ABI_VERSION || launch->struct_size != sizeof(AcLaunchDesc)) {
+    if (!AC_ABI_COMPATIBLE(launch->abi_version) || launch->struct_size != sizeof(AcLaunchDesc)) {
         return AC_ERR_INVALID_ARGUMENT;
     }
     if (launch->kernel != kernel) {
@@ -1549,7 +1551,7 @@ AcResult ac_runtime_context_get_limits(const AcContext* ctx, AcDeviceLimits* out
     }
     /* the fields up to timestamp_period_ns form the first version of the struct; later fields are appended */
     const size_t base_size = offsetof(AcDeviceLimits, integer_dot_product);
-    if (out_limits->abi_version != AC_ABI_VERSION || out_limits->struct_size < base_size ||
+    if (!AC_ABI_COMPATIBLE(out_limits->abi_version) || out_limits->struct_size < base_size ||
         out_limits->struct_size > sizeof(AcDeviceLimits)) {
         return AC_ERR_INVALID_ARGUMENT;
     }
@@ -1592,7 +1594,7 @@ AcResult ac_runtime_batch_begin_ex(
     if (context->magic != AC_MAGIC_CONTEXT) {
         return AC_ERR_INVALID_CONTEXT;
     }
-    if (desc->abi_version != AC_ABI_VERSION || desc->struct_size != sizeof(AcBatchDesc)) {
+    if (!AC_ABI_COMPATIBLE(desc->abi_version) || desc->struct_size != sizeof(AcBatchDesc)) {
         return AC_ERR_INVALID_ARGUMENT;
     }
     if (desc->max_dispatches == 0 || desc->max_dispatches > AC_BATCH_MAX_DISPATCHES) {
@@ -1744,7 +1746,7 @@ AcResult ac_runtime_batch_get_stats(const AcCommandBatch* batch, AcBatchStats* o
     if (!out_stats) {
         return AC_ERR_NULL_POINTER;
     }
-    if (out_stats->abi_version != AC_ABI_VERSION || out_stats->struct_size != sizeof(AcBatchStats)) {
+    if (!AC_ABI_COMPATIBLE(out_stats->abi_version) || out_stats->struct_size != sizeof(AcBatchStats)) {
         return AC_ERR_INVALID_ARGUMENT;
     }
     if (batch->cl_batch) {
