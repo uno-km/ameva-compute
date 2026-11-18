@@ -75,6 +75,29 @@ val extractSherpaOnnx = tasks.register<Sync>("extractSherpaOnnx") {
 android.sourceSets["main"].jniLibs.srcDir(sherpaDir.map { it.dir("jni") })
 tasks.named("preBuild") { dependsOn(extractSherpaOnnx) }
 
+// The licence travels with the AAR (PolyForm Noncommercial 1.0.0 asks that every recipient gets the terms and the
+// Required Notice): LICENSE, LICENSE-COMMERCIAL.md and LICENSING.md of the repository root (the parent of this Gradle
+// root) go into the AAR's classes.jar as META-INF/ameva/*. Copied at build time, so the AAR cannot carry a stale copy.
+val licenceDir = layout.buildDirectory.dir("generated/ameva-licence")
+val licenceFiles = listOf("LICENSE", "LICENSE-COMMERCIAL.md", "LICENSING.md")
+// a separate task for the same reason as checkSherpaAar: a Sync with no matching source is skipped (NO-SOURCE)
+// before any of its own actions run
+val checkLicence = tasks.register("checkAmevaLicence") {
+    doLast {
+        val missing = licenceFiles.filter { !rootDir.parentFile.resolve(it).isFile }
+        if (missing.isNotEmpty()) {
+            throw GradleException("AMU_ERR_MISSING_LICENCE: $missing not found in ${rootDir.parentFile}")
+        }
+    }
+}
+val copyLicence = tasks.register<Sync>("copyAmevaLicence") {
+    dependsOn(checkLicence)
+    from(rootDir.parentFile) { include(licenceFiles) }
+    into(licenceDir.map { it.dir("META-INF/ameva") })
+}
+android.sourceSets["main"].resources.srcDir(licenceDir)
+tasks.named("preBuild") { dependsOn(copyLicence) }
+
 dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     // k2-fsa/sherpa-onnx v1.13.8 (CPU/ONNX Runtime, not ggml-ameva -- no AMEVA GPU acceleration on
