@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // AMEVA window check: UPSCALE (nearest) and the binary ops on tensors above one buffer binding, through the real ggml
 // backend path (supports_op -> graph_compute) on the AMEVA backend.
 //

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 # convert_onnx_to_gguf.py MODEL_DIR OUT.gguf [--wtype f16|f32] [--mm-type f16|f32]
 # Kokoro-82M v0.19 (the sherpa-onnx package kokoro-int8-en-v0_19: model.int8.onnx, voices.bin) to the GGUF that
 # adapters/tts/kokoro/kokoro.cpp reads. Needs only python3 and numpy (no onnx package), so it runs on a Termux device

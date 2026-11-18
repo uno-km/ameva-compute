@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 # tts_sherpa_baseline.py MODEL_DIR OUT.wav "text" [--threads N] [--reps R]
 # The CPU product path that termux-tts uses for Kokoro today: sherpa-onnx with the int8 model (its own espeak-ng
 # G2P), text to WAV. Prints the synthesis time per repetition and the real-time factor; writes the WAV to disk only.

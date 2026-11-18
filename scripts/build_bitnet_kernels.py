@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 """Build the GPU kernels of the BitNet adapter (adapters/bitnet, ac_bitnet_engine.cpp) into one C header.
 
     python3 scripts/build_bitnet_kernels.py [--glslang glslangValidator] [--spirv-val spirv-val] [--out HEADER]

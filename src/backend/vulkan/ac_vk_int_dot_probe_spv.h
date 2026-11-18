@@ -1,5 +1,5 @@
 /* Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-   SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+   SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 
    SPIR-V of the known-answer probe of the signed packed int8 dot product (glslang 16.3.0, --target-env vulkan1.0):
      layout(local_size_x = 1) in;

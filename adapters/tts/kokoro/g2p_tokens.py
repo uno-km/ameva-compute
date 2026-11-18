@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 # g2p_tokens.py TOKENS_TXT "text" [--lang en-us|en-gb]
 # Kokoro v0.19 phoneme ids for a text: espeak-ng phonemes (phonemizer, espeakng-loader) with the replacements of
 # kokoro v0.19's phonemize(), filtered to the vocabulary of tokens.txt. Prints the phonemes on stderr and the

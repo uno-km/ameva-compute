@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 //
 // Print the devices a ggml host registers after ggml_backend_load_all(), which also loads the plugin named by
 // GGML_BACKEND_PATH. For hosts without a --list-devices option (whisper-cli): build_ggml_ameva.sh needs a program

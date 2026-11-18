@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 # hw_study_fleet.sh: run the hardware study of the prompt MUL_MAT (scripts/termux/lab/hw_study_suite.sh) on every
 # fleet phone that answers, from the PC (Git Bash), without waiting loops on the phones (each check is one ssh call).
 #

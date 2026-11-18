@@ -1,12 +1,12 @@
 /**
  * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
  */
 /**
  * @file termux_bitnet.h
  * @brief C ABI Interface for BitNet 1.58-bit (i2_s) On-Device Inference Engine.
  * @author uno-km (https://github.com/uno-km)
- * @license Apache-2.0
+ * @license PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial (LICENSING.md)
  */
 
 #ifndef TERMUX_BITNET_H

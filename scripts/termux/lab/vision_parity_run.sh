@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 # vision_parity_run.sh TAG [ameva_vision_parity args...]: SmolVLM-500M mmproj parity / encode time, log in ~/abi-lab/vis-TAG.log
 # OUT holds libggml-ameva.so and libac_runtime.so.2 (scripts/termux/build_ggml_ameva.sh --ggml-dir <llama.cpp b8471>/ggml
 # --ggml-lib $B/lib) and ameva_vision_parity, built against the bundle's libraries with the b8471 headers:

@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 # conv_api_ab.sh: CONV_2D time on Vulkan against OpenCL, and against OpenCL kernel-text variants, under a fixed
 # protocol (research program, ameva-foundation 03_core/docs/research/RESEARCH_PROGRAM.md):
 #   - VARIANTS (space separated): "vk" (AMEVA_BACKEND=vulkan), "cl" (OpenCL, built-in kernel text) or

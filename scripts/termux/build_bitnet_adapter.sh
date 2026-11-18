@@ -1,5 +1,5 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 #
 # Build the BitNet adapter (adapters/bitnet) with its AMUDA GPU engine (ac_runtime, Vulkan) on a Termux device.
 #

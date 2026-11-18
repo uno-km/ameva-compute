@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 # vision_fa_sweep.sh PREFIX "IDX ..." [ameva_vision_parity args...]: one vision run per forced flash-attention variant
 # (AMEVA_FA_VARIANT), FA GPU time per dispatch and parity; summary in ~/abi-lab/PREFIX.out, ~/abi-lab/PREFIX.done at end
 P=$1; IDX=$2; shift 2

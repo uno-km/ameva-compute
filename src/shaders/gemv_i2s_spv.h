@@ -1,6 +1,6 @@
 /**
  * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
  */
 #ifndef AC_GEMV_I2S_SPV_H
 #define AC_GEMV_I2S_SPV_H

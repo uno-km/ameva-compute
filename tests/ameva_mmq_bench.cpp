@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // AMEVA MUL_MAT timing on the production path: weights in a WEIGHTS buffer (stored repacked, as llama.cpp loads a
 // model), activations f32, one MUL_MAT per graph through ggml_backend_graph_compute. The kernel that ran is proven by
 // the backend's counters (repacked tensors, ameva_mmq / ameva_mmqb MUL_MATs), not assumed.

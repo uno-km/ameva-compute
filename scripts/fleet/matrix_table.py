@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 """Table of scripts/termux/lab/matrix_run.sh logs: one row per phone, model and variant.
 
 usage: matrix_table.py DEV=LOG [DEV=LOG ...]

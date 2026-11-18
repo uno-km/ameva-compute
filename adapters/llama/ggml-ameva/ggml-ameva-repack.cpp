@@ -1,6 +1,6 @@
 /**
  * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
  */
 // AMEVA repacked weight layout: see ggml-ameva-repack.h. Block field offsets follow ggml-common.h.
 #include "ggml-ameva-repack.h"

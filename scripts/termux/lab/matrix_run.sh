@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 # matrix_run.sh: the experiment matrix of the research handover (2026-11-09, section 4.1) on one phone: our backend, the
 # upstream ggml Vulkan backend of the installed 2.8.1 bundle, the CPU, and layer split, rotated over ROUNDS rounds.
 #   MATRIX="name,kind,backend,threads,ngl,fa[,VAR=val;VAR=val] ..."

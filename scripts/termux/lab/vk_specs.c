@@ -1,6 +1,6 @@
 /**
  * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
  */
 // vk_specs: properties of the first Vulkan device that could steer kernel selection (lab probe).
 //   device, vendor/device ID, driver version and driver info, subgroup size and its controllable range, shared memory,

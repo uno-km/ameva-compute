@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 """Translate an AMEVA compute shader into an OpenCL C kernel (docs/design/opencl-prompt-path.md, stage B).
 
     python3 scripts/glsl_to_opencl.py [--glslang glslangValidator] [-DNAME[=VALUE] ...] shader.comp > kernel.cl

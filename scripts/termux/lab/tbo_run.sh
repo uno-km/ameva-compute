@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 # tbo_run.sh: ggml test-backend-ops (~/abi-lab/tbo, b8471) for AMEVA0, twice: default settings, then
 # AMEVA_REPACK_ALL=1 (quantized MUL_MAT through the repacked-weight kernels). Meant to be started with nohup:
 #   (nohup bash ~/abi-lab/tbo_run.sh > /dev/null 2>&1 &)

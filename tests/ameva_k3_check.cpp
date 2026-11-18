@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // AMEVA K3 check: the ops a VAE graph needs besides convolution and group norm, through the real ggml backend path
 // (supports_op -> graph_compute) on the AMEVA backend, each compared with a reference computed here as ggml's CPU
 // code computes it.

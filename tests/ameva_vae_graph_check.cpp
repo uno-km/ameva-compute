@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // AMEVA VAE graph check: op census and output comparison of the decoder graphs sd.cpp builds for a 2D VAE.
 //
 // The graphs are rebuilt here node for node from the source of stable-diffusion.cpp at commit 50d6405

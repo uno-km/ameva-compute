@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // AMEVA MUL_MAT exactness check: every weight type through the real ggml backend path (supports_op -> graph_compute).
 //
 // For each type and shape the weights are produced by ggml itself (ggml_quantize_chunk / fp16 / bf16 conversion),

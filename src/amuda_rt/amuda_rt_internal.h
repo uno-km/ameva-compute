@@ -1,8 +1,8 @@
 /**
  * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
  */
-/* SPDX-License-Identifier: Apache-2.0 */
+/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial */
 #ifndef AMUDA_RT_INTERNAL_H
 #define AMUDA_RT_INTERNAL_H
 

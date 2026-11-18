@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 # fa_bench.sh "SHAPE:IDX,IDX ..." [ITER]
 # Build the ggml-ameva plugin from SRC (default ~/abi-lab/src-fa) into OUT (default ~/abi-lab/out-fa) and
 # tests/ameva_fa_bench, then time FLASH_ATTN_EXT at each shape with each forced variant (AMEVA_FA_VARIANT) and with the

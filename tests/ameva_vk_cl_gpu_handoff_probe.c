@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // ameva_vk_cl_gpu_handoff_probe: handoff between a Vulkan compute queue and an OpenCL queue on one memory, as stage B
 // of docs/design/opencl-prompt-path.md would need it (Vulkan kernels write the activations, OpenCL block-integer
 // kernels read them and write the product, Vulkan kernels read the product).

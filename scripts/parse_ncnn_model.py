@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 """
 NCNN Model Parser & Weight Extractor for SqueezeNet v1.1
 Calculates exact offsets, dtypes, and SHA-256 for target 1x1 Conv layers.

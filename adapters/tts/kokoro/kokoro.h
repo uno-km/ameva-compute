@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // Kokoro-82M v0.19 text-to-speech on one ggml backend (ggml-cpu or AMEVA0), from the GGUF written by
 // adapters/tts/kokoro/convert_onnx_to_gguf.py. Input: phoneme ids of tokens.txt (without the pad id 0 at both ends,
 // which is added here); output: 24 kHz mono float samples.

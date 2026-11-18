@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 """Build every AMEVA GPU kernel of the ggml backend into one C header.
 
     python3 scripts/build_ameva_kernels.py [--glslang glslangValidator] [--spirv-val spirv-val] [--out HEADER]
@@ -156,7 +156,7 @@ VK_ONLY = ([("conv_%s_%s" % (w, st), "conv", wd + sd)
 
 # the licence header of the generated files (kept identical to the other sources of the repository)
 LICENSE_HEADER = ["/**", " * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.",
-                  " * SPDX-License-Identifier: Apache-2.0 OR Commercial-License", " */"]
+                  " * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial", " */"]
 
 # FLASH_ATTN_EXT tiles: (DMAX, BQ, BK, RPI rows per invocation, DUNROLL head-loop steps per iteration), 128 invocations
 # per workgroup. The host takes, among the variants with the smallest DMAX that fits, the first whose BQ does not exceed

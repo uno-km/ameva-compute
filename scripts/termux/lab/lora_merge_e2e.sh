@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 # lora_merge_e2e.sh
 # A LoRA merged into the weights at load (sd-cli --lora-apply-mode immediately) with the diffusion model on ggml-ameva,
 # against the same merge on the CPU, the adapter applied at run time, and no adapter. Runs sd_e2e.sh three times

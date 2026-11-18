@@ -1,5 +1,5 @@
 <!--
-  SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+  SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
   Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
 
   [Architectural Governance]
@@ -14,7 +14,7 @@
 - **작성자:** AMEVA Systems Architecture Group (초안: Claude Opus 5.5)
 - **기준 시점:** 2026-10-11, ameva-compute `51e7da3` (브랜치 `perf/opencl-mali`)
 - **용도:** 후속 에이전트와 연구원이 핸드북 챕터·기술 보고서를 집필할 때 쓰는 주제 목록, 확인된 사실, 근거 위치
-- **라이선스:** Apache-2.0 OR Commercial-License
+- **라이선스:** PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial (2026-11-18 변경, LICENSING.md)
 
 ---
 
@@ -456,7 +456,7 @@
 - 대상 하드웨어: (기기, SoC, GPU, 드라이버 버전)
 - 대상 엔진/커밋: (커밋 해시, 파일 경로)
 - 근거 등급: [측정] / [부분]
-- 라이선스: Apache-2.0 OR Commercial-License
+- 라이선스: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial (2026-11-18 변경, LICENSING.md)
 
 ## 1. 문제 정의
 ## 2. 원인 규명 (가설, 절제 실험, 기각된 가설 포함)

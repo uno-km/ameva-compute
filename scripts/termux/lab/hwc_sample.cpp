@@ -1,6 +1,6 @@
 /**
  * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
  */
 // hwc_sample SECONDS [PERIOD_MS]: Mali hardware counters (Arm HWCPipe, libGPUCounters, MIT) summed over a window, for
 // the decode research (ameva-foundation N-20261107-decode-roofline): does the GPU's external bus read what the roofline

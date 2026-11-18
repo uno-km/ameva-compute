@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 # mmdit_census.sh
 # One stable-diffusion.cpp run of an MMDiT model (Z-Image-Turbo: LLM text encoder, DiT, VAE) with modules on
 # ggml-ameva, under a memory guard, with the op census and the memory curve of the run. Needs the sd-cli and the

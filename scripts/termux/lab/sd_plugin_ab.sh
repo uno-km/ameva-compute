@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 # sd_plugin_ab.sh: one image of sd-cli on AMEVA0 for several builds of the plugin and backends, under the measurement
 # protocol of the research program (grade A, ameva-foundation 03_core/docs/research/RESEARCH_PROGRAM.md section 3
 # item 7):

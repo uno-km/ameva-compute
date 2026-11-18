@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-// SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 //
 // ameva_split_gen: prompt on the GPU, generation on the CPU (research question RQ-25), through the public llama.h state
 // API: the sequence state of the context that ran the prompt is copied into a context of a second, CPU-only model.

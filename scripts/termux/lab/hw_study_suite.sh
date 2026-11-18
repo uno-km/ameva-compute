@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 # hw_study_suite.sh KIT: the hardware study of the prompt MUL_MAT (ameva-foundation N-20261107-hw-bottleneck) on one
 # fleet phone, unattended, from a kit that scripts/fleet/hw_study_fleet.sh put on the phone:
 #   KIT/bin   libggml-ameva.so, libac_runtime.so.2, ameva_qmm_check, ameva_mmq_bench, ggml-rt/ (one backend build)

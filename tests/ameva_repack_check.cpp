@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // AMEVA repacked weight layout: structural checks on the host.
 //   * the three regions of a tensor add up to ggml_nbytes for every repackable type and shape
 //   * repack followed by unrepack restores every byte, for random bytes (all bit patterns of every field) and for

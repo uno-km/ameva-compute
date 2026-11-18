@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // AMEVA GROUP_NORM check: ggml_group_norm through the real ggml backend path (supports_op -> graph_compute) on the
 // AMEVA backend, alone and with the nodes sd.cpp puts behind it (GroupNorm32 + SiLU of the 2D decoders: MUL by a
 // per-channel weight, ADD of a per-channel bias, SILU, each stored in place of the result before), which the graph

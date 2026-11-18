@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // AMEVA vision parity: the vision encoder and projector of a multimodal GGUF pair (mmproj + text model) run through
 // libmtmd (clip.cpp) on the CPU backend and on AMEVA0, compared embedding by embedding on one image.
 //

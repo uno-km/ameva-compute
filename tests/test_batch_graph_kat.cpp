@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // Known-answer tests for the graph batch API (ac_runtime_batch_begin_ex / _dispatch_bindings / _barrier).
 //
 //   CHAIN       1000 dependent dispatches in one submission: x[k+1] = P x[k] with P a cyclic shift (0/1 weights, so

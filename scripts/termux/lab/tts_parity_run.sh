@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 # tts_parity_run.sh TAG OUT MODELS [ameva_tts_parity args...]: Kokoro CPU / AMEVA0 parity and RTF, log in
 # ~/abi-lab/tts-TAG.log, WAV files in ~/abi-lab/tts-TAG/ (written to disk only; nothing is played).
 # MODELS holds kokoro-f16.gguf and kokoro-f32.gguf (adapters/tts/kokoro/convert_onnx_to_gguf.py on the device's own

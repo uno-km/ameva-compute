@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 """
 Formal Verification and Hardware Audit Suite for AMEVA GGML Backend on Galaxy A53 (Mali-G68)
 Strictly executes all audit verification stages with zero synthetic metrics and zero stdout/stderr discards.

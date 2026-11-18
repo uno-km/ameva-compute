@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 # conv_bench.sh [all|build|run] [ITER]
 # Build ameva_conv_bench (tests/ameva_conv_bench.cpp) from SRC (default ~/abi-lab/src) into OUT (default
 # ~/abi-lab/out-conv) and run it: staging from the source tensor (ameva_conv) against a materialised column matrix

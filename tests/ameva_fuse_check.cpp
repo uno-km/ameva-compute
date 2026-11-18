@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // AMEVA graph-engine fusion (ameva_find_fusion): the node patterns of one token of a transformer layer, computed
 // through the ggml backend with repacked weights and one activation row:
 //   y    = RMS_NORM(x) * w_norm                         RMS_NORM -> MUL

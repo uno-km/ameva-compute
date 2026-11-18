@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 # tts_build.sh SRC OUT [kernels|plugin|tool|all]: Stage 5 (Kokoro TTS) build on a fleet device, log in OUT/*.log.
 #   kernels  scripts/build_ameva_kernels.py (glslangValidator + spirv-val on the device)
 #   plugin   libggml-ameva.so + libac_runtime.so.2 against the runtime bundle's ggml (b8471 headers in GGML_DIR)

@@ -1,5 +1,5 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 #
 # Whisper through the STT bundle's whisper-cli on CPU, on the bundle's own ggml-vulkan, and on ggml-ameva (plugin of
 # stt_build.sh), in alternating order. Reports whisper.cpp's own stage times and compares the transcripts.

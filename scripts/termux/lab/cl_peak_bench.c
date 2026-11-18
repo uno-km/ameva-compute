@@ -1,6 +1,6 @@
 /**
  * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
  */
 // cl_peak_bench [MB] [REPS]: the measured ceilings of an OpenCL GPU, the denominators of utilization figures
 // (achieved / ceiling) that compare engines across models and devices (ameva-foundation N-20261107-prior-art,

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 # tts_wav_check.py FILE.wav [REFERENCE.wav|REFERENCE.f32 ...]
 # Inspects a synthesized WAV without playing it: RIFF/WAVE header (format, channels, sample rate, bits, data size),
 # duration, RMS and peak, share of silent 20 ms frames, and, per reference, log-mel distance (80 mel bands, 1024-point

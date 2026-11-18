@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // AMEVA CONV_2D exactness check: ggml_conv_2d_direct through the real ggml backend path (supports_op ->
 // graph_compute) on the AMEVA backend, for f16 and f32 kernels, strides, paddings, dilations, channel counts that are
 // not multiples of 32, a batch, and f16 weights in the subnormal range.

@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 """release_ab.py EVIDENCE_DIR [OUT_DIR]: published release against the current plugin, per phone and model.
 
 Input: EVIDENCE_DIR/<dev>/<model>.log from scripts/termux/lab/ladder_run.sh with LADDER_VARIANTS naming

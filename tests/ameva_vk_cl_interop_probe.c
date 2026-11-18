@@ -1,8 +1,8 @@
 /**
  * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
  */
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // ameva_vk_cl_interop_probe: can an OpenCL kernel on a Mali GPU work on the memory of an ac_runtime (Vulkan) buffer
 // without a copy? Stage B of docs/design/opencl-prompt-path.md runs the prompt-sized quantized MUL_MATs of a
 // ggml-ameva graph as OpenCL block-integer kernels on the graph's own buffers; that needs this to hold.

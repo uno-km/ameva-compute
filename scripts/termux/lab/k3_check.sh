@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 # k3_check.sh [kernels]
 # Build the ggml-ameva plugin from SRC (default ~/abi-lab/src) into OUT (default ~/abi-lab/out-k3) against the ggml of
 # llama.cpp b8471 and run

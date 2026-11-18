@@ -1,6 +1,6 @@
 /**
  * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
  */
 // cl_hw_bench [MHz] [REPS]: per-unit throughput of an OpenCL GPU, in units per clock per compute unit, the hardware
 // side of a kernel cost model (ameva-foundation N-20261107-hw-bottleneck):

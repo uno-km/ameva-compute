@@ -1,7 +1,7 @@
 #version 450
 /**
  * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
  */
 // ============================================================================
 // AMUDA Kernel: BitNet activation stage before an i2_s projection (adapters/bitnet, ac_bitnet_engine.cpp)

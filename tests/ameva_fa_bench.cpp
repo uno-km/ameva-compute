@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // AMEVA flash-attention timing at diffusion shapes: one GGML_OP_FLASH_ATTN_EXT node (q f32 [D, NQ, H], k and v f16
 // [D, NKV, H], no mask, scale 1/sqrt(D)) through the AMEVA backend, the way stable-diffusion.cpp's UNet calls it with
 // diffusion flash attention on. SD1.5 at 512x512: D 40 / NQ = NKV 4096 / H 8 (self-attention at 64x64), D 40 / NKV 77

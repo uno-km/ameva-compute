@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 # reference_onnx.py MODEL_DIR OUT_DIR --tokens 1,2,3 [--voice N] [--speed S] [--seed K]
 # Float, deterministic onnxruntime reference for adapters/tts/kokoro (runs on a PC: needs onnx and onnxruntime).
 #

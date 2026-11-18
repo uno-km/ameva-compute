@@ -1,8 +1,8 @@
 /**
  * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
  */
-/* SPDX-License-Identifier: Apache-2.0 */
+/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial */
 /* AMUDA CUDA-like runtime: backend-independent layer (validation, ordering, memory visibility). */
 #include "amuda_rt_internal.h"
 

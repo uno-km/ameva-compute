@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 """cl_kernel_text.py HEADER ARRAY OUT: write the OpenCL C text of one kernel of ggml_ameva_kernels_cl.h.
 
 ARRAY is the C array name (for example kAmevaClMmqb_1). The file OUT can be edited and given to the engine with

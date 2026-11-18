@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // AMEVA convolution kernel timing: the tile kernel staging its activations from the source tensor
 // (shaders/ameva_conv.comp) against the same tile kernel reading a materialised column matrix
 // (shaders/ameva_qgemm.comp), through ac_runtime directly (Vulkan), one convolution per run.

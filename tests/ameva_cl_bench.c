@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // ameva_cl_bench KERNELS.cl M N K [REPS]: the OpenCL q4_K prototype kernels for Arm Mali
 // (adapters/llama/ggml-ameva/opencl/ameva_cl_q4k.cl) on one MUL_MAT shape, timed and checked.
 //

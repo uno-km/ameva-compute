@@ -1,6 +1,6 @@
 /**
  * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
  */
 // split_gemv_bench [CPU_THREADS] [TOKENS]: can the CPU and the GPU together generate a token faster than either alone?
 // (ameva-foundation N-20261107-decode-roofline, RQ-38). Token generation reads every weight once per token and both

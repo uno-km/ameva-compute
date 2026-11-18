@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // AMEVA check of the ops the encoder stem of whisper.cpp needs beyond those of llama.cpp and stable-diffusion.cpp:
 // IM2COL and the MUL_MAT of two f16 matrices that follows it inside ggml_conv_1d / ggml_conv_2d, through the real
 // ggml backend path (supports_op -> graph_compute) on the AMEVA backend.

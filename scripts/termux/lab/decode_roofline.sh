@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 # decode_roofline.sh KIT API OUT MODEL...: is token generation on this phone bound by the DRAM bandwidth each processor
 # pulls (the explanation of the literature: Xiao et al. arXiv 2410.03613, HeteroLLM arXiv 2501.14794, PowerInfer-2
 # arXiv 2406.06282), and how close do the CPU and the AMEVA GPU path come to their own ceilings?

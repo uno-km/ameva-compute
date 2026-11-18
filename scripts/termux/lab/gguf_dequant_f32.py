@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 # gguf_dequant_f32.py GGUFPY_DIR SRC.gguf DST.gguf
 # Copy a GGUF with every quantized (and f16) tensor converted to F32, metadata and other tensors unchanged: the exact
 # weight values of SRC with no quantization left, the reference of tests/ameva_vision_parity.cpp --ref-mmproj.

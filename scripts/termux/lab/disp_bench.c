@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-// SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 //
 // disp_bench: cost of a dispatch and of a barrier between dispatches through ac_runtime (Vulkan or OpenCL), with a
 // kernel that does almost nothing (one workgroup, one invocation increments one word), so that what is timed is the

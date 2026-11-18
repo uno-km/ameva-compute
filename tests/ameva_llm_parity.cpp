@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // AMEVA real-model parity: one GGUF model evaluated by the CPU backend and by AMEVA (every weight MUL_MAT through
 // ameva_qmm on the GPU), compared position by position on real text.
 //

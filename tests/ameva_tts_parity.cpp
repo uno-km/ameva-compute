@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // AMEVA TTS parity: Kokoro-82M (adapters/tts/kokoro) synthesized on the CPU backend and on AMEVA0 from the same
 // phonemes, voice and noise seed; waveforms compared, time and real-time factor measured, WAV files written.
 //

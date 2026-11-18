@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 # prompt_bench.sh MODEL.gguf TAG gpu|cpu [BYTES]
 # Prompt processing speed with llama-completion: the first BYTES (default 1500, about 370 tokens) of wikitext-2 test
 # as one prompt, one generated token, -b/-ub 512, FA on.

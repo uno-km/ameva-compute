@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 # sd_e2e.sh
 # stable-diffusion.cpp images with modules on ggml-ameva (diffusion model, VAE), compared with the CPU's images.
 # Needs the sd-cli and the plugin built by sd_vae_e2e.sh build (SDB, OUT below).

@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 # ladder_run.sh API: the LLM size ladder on one phone - every model of MODELS that is on the phone, GPU (API) vs CPU,
 # ROUNDS rounds (default 5) rotated, through llm_plugin_ab.sh (variants "gpu" and "cpu") from the hardware-study kit
 # (~/abi-lab/hwkit/current, scripts/fleet/hw_study_fleet.sh). Analysis on the PC: scripts/fleet/ladder_fit.py.

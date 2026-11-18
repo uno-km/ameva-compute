@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 """Every kernel variant of the product as SPIR-V files and OpenCL C files, for driver-side inspection (research handover
 2026-11-09, R1/R2: re_dump vk|cl on the phones).
 

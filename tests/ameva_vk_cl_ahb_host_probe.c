@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // ameva_vk_cl_ahb_host_probe: zero-copy sharing of Vulkan memory with OpenCL on Mali through an AHardwareBuffer, with
 // the data written by the host (one round; the multi-round GPU handoff is ameva_vk_cl_gpu_handoff_probe.c).
 //

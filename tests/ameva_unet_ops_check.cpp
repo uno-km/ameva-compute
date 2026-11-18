@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // AMEVA check of the two ops the UNet of stable-diffusion.cpp needs beyond those of the VAE: NORM (ggml_norm, the
 // layer norm of the transformer blocks) and TIMESTEP_EMBEDDING, through the real ggml backend path (supports_op ->
 // graph_compute) on the AMEVA backend.

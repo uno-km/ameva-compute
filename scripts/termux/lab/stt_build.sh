@@ -1,5 +1,5 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 #
 # Build the ggml-ameva plugin for the whisper.cpp of the installed ameva-runtime STT bundle and check that AMEVA0
 # registers in that ggml. The bundle's whisper-cli calls ggml_backend_load_all(), which loads GGML_BACKEND_PATH, so the

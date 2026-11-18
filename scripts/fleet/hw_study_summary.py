@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 """hw_study_summary.py RESULT_DIR [...]: tables from the output of scripts/termux/lab/hw_study_suite.sh.
 
 Per directory: the SUITE lines (stages, skips, failures), the unit throughputs of cl_hw_bench, and per API and shape

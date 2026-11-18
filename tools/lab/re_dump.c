@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-// SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // re_dump: what the GPU driver made of one of OUR kernels (research tool, R2 of the research handover).
 //   re_dump vk kernel.spv out.bin      compute pipeline; pipeline statistics if the driver offers them; pipeline cache to out.bin
 //   re_dump cl kernel.cl out.bin [opts] OpenCL program binary to out.bin; private/local memory of each kernel

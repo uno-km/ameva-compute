@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 # gpu_sysfs.sh (sourced): GPU clock cap, current clock and temperature of a fleet phone for the measurement protocol
 # (grade A: temperature gate and clock-cap gate). Two families:
 #   Exynos Mali  /sys/kernel/gpu: gpu_max_clock (kHz), gpu_clock (MHz), gpu_tmu (degrees C, decimal)

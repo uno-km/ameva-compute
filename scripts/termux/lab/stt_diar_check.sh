@@ -1,5 +1,5 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 #
 # Speaker diarization of sherpa-onnx next to Whisper on ggml-ameva: the two stages of termux-stt's hybrid engine
 # (termux_stt/engine/hybrid_engine.py: whisper-cli for the text, sherpa-onnx for the speaker intervals,

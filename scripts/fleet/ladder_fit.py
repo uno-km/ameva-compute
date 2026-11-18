@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 OR Commercial-License
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 """ladder_fit.py EVIDENCE_DIR [OUT_DIR]: size-ladder analysis of GPU vs CPU LLM speed.
 
 Input: EVIDENCE_DIR/<dev>/<model>.log, the output of scripts/termux/lab/llm_plugin_ab.sh (lines "LAB round=..."),

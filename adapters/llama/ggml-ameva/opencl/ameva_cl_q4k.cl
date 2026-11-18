@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // AMEVA OpenCL prototype for Arm Mali: q4_K MUL_MAT (dst = W^T x A) with packed int8 dot products.
 //
 // Why OpenCL: the Mali DDKs r32p1 (Galaxy A53) and r38p0 (Galaxy S21) do not expose

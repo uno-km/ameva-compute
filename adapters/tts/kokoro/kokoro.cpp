@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // Kokoro-82M v0.19 on one ggml backend; see kokoro.h for the split between graphs and host.
 //
 // Layouts: "CT" tensors are [C, T] (ne0 = channels; LSTM, linear, LayerNorm over channels), "TC" tensors are
