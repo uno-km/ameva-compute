@@ -3,3 +3,4 @@
 *.log -whitespace
 *.md -whitespace
 *.sh text eol=lf
+docs/abi/*.txt text eol=lf

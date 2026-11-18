@@ -88,12 +88,15 @@ LD_LIBRARY_PATH="$OUT" timeout 300 "$OUT/ac_abi_check" > "$OUT/ac_abi_check.log"
 abi="$(grep -E '^AC_ABI_CHECK=' "$OUT/ac_abi_check.log")"
 abi_version="$(sed -n 's/^AC_ABI header \(0x[0-9A-Fa-f]*\).*/\1/p' "$OUT/ac_abi_check.log")"
 grep '^ABI_LAYOUT ' "$OUT/ac_abi_check.log" > "$OUT/abi_layout.txt"
-diff "$ROOT/docs/abi/ac_runtime_layout.txt" "$OUT/abi_layout.txt" > "$OUT/abi_layout.diff" 2>&1 \
+# the reference files are compared without carriage returns (a Windows checkout or git archive may add them)
+tr -d '\r' < "$ROOT/docs/abi/ac_runtime_layout.txt" > "$OUT/abi_layout_expected.txt"
+tr -d '\r' < "$ROOT/docs/abi/ac_runtime_symbols.txt" > "$OUT/abi_symbols_expected.txt"
+diff "$OUT/abi_layout_expected.txt" "$OUT/abi_layout.txt" > "$OUT/abi_layout.diff" 2>&1 \
     || die "struct layout differs from docs/abi/ac_runtime_layout.txt ($OUT/abi_layout.diff): record it there and in AC_ABI_VERSION"
 readelf --dyn-syms -W "$OUT/libac_runtime.so.2" | awk '$4 == "FUNC" && $5 == "GLOBAL" && $7 != "UND" {print $8}' \
     | sed 's/@.*//' | grep '^ac_runtime_' | sort -u > "$OUT/abi_symbols.txt"
-missing="$(comm -23 "$ROOT/docs/abi/ac_runtime_symbols.txt" "$OUT/abi_symbols.txt" | paste -sd' ' -)"
-extra="$(comm -13 "$ROOT/docs/abi/ac_runtime_symbols.txt" "$OUT/abi_symbols.txt" | paste -sd' ' -)"
+missing="$(comm -23 "$OUT/abi_symbols_expected.txt" "$OUT/abi_symbols.txt" | paste -sd' ' -)"
+extra="$(comm -13 "$OUT/abi_symbols_expected.txt" "$OUT/abi_symbols.txt" | paste -sd' ' -)"
 [ -z "$missing" ] || die "libac_runtime.so.2 no longer exports: $missing (a removal breaks callers: new major version)"
 [ -z "$extra" ] || die "libac_runtime.so.2 exports functions docs/abi/ac_runtime_symbols.txt does not list: $extra"
 echo "[build_runtime_backend] $abi; struct layout and $(wc -l < "$OUT/abi_symbols.txt") exported ac_runtime_* functions as in docs/abi"
