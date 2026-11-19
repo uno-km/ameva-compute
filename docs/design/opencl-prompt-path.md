@@ -385,3 +385,32 @@ run and normal in the second and third; read the second run).
   host geometry and is a new kernel family (about 49 places in ggml-ameva.cpp for ameva_mmqb). Estimated, not
   measured: q5_0 at Vulkan's speed would take the OpenCL GPU time of this prompt from about 3.3 s to about 2.0 s, below
   Vulkan's 2.4 s.
+
+#### q5_0 and q8_0 prompt kernels as hand-written OpenCL C: integrated (Galaxy A35, 2026-11-19)
+
+`shaders/opencl/ameva_mmq_q5_0.cl` and `ameva_mmq_q8_0.cl` replace the translation of `ameva_mmq.comp` in the OpenCL
+tables (commit `a5c0141`). The SPIR-V is still compiled from the GLSL; `build_ameva_kernels.py` (`cl_override`) refuses a
+file whose bindings, push-constant words or work-group size differ from the GLSL source. Same algorithm and arithmetic
+as the GLSL; the structure differs where the Mali OpenCL compiler loses (no context-by-pointer helpers, no private
+arrays, scalar shared stores, one weight-offset tile and one activation-sum tile fewer). The header holds the two
+replaced entries only: the other 263 text blocks were compared byte for byte with `HEAD`. The build phones with
+glslang 16.3.0 (S21, S25) did not answer; regenerating the header with the script reads the same two files and must
+reproduce them.
+
+Measured on the Galaxy A35 with the rebuilt plugin (built on the phone by `build_ggml_ameva.sh`; it has no patchelf,
+so `build_runtime_backend.sh` stops there and the same test commands were run by hand), cores 0-2, warm program cache,
+Qwen2.5-0.5B Q4_K_M, 1500-byte prompt, five rounds rotated (new / previous backend / Vulkan), GPU time per dispatch:
+
+| kernel (A35) | previous OpenCL | new OpenCL | Vulkan |
+| :--- | ---: | ---: | ---: |
+| q5_0 4864x896 | 20.0-23.7 ms | 9.5-9.8 ms | 7.74-7.83 ms |
+| q5_0 896x896 | 3.52-4.20 ms | 1.98-2.01 ms | 1.50 ms |
+| q5_0 128x896 | 0.64-0.69 ms | 0.53-0.54 ms | 0.34 ms |
+| q8_0 128x896 | 0.67-0.74 ms | 0.56-0.57 ms | 0.34 ms |
+| prompt t/s | 103-118 | 179.7-183.1 | 174.8-176.0 |
+
+Correctness on the A35: `ameva_qmm_check` 516/516; `parity_long` (ctx 256): kld_mean 6.414e-3 (batch) and 4.985e-3
+(one token at a time), the same digits as the previous backend, greedy text identical to the CPU for 64 of 64 tokens.
+Not measured: the Galaxy A53 (the previous prototype run gave only 1.2x there; the phone did not answer today), S21,
+temperature, `test-backend-ops`, and q4_0, q4_1, q5_1, iq4_nl. The q8_0 128-row product is still 1.7x slower than
+Vulkan. Grade B (five rounds, no temperature gate).
