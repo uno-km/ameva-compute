@@ -2,7 +2,7 @@
 
 > **Powered by the AMUDA (Ameva Mobile Unified Device Architecture) Core Engine**
 
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-PolyForm_Noncommercial_1.0.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Termux%20%7C%20Android%20ARM64-green.svg)](#)
 [![Engineering Doctrine](https://img.shields.io/badge/Doctrine-Zero--Silent--Fallback-red.svg)](#)
 
