@@ -1,82 +1,102 @@
-#pragma once
-
-#include "ggml.h"
-#include "ggml-backend.h"
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-#define GGML_AMEVA_NAME "AMEVA"
-#define GGML_AMEVA_DEVICE_NAME "AMEVA0"
-#define GGML_AMEVA_DEVICE_DESCRIPTION "AMEVA Vulkan Compute SGEMM Accelerator"
-
-// Backend & Device Lifecycle
-GGML_API ggml_backend_t ggml_backend_ameva_init(size_t dev_num);
-GGML_API bool ggml_backend_is_ameva(ggml_backend_t backend);
-GGML_API ggml_backend_buffer_type_t ggml_backend_ameva_buffer_type(size_t dev_num);
-GGML_API ggml_backend_reg_t ggml_backend_ameva_reg(void);
-GGML_API void ggml_backend_ameva_register(void);
-GGML_API void ggml_backend_ameva_teardown(void);
-
-// Dynamic Loader Entrypoints (dlopen / dlsym)
-GGML_BACKEND_API ggml_backend_reg_t ggml_backend_init(void);
-GGML_BACKEND_API int ggml_backend_score(void);
-
-// Diagnostic Counters (Ground Truth Verification)
-// Since the AMEVA graph engine every graph runs as one GPU batch and every weight type is read in its raw format:
-//   gpu_op_count             graph nodes completed on the GPU (any op)
-//   f32_gpu_sgemm_dispatch   MUL_MAT nodes completed on the GPU, whatever the weight type (name kept for ABI)
-//   q5_0_cpu_dequant_count   stays 0 -- nothing is dequantized on the CPU (name kept for ABI)
-//   q5_0_staging_alloc/free  stay 0 -- tensors outside AMEVA buffers are never staged by the backend; the
-//                            scheduler copies them (names kept for ABI)
-//   repacked_tensor_count    tensors stored in the AMEVA repacked weight layout, and repacked_bytes their size
-//                            (stored state: not cleared by reset_counters)
-//   qmv_mul_mat_count        MUL_MAT nodes completed on the GPU with repacked weights (ameva_qmv, ameva_qgemm or
-//                            ameva_mmq kernels)
-//   mmq_mul_mat_count        of those, the nodes that ran ameva_mmq (int8 activations, integer dot products)
-GGML_API int64_t ggml_backend_ameva_get_supports_query_count(void);
-GGML_API int64_t ggml_backend_ameva_get_supported_op_count(void);
-GGML_API int64_t ggml_backend_ameva_get_gpu_op_count(void);
-GGML_API int64_t ggml_backend_ameva_get_q5_0_cpu_dequant_count(void);
-GGML_API int64_t ggml_backend_ameva_get_f32_gpu_sgemm_dispatch_count(void);
-GGML_API int64_t ggml_backend_ameva_get_context_create_count(void);
-GGML_API int64_t ggml_backend_ameva_get_context_destroy_count(void);
-GGML_API int64_t ggml_backend_ameva_get_kernel_create_count(void);
-GGML_API int64_t ggml_backend_ameva_get_kernel_destroy_count(void);
-GGML_API int64_t ggml_backend_ameva_get_buffer_create_count(void);
-GGML_API int64_t ggml_backend_ameva_get_buffer_destroy_count(void);
-GGML_API int64_t ggml_backend_ameva_get_event_create_count(void);
-GGML_API int64_t ggml_backend_ameva_get_event_destroy_count(void);
-GGML_API int64_t ggml_backend_ameva_get_q5_0_staging_alloc_count(void);
-GGML_API int64_t ggml_backend_ameva_get_q5_0_staging_free_count(void);
-GGML_API int64_t ggml_backend_ameva_get_repacked_tensor_count(void);
-GGML_API int64_t ggml_backend_ameva_get_repacked_bytes(void);
-GGML_API int64_t ggml_backend_ameva_get_qmv_mul_mat_count(void);
-GGML_API int64_t ggml_backend_ameva_get_mmq_mul_mat_count(void);
-// node pairs computed by one fused dispatch sequence (graph-engine fusion, AMEVA_FUSE); counted when recorded
-GGML_API int64_t ggml_backend_ameva_get_fused_pair_count(void);
-GGML_API const char* ggml_backend_ameva_get_build_commit(void);
-GGML_API void ggml_backend_ameva_reset_counters(void);
-
-// Failure Injection Hooks (P0 Hardening Verification)
-typedef enum {
-    AMEVA_FAIL_NONE = 0,
-    AMEVA_FAIL_MAP_SRC0 = 1,
-    AMEVA_FAIL_MAP_SRC1 = 2,
-    AMEVA_FAIL_MAP_DST = 3,
-    AMEVA_FAIL_FLUSH_SRC0 = 4,
-    AMEVA_FAIL_FLUSH_SRC1 = 5,
-    AMEVA_FAIL_DISPATCH = 6,
-    AMEVA_FAIL_WAIT_TIMEOUT = 7,
-    AMEVA_FAIL_INVALIDATE_DST = 8,
-    AMEVA_FAIL_OFFSET_OVERFLOW = 9,
-    AMEVA_FAIL_TENSOR_RANGE_OOB = 10,
-} AmevaFailureInjectionPoint;
-
-GGML_API void ggml_backend_ameva_set_failure_injection(AmevaFailureInjectionPoint point);
-GGML_API AmevaFailureInjectionPoint ggml_backend_ameva_get_failure_injection(void);
-
-#ifdef __cplusplus
-}
-#endif
+/**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
+ */
+#pragma once
+
+#include "ggml.h"
+#include "ggml-backend.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define GGML_AMEVA_NAME "AMEVA"
+#define GGML_AMEVA_DEVICE_NAME "AMEVA0"
+#define GGML_AMEVA_DEVICE_DESCRIPTION "AMEVA Vulkan Compute SGEMM Accelerator"
+
+// Backend & Device Lifecycle
+GGML_API ggml_backend_t ggml_backend_ameva_init(size_t dev_num);
+GGML_API bool ggml_backend_is_ameva(ggml_backend_t backend);
+GGML_API ggml_backend_buffer_type_t ggml_backend_ameva_buffer_type(size_t dev_num);
+GGML_API ggml_backend_reg_t ggml_backend_ameva_reg(void);
+GGML_API void ggml_backend_ameva_register(void);
+GGML_API void ggml_backend_ameva_teardown(void);
+
+// Dynamic Loader Entrypoints (dlopen / dlsym)
+GGML_BACKEND_API ggml_backend_reg_t ggml_backend_init(void);
+GGML_BACKEND_API int ggml_backend_score(void);
+
+// Diagnostic Counters (Ground Truth Verification)
+// Since the AMEVA graph engine every graph runs as one GPU batch and every weight type is read in its raw format:
+//   gpu_op_count             graph nodes completed on the GPU (any op)
+//   f32_gpu_sgemm_dispatch   MUL_MAT nodes completed on the GPU, whatever the weight type (name kept for ABI)
+//   q5_0_cpu_dequant_count   stays 0 -- nothing is dequantized on the CPU (name kept for ABI)
+//   q5_0_staging_alloc/free  stay 0 -- tensors outside AMEVA buffers are never staged by the backend; the
+//                            scheduler copies them (names kept for ABI)
+//   repacked_tensor_count    tensors stored in the AMEVA repacked weight layout, and repacked_bytes their size
+//                            (stored state: not cleared by reset_counters)
+//   qmv_mul_mat_count        MUL_MAT nodes completed on the GPU with repacked weights (ameva_qmv, ameva_qgemm or
+//                            ameva_mmq kernels)
+//   mmq_mul_mat_count        of those, the nodes that ran ameva_mmq (int8 activations, integer dot products)
+//   mmqb_mul_mat_count       of those, the nodes that ran ameva_mmqb (one activation scale per 256 elements,
+//                            integer accumulation over the block)
+GGML_API int64_t ggml_backend_ameva_get_supports_query_count(void);
+GGML_API int64_t ggml_backend_ameva_get_supported_op_count(void);
+GGML_API int64_t ggml_backend_ameva_get_gpu_op_count(void);
+GGML_API int64_t ggml_backend_ameva_get_q5_0_cpu_dequant_count(void);
+GGML_API int64_t ggml_backend_ameva_get_f32_gpu_sgemm_dispatch_count(void);
+GGML_API int64_t ggml_backend_ameva_get_context_create_count(void);
+GGML_API int64_t ggml_backend_ameva_get_context_destroy_count(void);
+GGML_API int64_t ggml_backend_ameva_get_kernel_create_count(void);
+GGML_API int64_t ggml_backend_ameva_get_kernel_destroy_count(void);
+GGML_API int64_t ggml_backend_ameva_get_buffer_create_count(void);
+GGML_API int64_t ggml_backend_ameva_get_buffer_destroy_count(void);
+GGML_API int64_t ggml_backend_ameva_get_event_create_count(void);
+GGML_API int64_t ggml_backend_ameva_get_event_destroy_count(void);
+GGML_API int64_t ggml_backend_ameva_get_q5_0_staging_alloc_count(void);
+GGML_API int64_t ggml_backend_ameva_get_q5_0_staging_free_count(void);
+GGML_API int64_t ggml_backend_ameva_get_repacked_tensor_count(void);
+GGML_API int64_t ggml_backend_ameva_get_repacked_bytes(void);
+GGML_API int64_t ggml_backend_ameva_get_qmv_mul_mat_count(void);
+GGML_API int64_t ggml_backend_ameva_get_mmq_mul_mat_count(void);
+GGML_API int64_t ggml_backend_ameva_get_mmqb_mul_mat_count(void);
+// nodes computed by the dispatches of an earlier node (graph-engine fusion, AMEVA_FUSE): 1 per fused pair, and 1 per
+// node of a chain after its first (CONV_2D with its bias ADD: 1; GROUP_NORM with MUL, ADD and SILU: 3)
+GGML_API int64_t ggml_backend_ameva_get_fused_pair_count(void);
+// CONV_2D nodes completed on the GPU by ameva_conv (not cleared by reset_counters), and how that kernel converts f16
+// weights: -1 not determined yet (no f16 convolution was computed), 0 the exact decoder, 1 the built-in conversion,
+// taken after a check of the device's conversion (AMEVA_CONV_F16)
+GGML_API int64_t ggml_backend_ameva_get_conv_count(void);
+GGML_API int ggml_backend_ameva_get_conv_f16_decoder(void);
+// of the CONV_2D nodes, the ones whose bias (the ADD that follows, stored in place) the kernel added itself; and the
+// GROUP_NORM nodes completed on the GPU by ameva_cnorm (neither is cleared by reset_counters)
+GGML_API int64_t ggml_backend_ameva_get_conv_bias_count(void);
+GGML_API int64_t ggml_backend_ameva_get_group_norm_count(void);
+// nodes completed on the GPU with a tensor above one buffer binding (maxStorageBufferRange), computed in windows of
+// whole planes: CONV_2D, GROUP_NORM, UPSCALE and the binary ops (not cleared by reset_counters)
+GGML_API int64_t ggml_backend_ameva_get_window_node_count(void);
+GGML_API const char* ggml_backend_ameva_get_build_commit(void);
+GGML_API void ggml_backend_ameva_reset_counters(void);// Prints the AMEVA_PROFILE totals now (the same report as at process exit). An Android app process does not run// atexit handlers when it exits, so a host calls this after a unit of work; also reachable as// ggml_backend_reg_get_proc_address(reg, "ggml_backend_ameva_profile_report").GGML_API void ggml_backend_ameva_profile_report(void);
+
+// Failure Injection Hooks (P0 Hardening Verification)
+typedef enum {
+    AMEVA_FAIL_NONE = 0,
+    AMEVA_FAIL_MAP_SRC0 = 1,
+    AMEVA_FAIL_MAP_SRC1 = 2,
+    AMEVA_FAIL_MAP_DST = 3,
+    AMEVA_FAIL_FLUSH_SRC0 = 4,
+    AMEVA_FAIL_FLUSH_SRC1 = 5,
+    AMEVA_FAIL_DISPATCH = 6,
+    AMEVA_FAIL_WAIT_TIMEOUT = 7,
+    AMEVA_FAIL_INVALIDATE_DST = 8,
+    AMEVA_FAIL_OFFSET_OVERFLOW = 9,
+    AMEVA_FAIL_TENSOR_RANGE_OOB = 10,
+} AmevaFailureInjectionPoint;
+
+GGML_API void ggml_backend_ameva_set_failure_injection(AmevaFailureInjectionPoint point);
+GGML_API AmevaFailureInjectionPoint ggml_backend_ameva_get_failure_injection(void);
+
+#ifdef __cplusplus
+}
+#endif

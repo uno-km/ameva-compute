@@ -1,3 +1,7 @@
+/**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
+ */
 #include "ggml-ameva.h"
 #include "ggml-ameva-impl.h"
 #include "ggml-backend-impl.h"
@@ -31,6 +35,7 @@ static std::atomic<int64_t> g_ameva_repacked_tensor_count{0};
 static std::atomic<int64_t> g_ameva_repacked_bytes{0};
 static std::atomic<int64_t> g_ameva_qmv_mul_mat_count{0};
 static std::atomic<int64_t> g_ameva_mmq_mul_mat_count{0};
+static std::atomic<int64_t> g_ameva_mmqb_mul_mat_count{0};
 static std::atomic<int>     g_ameva_failure_injection{0};
 
 #ifndef GGML_AMEVA_BUILD_COMMIT
@@ -113,6 +118,10 @@ int64_t ggml_backend_ameva_get_mmq_mul_mat_count(void) {
     return g_ameva_mmq_mul_mat_count.load();
 }
 
+int64_t ggml_backend_ameva_get_mmqb_mul_mat_count(void) {
+    return g_ameva_mmqb_mul_mat_count.load();
+}
+
 int64_t ggml_backend_ameva_get_qmv_mul_mat_count(void) {
     return g_ameva_qmv_mul_mat_count.load();
 }
@@ -131,6 +140,7 @@ void ggml_backend_ameva_reset_counters(void) {
     g_ameva_q5_0_staging_free_count.store(0);
     g_ameva_qmv_mul_mat_count.store(0);
     g_ameva_mmq_mul_mat_count.store(0);
+    g_ameva_mmqb_mul_mat_count.store(0);
     // the repacked tensor and byte counts describe stored weights, not activity, and are not reset
 }
 
@@ -152,6 +162,10 @@ void ameva_count_mul_mat(int64_t n) {
 
 void ameva_count_mmq_mul_mat(int64_t n) {
     g_ameva_mmq_mul_mat_count.fetch_add(n);
+}
+
+void ameva_count_mmqb_mul_mat(int64_t n) {
+    g_ameva_mmqb_mul_mat_count.fetch_add(n);
 }
 
 void ameva_count_qmv_mul_mat(int64_t n) {
@@ -302,10 +316,31 @@ static bool ggml_backend_ameva_device_supports_buft(ggml_backend_dev_t dev, ggml
     return buft == ggml_backend_ameva_buffer_type(0);
 }
 
+// AMEVA_OFFLOAD=<n> (experiment, docs/design/opencl-prompt-path.md stage B): with the weights in CPU memory (-ngl 0),
+// the scheduler runs a MUL_MAT of n or more activation rows here instead of on the CPU, copying the weight in for each
+// graph. This measures the cost of that structure (CPU holds weights and KV cache, a GPU backend takes only the large
+// MUL_MATs) before an OpenCL backend is built on it. Unset or 0: no offload (the default).
+static int64_t ameva_offload_min_batch() {
+    static const int64_t v = [] {
+        const char* s = getenv("AMEVA_OFFLOAD");
+        if (!s || !*s) return (int64_t)0;
+        char* end = nullptr;
+        const long long n = strtoll(s, &end, 10);
+        if (*end != '\0' || n < 0) {
+            fprintf(stderr, "ggml-ameva: AMEVA_OFFLOAD='%s' is not a non-negative integer (minimum batch rows)\n", s);
+            abort();
+        }
+        if (n > 0) fprintf(stderr, "ggml-ameva: AMEVA_OFFLOAD=%lld: MUL_MAT with >= %lld rows offloaded from CPU weights\n", n, n);
+        return (int64_t)n;
+    }();
+    return v;
+}
+
 static bool ggml_backend_ameva_device_offload_op(ggml_backend_dev_t dev, const struct ggml_tensor* op) {
     (void)dev;
-    (void)op;
-    return false; // Zero unsolicited offload
+    const int64_t min_batch = ameva_offload_min_batch();
+    if (min_batch <= 0 || !op || op->op != GGML_OP_MUL_MAT || !op->src[1]) return false;
+    return op->src[1]->ne[1] >= min_batch;
 }
 
 // Designated initializers throughout: ggml-backend-impl.h inserts members into these vtables between releases,
@@ -336,11 +371,19 @@ static size_t ggml_backend_ameva_reg_get_device_count(ggml_backend_reg_t reg) {
 
 static ggml_backend_dev_t ggml_backend_ameva_reg_get_device(ggml_backend_reg_t reg, size_t index);
 
+static void* ggml_backend_ameva_reg_get_proc_address(ggml_backend_reg_t reg, const char* name) {
+    (void)reg;
+    if (name != nullptr && strcmp(name, "ggml_backend_ameva_profile_report") == 0) {
+        return (void*)ggml_backend_ameva_profile_report;
+    }
+    return nullptr;
+}
+
 static const struct ggml_backend_reg_i ggml_backend_ameva_reg_i = {
     .get_name         = ggml_backend_ameva_reg_get_name,
     .get_device_count = ggml_backend_ameva_reg_get_device_count,
     .get_device       = ggml_backend_ameva_reg_get_device,
-    .get_proc_address = nullptr,
+    .get_proc_address = ggml_backend_ameva_reg_get_proc_address,
 };
 
 static struct ggml_backend_reg g_ameva_reg = {
@@ -402,7 +445,12 @@ const char* ameva_abi_check(void) {
             {GGML_OP_SCALE, "SCALE"}, {GGML_OP_CPY, "CPY"}, {GGML_OP_CONT, "CONT"}, {GGML_OP_RESHAPE, "RESHAPE"},
             {GGML_OP_VIEW, "VIEW"}, {GGML_OP_PERMUTE, "PERMUTE"}, {GGML_OP_TRANSPOSE, "TRANSPOSE"},
             {GGML_OP_GET_ROWS, "GET_ROWS"}, {GGML_OP_SET_ROWS, "SET_ROWS"}, {GGML_OP_ROPE, "ROPE"},
-            {GGML_OP_FLASH_ATTN_EXT, "FLASH_ATTN_EXT"}, {GGML_OP_UNARY, "UNARY"}, {GGML_OP_GLU, "GLU"}};
+            {GGML_OP_FLASH_ATTN_EXT, "FLASH_ATTN_EXT"}, {GGML_OP_UNARY, "UNARY"}, {GGML_OP_GLU, "GLU"},
+            {GGML_OP_CONV_2D, "CONV_2D"}, {GGML_OP_GROUP_NORM, "GROUP_NORM"}, {GGML_OP_UPSCALE, "UPSCALE"},
+            {GGML_OP_PAD, "PAD"}, {GGML_OP_CONCAT, "CONCAT"}, {GGML_OP_SOFT_MAX, "SOFT_MAX"},
+            {GGML_OP_NORM, "NORM"}, {GGML_OP_TIMESTEP_EMBEDDING, "TIMESTEP_EMBEDDING"},
+            {GGML_OP_REPEAT, "REPEAT"}, {GGML_OP_IM2COL, "IM2COL"}, {GGML_OP_SQR, "SQR"}, {GGML_OP_SQRT, "SQRT"},
+            {GGML_OP_SIN, "SIN"}, {GGML_OP_COS, "COS"}, {GGML_OP_LEAKY_RELU, "LEAKY_RELU"}, {GGML_OP_CUMSUM, "CUMSUM"}};
         static const struct { enum ggml_type type; const char* name; } kTypes[] = {
             {GGML_TYPE_F32, "f32"}, {GGML_TYPE_F16, "f16"}, {GGML_TYPE_I32, "i32"}, {GGML_TYPE_I64, "i64"},
             {GGML_TYPE_Q5_0, "q5_0"}, {GGML_TYPE_Q4_K, "q4_K"}};
@@ -425,6 +473,13 @@ const char* ameva_abi_check(void) {
                 if (!c || c->op != GGML_OP_MUL_MAT || c->src[0] != a || c->src[1] != b || c->type != GGML_TYPE_F32 ||
                     c->ne[0] != 3 || c->ne[1] != 2 || a->nb[1] != 32 || ggml_nbytes(c) != 24)
                     what = "struct ggml_tensor";
+                // extra lies behind name[GGML_MAX_NAME], and the host chooses that size (stable-diffusion.cpp
+                // compiles ggml with 160). libggml-base cuts a name to its own size, which shows what it was built with.
+                char probe_name[512];
+                memset(probe_name, 'n', sizeof(probe_name) - 1);
+                probe_name[sizeof(probe_name) - 1] = 0;
+                if (!what && strlen(ggml_get_name(ggml_set_name(c, probe_name))) != sizeof(c->name) - 1)
+                    what = "struct ggml_tensor (GGML_MAX_NAME)";
                 ggml_free(tctx);
             }
         }
@@ -432,7 +487,7 @@ const char* ameva_abi_check(void) {
             snprintf(msg, sizeof(msg),
                      "ABI mismatch with the loaded libggml-base: %s differs from the ggml headers libggml-ameva.so "
                      "was compiled with (offsetof(ggml_backend, device)=%zu). Rebuild it against the ggml of the "
-                     "llama.cpp build that loads it.", what, offsetof(struct ggml_backend, device));
+                     "program that loads it, with its GGML_MAX_NAME.", what, offsetof(struct ggml_backend, device));
             result = msg;
         }
     });

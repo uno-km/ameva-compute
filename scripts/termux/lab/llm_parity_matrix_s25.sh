@@ -1,4 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
+# Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 # S25 type matrix: real F16 / Q4_K_M models plus models requantized from them with libllama's quantizer.
 set -u
 LAB=$HOME/abi-lab

@@ -57,6 +57,7 @@ layout(push_constant) uniform PushConstants {
     uint h_off, s_off, a_off, d_off;
     uint s1, sd, tpr, ep_mode;
     uint e_off, eo_off;
+    uint qt; // weight rows from the first 16-row tile of the binding << 4 | rows before the first row (qunit)
 } pc;
 
 shared float red[ROWS * COLS * 64];
@@ -65,9 +66,20 @@ void main() {
     const uint tid = gl_LocalInvocationID.x;
     qdecode_init(tid);
     const uint tpr = pc.tpr;
+#if defined(AMEVA_QTILE)
+    // 16-row tiles (qunit, ameva_common.glsl): the invocations of a warp take consecutive rows and the same units, so
+    // they read a tile contiguously; the k-parts of a row are G invocations apart and an invocation's rows G apart
+    const uint G = 64u / tpr;
+    const uint g = tid % G;
+    const uint lane = tid / G;
+    const uint RS = G, PS = G;
+    const uint row0 = gl_WorkGroupID.x * G * uint(ROWS) + g;
+#else
     const uint g = tid / tpr;
     const uint lane = tid - g * tpr;
+    const uint RS = 1u, PS = 1u;
     const uint row0 = (gl_WorkGroupID.x * (64u / tpr) + g) * uint(ROWS);
+#endif
     const uint col0 = gl_WorkGroupID.y * uint(COLS);
     const uint U = pc.K >> 5u;
     const uint s_row = (pc.K / BLOCK_ELEMS) * SB;
@@ -100,13 +112,13 @@ void main() {
             a[i] = a4[ab + i];
         }
         [[unroll]] for (uint r = 0u; r < uint(ROWS); ++r) {
-            const uint n = row0 + r;
+            const uint n = row0 + r * RS;
             if (n < pc.N) {
                 [[unroll]] for (uint p = 0u; p < uint(UPL); ++p) {
                     const uint up = u + p;
                     const uint b = up / UPB;
                     vec4 w[8];
-                    decode(pc.q_off + (n * U + up) * QPER, pc.h_off + n * U + up, pc.s_off + n * s_row + b * SB,
+                    decode(pc.q_off + qunit(n, up, U, pc.qt) * QPER, pc.h_off + qunit(n, up, U, pc.qt), pc.s_off + n * s_row + b * SB,
                            up - b * UPB, w);
                     float s = 0.0;
                     [[unroll]] for (uint i = 0u; i < 8u; ++i) {
@@ -137,11 +149,11 @@ void main() {
         const float asum = asum4.x + asum4.y + asum4.z + asum4.w;
 #endif
         [[unroll]] for (uint r = 0u; r < uint(ROWS); ++r) {
-            const uint n = row0 + r;
+            const uint n = row0 + r * RS;
             if (n < pc.N) {
 #if !defined(ABLATE)
                 vec4 w[8];
-                decode(pc.q_off + (n * U + u) * QPER, pc.h_off + n * U + u, pc.s_off + n * s_row + b * SB,
+                decode(pc.q_off + qunit(n, u, U, pc.qt) * QPER, pc.h_off + qunit(n, u, U, pc.qt), pc.s_off + n * s_row + b * SB,
                        u - b * UPB, w);
                 float s = 0.0;
                 [[unroll]] for (uint i = 0u; i < 8u; ++i) {
@@ -149,11 +161,11 @@ void main() {
                 }
                 acc[r] += s;
 #elif ABLATE == 1
-                const QVEC q = qv[pc.q_off + (n * U + u) * QPER];
+                const QVEC q = qv[pc.q_off + qunit(n, u, U, pc.qt) * QPER];
                 acc[r] += float(q.x & 1u) + asum;
 #elif ABLATE == 2
                 vec4 w[8];
-                decode(pc.q_off + (n * U + u) * QPER, pc.h_off + n * U + u, pc.s_off + n * s_row + b * SB,
+                decode(pc.q_off + qunit(n, u, U, pc.qt) * QPER, pc.h_off + qunit(n, u, U, pc.qt), pc.s_off + n * s_row + b * SB,
                        u - b * UPB, w);
                 vec4 t = w[0];
                 [[unroll]] for (uint i = 1u; i < 8u; ++i) {
@@ -161,7 +173,7 @@ void main() {
                 }
                 acc[r] += t.x + t.y + t.z + t.w + asum;
 #else
-                const QVEC q = qv[pc.q_off + (n * U + u) * QPER];
+                const QVEC q = qv[pc.q_off + qunit(n, u, U, pc.qt) * QPER];
                 const vec4 wc = vec4(float(q.x & 0xFu));
                 float s = 0.0;
                 [[unroll]] for (uint i = 0u; i < 8u; ++i) {
@@ -182,7 +194,7 @@ void main() {
         for (uint u = lane; u < U; u += tpr) {
             const uint b = u / UPB;
             vec4 w[8];
-            decode(pc.q_off + (row0 * U + u) * QPER, pc.h_off + row0 * U + u, pc.s_off + row0 * s_row + b * SB,
+            decode(pc.q_off + qunit(row0, u, U, pc.qt) * QPER, pc.h_off + qunit(row0, u, U, pc.qt), pc.s_off + row0 * s_row + b * SB,
                    u - b * UPB, w);
             [[unroll]] for (uint c = 0u; c < uint(COLS); ++c) {
                 if (col0 + c < pc.M) {
@@ -205,14 +217,14 @@ void main() {
     for (uint st = tpr >> 1u; st > 0u; st >>= 1u) {
         if (lane < st) {
             [[unroll]] for (uint k = 0u; k < uint(ROWS * COLS); ++k) {
-                red[k * 64u + tid] += red[k * 64u + tid + st];
+                red[k * 64u + tid] += red[k * 64u + tid + st * PS];
             }
         }
         barrier();
     }
     if (lane == 0u) {
         [[unroll]] for (uint r = 0u; r < uint(ROWS); ++r) {
-            const uint n = row0 + r;
+            const uint n = row0 + r * RS;
             if (n < pc.N) {
                 [[unroll]] for (uint c = 0u; c < uint(COLS); ++c) {
                     if (col0 + c < pc.M) {

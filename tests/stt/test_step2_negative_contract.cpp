@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
+ */
+/**
  * @file test_step2_negative_contract.cpp
  * @brief Formal Verification Harness for Step 2 Error State Negative Gates
  *

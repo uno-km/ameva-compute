@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
+ */
+/**
  * @file test_amuda_layer_exact.c
  * @brief Ground-Truth Full BitNet Layer 0 Forward Pass Test Suite
  */

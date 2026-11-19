@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
+ */
+/**
  * @file amuda_cli.c
  * @brief Standalone Native GPGPU Autoregressive Inference CLI Engine for BitNet 1.58b
  */

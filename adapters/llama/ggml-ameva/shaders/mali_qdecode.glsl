@@ -1,5 +1,5 @@
 // AMEVA Mali-Optimized Repacked-Weight Stream Decoder
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 //
 // Designed for ARM Mali (Valhall/Bifrost) architecture:
 // Eliminates register spill by streaming weights into dot products immediately (no w[8] array).

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // GPU vs CPU parity for the whisper AMEVA matmul kernels (src/shaders/stt/matmul_{f16,q5_0}_f32.comp) through the
 // backend's public entry point ameva_backend_run_cached_gpu_matmul. The CPU reference uses the weights exactly as
 // the GPU sees them: F16 rounded by ggml, Q5_0 quantized by ggml_quantize_chunk and dequantized by ggml's own

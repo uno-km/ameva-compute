@@ -2,7 +2,7 @@
 
 > **Powered by the AMUDA (Ameva Mobile Unified Device Architecture) Core Engine**
 
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-PolyForm_Noncommercial_1.0.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Termux%20%7C%20Android%20ARM64-green.svg)](#)
 [![Engineering Doctrine](https://img.shields.io/badge/Doctrine-Zero--Silent--Fallback-red.svg)](#)
 
@@ -93,5 +93,7 @@ buf_a = ctx.buffer(a)
 
 ## ⚖️ 라이선스 및 상표권 고지 (Legal Disclaimer)
 
-* 본 소프트웨어는 **Apache License, Version 2.0** 라이선스 하에 배포됩니다.
+* 본 소프트웨어는 **비상업적 사용에 한해 무료**입니다([PolyForm Noncommercial License 1.0.0](LICENSE)). 개인의 학습·연구·실험·취미와 비영리·교육·공공 기관의 사용이 여기에 해당합니다.
+* 상업적 사용(기업의 모든 사용, 판매·광고·유료 서비스 등 상업적 용도가 예정된 개인의 사용)에는 별도의 상업 라이선스가 필요합니다([LICENSE-COMMERCIAL.md](LICENSE-COMMERCIAL.md)). 자세한 내용과 제3자 구성 요소의 라이선스는 [LICENSING.md](LICENSING.md)를 보십시오.
+* 이 변경 전에 `Apache-2.0`으로 공개된 버전에는 그 버전의 라이선스가 계속 적용됩니다.
 * **상표권 고지**: `CUDA`는 NVIDIA Corporation의 등록 상표입니다. `ameva-compute`는 엔비디아의 소프트웨어, 드라이버, 또는 바이너리를 전혀 참조하지 않는 독립적인 클린룸(Clean-Room) 자체 구현체이며, NVIDIA Corporation과 어떠한 제휴, 후원, 또는 보증 관계도 없습니다.

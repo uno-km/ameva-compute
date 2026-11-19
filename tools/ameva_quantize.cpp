@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // Write a GGUF model with the requested weight types through libllama's own quantizer (llama_model_quantize), so the
 // AMEVA type matrix runs on real models on devices that have libllama but no llama-quantize binary.
 //

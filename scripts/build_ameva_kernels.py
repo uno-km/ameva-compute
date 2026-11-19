@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 """Build every AMEVA GPU kernel of the ggml backend into one C header.
 
     python3 scripts/build_ameva_kernels.py [--glslang glslangValidator] [--spirv-val spirv-val] [--out HEADER]
@@ -28,6 +28,17 @@
   (-DDMAX=<largest head size> -DBQ=<rows per tile> -DBK=<keys per block>; shared memory stays below 32 KiB).
 * Op kernels (shaders/ameva_<op>.comp): one SPIR-V module each; the operation is selected at dispatch time.
 
+* MMQB family (shaders/ameva_mmqb.comp): the same product with integer accumulation over a 256-weight block, for
+  the super-block types whose scales are integers per unit (q4_K, q5_K, q6_K), on int8 activations with one scale
+  per 256 elements (shaders/ameva_quant_a8b.comp, an op kernel). No shared memory: an invocation owns DRW weight
+  rows x DRA activation rows. One variant per weight type and layout (DRW, DRA, local size).
+
+* VK_ONLY kernels (named for their history: SPIR-V only until 2026-11-06): shaders/ameva_conv.comp, the
+  convolution without a column matrix, per weight form and staging, shaders/ameva_conv_w.comp, which brings the
+  weights into its K order, the two passes of GROUP_NORM, shaders/ameva_cnorm_stat.comp and shaders/ameva_cnorm.comp,
+  and shaders/ameva_timestep_embd.comp. They have their own enum and table (kAmevaVkKernels) and, like every other
+  family, an OpenCL C table in the same order (kAmevaClVk).
+
 For every module: glslangValidator -V (vulkan1.0), spirv-val, SHA-256 (pinned by the runtime at kernel creation),
 binding count (from the source's layout declarations), push-constant size (counted from the source's push-constant
 block and cross-checked against glslang's reflection) and local size. Any compiler, validator or consistency
@@ -45,6 +56,10 @@ import tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHADERS = os.path.join(ROOT, "adapters", "llama", "ggml-ameva", "shaders")
 DEFAULT_OUT = os.path.join(ROOT, "adapters", "llama", "ggml-ameva", "ggml_ameva_kernels_spv.h")
+DEFAULT_CL_OUT = os.path.join(ROOT, "adapters", "llama", "ggml-ameva", "ggml_ameva_kernels_cl.h")
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import glsl_to_opencl  # noqa: E402  (scripts/glsl_to_opencl.py: the OpenCL C form of every kernel)
 
 # (ggml_type_name, shader define, weights per block, bytes per block) -- ggml-common.h block structs
 QMM_TYPES = [
@@ -87,6 +102,12 @@ QMV_SHAPES = [(1, 4), (1, 2), (1, 1), (8, 1)]
 MMVQ_ROWS = [4, 2, 1]
 # weight types of the emulated integer dot product (shaders/ameva_mmvq.comp -DEMU_DOT)
 MMVQE_TYPES = [t for t in QMV_TYPES if t[0] not in ("q8_0", "iq4_nl", "iq4_xs")]
+# block-integer MMQ (shaders/ameva_mmqb.comp): weight types, and layouts (weight rows per invocation, activation rows
+# per invocation, local size x, y). Which layout is fastest depends on the device: Mali-G68 (Galaxy A53, OpenCL
+# prototype, 352x2048x2048, 2026-10-07) 2x8 19.4 ms, 2x4 22.6, 2x16 21.7, 1x8 31.1, 1x4 35.5, 4x8 63.6; the local
+# size moves it by a few per cent.
+MMQB_TYPES = [t for t in QMV_TYPES if t[0] in ("q4_K", "q5_K", "q6_K")]
+MMQB_LAYOUTS = [(2, 8, 8, 4), (2, 4, 8, 4), (2, 16, 8, 4), (1, 8, 8, 4), (1, 4, 8, 4), (1, 16, 8, 4)]
 # units per lane and step of the token-generation variant: the shader default unless AMEVA_BUILD_QMV_UPL is set
 # (kernel tuning: builds that differ only in it)
 QMV_UPL = os.environ.get("AMEVA_BUILD_QMV_UPL", "")
@@ -95,14 +116,92 @@ QMV_UPL = os.environ.get("AMEVA_BUILD_QMV_UPL", "")
 QMV_ABLATE = os.environ.get("AMEVA_BUILD_QMV_ABLATE", "")
 
 # op kernel families, in the order of enum AmevaOpKernelId
-OPS = ["binary", "unary", "glu", "rms_norm", "rope", "set_rows", "get_rows", "cpy", "fa_combine", "quant_a8"]
+OPS = ["binary", "unary", "glu", "rms_norm", "rope", "set_rows", "get_rows", "cpy", "fa_combine", "quant_a8",
+       "act_fq", "quant_a8b", "upscale", "pad", "soft_max", "mm", "norm", "cumsum", "snake"]
 # op kernels compiled from one source with defines, appended to enum AmevaOpKernelId: (kernel name, source, defines)
 OPS_DEFINED = [("set_rows_q8_0", "set_rows_q", ["QTYPE_Q8_0"]), ("set_rows_q4_0", "set_rows_q", ["QTYPE_Q4_0"]),
-               ("quant_a8u", "quant_a8", ["EMU"]), ("rope_f16", "rope", ["F16"])]
+               ("quant_a8u", "quant_a8", ["EMU"]), ("rope_f16", "rope", ["F16"]),
+               ("binary_f16", "binary", ["F16"]), ("im2col", "im2col", []), ("mm_f16", "mm", ["F16"]),
+               ("mm_f16w", "mm", ["F16", "F16_WORDS"]), ("mm_f16wu", "mm", ["F16", "F16_WORDS", "F16_UNPACK"]),
+               ("mm_f16a", "mm", ["F16_A"]), ("mm_f16aw", "mm", ["F16_A", "F16_WORDS"]),
+               ("mm_f16awu", "mm", ["F16_A", "F16_WORDS", "F16_UNPACK"]),
+               ("get_rows_q4_0", "get_rows_q", ["Q4_0"]), ("get_rows_q5_0", "get_rows_q", ["Q5_0"]),
+               ("get_rows_q8_0", "get_rows_q", ["Q8_0"]), ("get_rows_q6_k", "get_rows_q", ["Q6_K"]),
+               # the same tables in the AMEVA repacked layout (AMEVA_REPACK_ALL, or a weight another op repacked)
+               ("get_rows_q4_0_rp", "get_rows_q", ["Q4_0", "REPACKED"]), ("get_rows_q5_0_rp", "get_rows_q", ["Q5_0", "REPACKED"]),
+               ("get_rows_q8_0_rp", "get_rows_q", ["Q8_0", "REPACKED"]), ("get_rows_q6_k_rp", "get_rows_q", ["Q6_K", "REPACKED"])]
 
-# FLASH_ATTN_EXT tiles: (DMAX, BQ, BK). 128 invocations per workgroup; shared memory per workgroup:
-# 64: 14.5 KiB, 128: 27.4 KiB, 256: 25.7 KiB
-FA_VARIANTS = [(64, 16, 32), (128, 16, 32), (256, 8, 16)]
+# Kernels built as SPIR-V only, in the order of enum AmevaVkKernelId: (kernel name, source, defines).
+# ameva_conv: weights f16 through the exact decoder, f16 through the built-in conversion (f16u; the engine selects it
+# after checking the device's conversion of f16 subnormals) or f32; staging scalar (s, any stride) or aligned vec4 (v).
+# ameva_cnorm_stat, ameva_cnorm: GROUP_NORM as group statistics, then the normalisation with the fused chain.
+# conv_*_acc (ACCUM): the same convolution kernels continuing from the stored result, for the passes after the first
+# over the channel-group windows of a source or of weights above one buffer binding.
+# ameva_norm (NORM, the layer norm) and ameva_timestep_embd (TIMESTEP_EMBEDDING): ops of the diffusion models'
+# transformer blocks and time embedding.
+# New kernels go at the end: the engine addresses these by enum value.
+VK_ONLY = ([("conv_%s_%s" % (w, st), "conv", wd + sd)
+            for w, wd in (("f16", ["TYPE_F16"]), ("f16u", ["TYPE_F16", "F16_UNPACK"]), ("f32", ["TYPE_F32"]))
+            for st, sd in (("s", []), ("v", ["STAGE_VEC4"]))] +
+           [("conv_w_f16", "conv_w", []), ("conv_w_f32", "conv_w", ["F32"])] +
+           [("cnorm_stat", "cnorm_stat", []), ("cnorm", "cnorm", [])] +
+           [("conv_%s_%s_acc" % (w, st), "conv", wd + sd + ["ACCUM"])
+            for w, wd in (("f16", ["TYPE_F16"]), ("f16u", ["TYPE_F16", "F16_UNPACK"]), ("f32", ["TYPE_F32"]))
+            for st, sd in (("s", []), ("v", ["STAGE_VEC4"]))] +
+           [("timestep_embd", "timestep_embd", [])] +
+           # BM64: 64 output positions per tile (4 x 8 sums per invocation), staging vec4 or scalar. Faster on Adreno 830
+           # (+16-18 %) and Mali-G78 (+9-12 %), 7x slower on Turnip Adreno 650 (tests/ameva_conv_bench.cpp,
+           # 2026-11-03); the engine selects it per device (ameva_conv_bm64).
+           [("conv_%s_%s64%s" % (w, st, acc), "conv", wd + sd + ["BM64"] + ad)
+            for acc, ad in (("", []), ("_acc", ["ACCUM"]))
+            for st, sd in (("s", []), ("v", ["STAGE_VEC4"]))
+            for w, wd in (("f16", ["TYPE_F16"]), ("f16u", ["TYPE_F16", "F16_UNPACK"]), ("f32", ["TYPE_F32"]))])
+
+# the licence header of the generated files (kept identical to the other sources of the repository)
+LICENSE_HEADER = ["/**", " * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.",
+                  " * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial", " */"]
+
+# FLASH_ATTN_EXT tiles: (DMAX, BQ, BK, RPI rows per invocation, DUNROLL head-loop steps per iteration), 128 invocations
+# per workgroup. The host takes, among the variants with the smallest DMAX that fits, the first whose BQ does not exceed
+# the tile rows (query positions x heads of a KV group), else the one with the fewest (token generation).
+#   (64, 32, 16, 2, 1)  15.3 KiB shared  prompts and encoders. SigLIP-base (1024 x 1024, d 64) GPU time per dispatch
+#                       against (64, 16, 32, 1, 1): Adreno 830 22.3 / 38.3 ms, Adreno 650 112.9 / 135.1 ms, Mali-G78
+#                       126.5 / 126.8 ms, Mali-G68 (A53) 163.6 ms / not measured; (64, 64, 16, 2, 1) was faster on the
+#                       Adreno 830 only (19.8 ms) and slower elsewhere (160-240 ms), a fully unrolled head loop with
+#                       RPI 2 doubled the time (86.8 ms) (2026-10-09, docs/design/vision-siglip-ameva.md).
+#   (64, 16, 32, 1, 1)  15.0 KiB  token generation (a few rows per KV head; key splits)
+#   (128, 16, 32, 1, 1) 27.0 KiB, (256, 8, 16, 1, 1) 25.3 KiB: not re-measured with RPI > 1.
+# AMEVA_FA_VARIANT=<index> forces one variant (experiment). AMEVA_FA_VARIANTS="D:BQ:BK:RPI:DUNROLL,..." replaces the
+# list for an experiment build; the header then says so.
+#   (128, 16, 32, 2, 1) 27.5 KiB, appended 2026-11-04 (tests/ameva_fa_bench.cpp, f16 K/V, against (128, 16, 32, 1, 1)):
+#                       D 80 (SD1.5 at 32x32) Turnip Adreno 650 152 -> 102 ms, Adreno 830 48 -> 37 ms; D 128 (prompt 512 /
+#                       2048) Adreno 650 50.6 -> 34.1 / 795 -> 534 ms, Adreno 830 16.9 -> 13.4 / 256 -> 191 ms; Mali-G78
+#                       slower (D 80 191 -> 227, D 128 62.5 -> 75.1 ms). Taken in place of entry 2 on Adreno only
+#                       (ameva_fa_find). Also measured, not kept: (64, 32, 16, 4, 1), (64, 64, 16, 4, 1), (64, 32, 32, 2, 1),
+#                       (64, 16, 16, 2, 1), (64, 32, 16, 2, 2) at D 40 (none faster than entry 0 on S20, S21 or S25) and
+#                       (128, 32, 16, 2, 1) (Adreno 830 D 80 32.9 ms, Adreno 650 133 ms).
+FA_VARIANTS = [(64, 32, 16, 2, 1), (64, 16, 32, 1, 1), (128, 16, 32, 1, 1), (256, 8, 16, 1, 1), (128, 16, 32, 2, 1)]
+
+
+def fa_variants():
+    e = os.environ.get("AMEVA_FA_VARIANTS", "")
+    if not e:
+        return FA_VARIANTS, False
+    out = []
+    for item in e.split(","):
+        v = tuple(int(x) for x in item.split(":"))
+        if len(v) != 5:
+            fail("AMEVA_FA_VARIANTS item %r is not D:BQ:BK:RPI:DUNROLL" % item)
+        out.append(v)
+    return out, True
+
+
+def fa_check(dmax, bq, bk, rpi, dunroll):
+    tpr = 128 * rpi // bq if bq else 0
+    if (bq % rpi or 128 * rpi % bq or not tpr or bk % tpr or (dmax // 4) % tpr or (dmax // 4) % dunroll
+            or bq * (dmax // 4) * 16 + bk * (dmax // 4 + 1) * 16 + bq * bk * 4 + bq * tpr * 4 + 8 > 32768):
+        fail("flash_attn variant (%d, %d, %d, %d, %d) does not tile 128 invocations within 32 KiB of shared memory"
+             % (dmax, bq, bk, rpi, dunroll))
 
 
 def run(cmd):
@@ -137,9 +236,12 @@ def read_with_includes(path, seen=None):
 
 def source_info(path):
     """binding count, push-constant bytes (all members are 32-bit) and local_size_x declared by a kernel source
-    (included files count: a shared include may declare bindings)"""
+    (included files count: a shared include may declare bindings). The local size is None when the source takes it
+    from defines."""
     src = read_with_includes(path)
-    bindings = [int(b) for b in re.findall(r"layout\(std430,\s*binding\s*=\s*(\d+)\)", src)]
+    # a binding may be declared more than once (a second view of the same buffer, e.g. as 16-byte vectors; Vulkan only,
+    # inside #if !defined(AMEVA_OPENCL)): count each number once
+    bindings = sorted(set(int(b) for b in re.findall(r"layout\(std430,\s*binding\s*=\s*(\d+)\)", src)))
     if not bindings or sorted(bindings) != list(range(len(bindings))):
         fail("%s: bindings must be numbered 0..n-1, found %s" % (path, bindings))
     m = re.search(r"layout\(push_constant\)\s*uniform\s+\w+\s*\{(.*?)\}", src, re.S)
@@ -155,17 +257,123 @@ def source_info(path):
             fail("%s: push-constant member is not uint: %r" % (path, decl))
         members += len([n for n in decl[5:].split(",") if n.strip()])
     ls = re.search(r"local_size_x\s*=\s*(\d+)", src)
-    return len(bindings), 4 * members, int(ls.group(1))
+    return len(bindings), 4 * members, int(ls.group(1)) if ls else None
 
 
-def compile_module(args, src, defines, out):
+def cl_unroll_mode():
+    """AMEVA_CL_UNROLL (experiment build): "all" keeps the loop pragmas in every OpenCL C translation, "none" in none;
+    unset: only where measured faster (cl_unroll of compile_module). The CL header of an experiment build says so."""
+    e = os.environ.get("AMEVA_CL_UNROLL", "")
+    if e not in ("", "all", "none"):
+        fail("AMEVA_CL_UNROLL=%r is not all or none" % e)
+    return e
+
+
+def compile_module(args, src, defines, out, cl, local_size=None, cl_unroll=False, cl_partial=None):
+    """SPIR-V of one kernel variant, and its OpenCL C translation appended to cl (the same variant, the same order);
+    cl None: SPIR-V only. local_size: the (x, y, z) the defines give a source that does not spell its local size
+    out. cl_partial: {loop-header regex: n} partial unroll counts of the OpenCL C (glsl_to_opencl.translate)."""
+    mode = cl_unroll_mode()
+    if mode:
+        cl_unroll = mode == "all"
+        cl_partial = None
     cmd = [args.glslang, "-V", "-q", "--target-env", "vulkan1.0"] + ["-D%s" % d for d in defines] + ["-o", out, src]
     refl = run(cmd)
     if args.spirv_val != "none":
         run([args.spirv_val, "--target-env", "vulkan1.0", out])
     m = re.search(r"PushConstants: offset -1, type \w+, size (\d+)", refl)
     data = open(out, "rb").read()
+    if cl is None:
+        return data, (int(m.group(1)) if m else None)
+    try:
+        # cl_unroll: the OpenCL C keeps the source's [[unroll]] / [[dont_unroll]] as pragmas (glsl_to_opencl.translate)
+        text, nbind, npush, local, _ = glsl_to_opencl.translate(glsl_to_opencl.preprocess(args.glslang, src, defines),
+                                                                unroll=cl_unroll, partial=cl_partial)
+    except glsl_to_opencl.TranslateError as e:
+        fail("%s %s: OpenCL C translation: %s" % (os.path.basename(src), " ".join(defines), e))
+    sbind, spush, slocal = source_info(src)
+    if local_size is not None:
+        if slocal is not None or tuple(local) != tuple(local_size):
+            fail("%s %s: local size %s expected from the defines, the OpenCL C translation has %s"
+                 % (os.path.basename(src), " ".join(defines), tuple(local_size), tuple(local)))
+        slocal = local[0]
+    if (nbind, npush, local[0]) != (sbind, spush, slocal):
+        fail("%s %s: the OpenCL C translation has %d bindings, %d push-constant bytes, local size %d; the source %d, %d, %d"
+             % (os.path.basename(src), " ".join(defines), nbind, npush, local[0], sbind, spush, slocal))
+    cl.append(text)
     return data, (int(m.group(1)) if m else None)
+
+
+def c_string(text):
+    """text as C string literals, one per source line"""
+    out = []
+    for line in text.splitlines():
+        out.append('    "%s\\n"' % line.replace("\\", "\\\\").replace('"', '\\"'))
+    return "\n".join(out)
+
+
+# Hand-written OpenCL C that replaces the translation of a GLSL kernel in the OpenCL tables (the SPIR-V is still compiled
+# from the GLSL): shaders/opencl/<kernel>_<type>.cl. The file must keep the interface of the GLSL source.
+CL_OVERRIDE_DIR = os.path.join(SHADERS, "opencl")
+
+
+def cl_override(kernel, type_name, src):
+    """text of shaders/opencl/<kernel>_<type_name>.cl, or None when the kernel is translated from its GLSL. Checks the
+    interface against the GLSL source: bindings, push-constant words, work-group size."""
+    path = os.path.join(CL_OVERRIDE_DIR, "%s_%s.cl" % (kernel, type_name))
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8", newline=None) as f:  # universal newlines: the text is LF whatever the checkout
+        text = f.read()
+    sbind, spush, slocal = source_info(src)
+    code = re.sub(r"//[^\n]*", "", text)
+    sig = re.search(r"__kernel[^{]*?void\s+%s\s*\((.*?)\)\s*\{" % re.escape(glsl_to_opencl.ENTRY_POINT), code, re.S)
+    if not sig:
+        fail("%s: no __kernel void %s" % (path, glsl_to_opencl.ENTRY_POINT))
+    nbind = len(re.findall(r"__global", sig.group(1)))
+    pc = re.search(r"typedef\s+struct\s*\{(.*?)\}\s*ameva_pc_t\s*;", code, re.S)
+    if not pc:
+        fail("%s: no ameva_pc_t" % path)
+    npush = 4 * sum(len([n for n in d[4:].split(",") if n.strip()]) for d in
+                    (x.strip() for x in pc.group(1).split(";")) if d.startswith("uint "))
+    local = re.search(r"reqd_work_group_size\((\d+),\s*1,\s*1\)", code)
+    if (nbind, npush, int(local.group(1)) if local else None) != (sbind, spush, slocal):
+        fail("%s: %d bindings, %d push-constant bytes, local size %s; the GLSL source %d, %d, %s"
+             % (path, nbind, npush, local.group(1) if local else None, sbind, spush, slocal))
+    return text
+
+
+# OpenCL C tables of ggml_ameva_kernels_cl.h: (key in cl, table name), in the order of the SPIR-V tables
+CL_TABLES = [("qmm", "kAmevaClQmm"), ("qmv", "kAmevaClQmv"), ("mali_qmv", "kAmevaClMaliQmv"),
+             ("qgemm", "kAmevaClQgemm"), ("mmq", "kAmevaClMmq"), ("mmqb", "kAmevaClMmqb"), ("mmvq", "kAmevaClMmvq"), ("mmvqe", "kAmevaClMmvqe"),
+             ("fa", "kAmevaClFa"), ("ops", "kAmevaClOps"), ("vk", "kAmevaClVk")]
+
+
+def write_cl_header(path, version, cl):
+    """Every kernel of the SPIR-V header as OpenCL C: per family an array of sources in the order of its SPIR-V table.
+    A kernel's program is kAmevaClPrelude followed by its own text; the entry point is AMEVA_CL_ENTRY_POINT. Functions
+    that several kernels of a family share (the decoders) are repeated in each: every variant is one preprocessed
+    source."""
+    lines = LICENSE_HEADER + [
+             "/* Generated by scripts/build_ameva_kernels.py with scripts/glsl_to_opencl.py from",
+             "   adapters/llama/ggml-ameva/shaders -- do not edit. OpenCL C translations of the kernels of",
+             "   ggml_ameva_kernels_spv.h, table by table in the same order (GLSL preprocessor: %s). */" % version,
+             "#ifndef GGML_AMEVA_KERNELS_CL_H", "#define GGML_AMEVA_KERNELS_CL_H", "",
+             '#define AMEVA_CL_ENTRY_POINT "%s"' % glsl_to_opencl.ENTRY_POINT, "",
+             "static const char kAmevaClPrelude[] =", c_string(glsl_to_opencl.PRELUDE) + ";", ""]
+    if cl_unroll_mode():
+        lines += ["/* experiment build: loop pragmas from AMEVA_CL_UNROLL=%s */" % cl_unroll_mode(), ""]
+    total = 0
+    for key, table in CL_TABLES:
+        for i, text in enumerate(cl[key]):
+            total += len(text)
+            lines += ["static const char %s_%d[] =" % (table, i), c_string(text) + ";"]
+        lines += ["static const char* const %s[%d] = {" % (table, len(cl[key])),
+                  "    " + ", ".join("%s_%d" % (table, i) for i in range(len(cl[key]))), "};", ""]
+    lines += ["#endif /* GGML_AMEVA_KERNELS_CL_H */", ""]
+    with open(path, "w", newline="\n") as f:
+        f.write("\n".join(lines))
+    return total
 
 
 def spec_defaults(data):
@@ -199,23 +407,27 @@ def main():
     # "none" skips validation (a host without SPIRV-Tools); the header then says so in its second line
     ap.add_argument("--spirv-val", default="spirv-val")
     ap.add_argument("--out", default=DEFAULT_OUT)
+    ap.add_argument("--cl-out", default=DEFAULT_CL_OUT)
     args = ap.parse_args()
+    cl = {key: [] for key, _ in CL_TABLES}
 
     version = run([args.glslang, "--version"]).splitlines()[0].strip()
-    lines = ["/* Generated by scripts/build_ameva_kernels.py from adapters/llama/ggml-ameva/shaders -- do not edit. */",
+    lines = LICENSE_HEADER + [
+             "/* Generated by scripts/build_ameva_kernels.py from adapters/llama/ggml-ameva/shaders -- do not edit. */",
              ("/* compiler: %s, --target-env vulkan1.0, every module checked by spirv-val */" % version
               if args.spirv_val != "none" else
               "/* compiler: %s, --target-env vulkan1.0, NOT checked by spirv-val (--spirv-val none) */" % version),
              "#ifndef GGML_AMEVA_KERNELS_SPV_H", "#define GGML_AMEVA_KERNELS_SPV_H", "",
              "#include <stddef.h>", "#include <stdint.h>", ""]
-    qmm, qmv, mali_qmv, qgemm, mmq, mmvq, mmvqe, fa, ops = [], [], [], [], [], [], [], [], []
+    qmm, qmv, mali_qmv, qgemm, mmq, mmqb, mmvq, mmvqe, fa, ops = [], [], [], [], [], [], [], [], [], []
+    vk = []
     with tempfile.TemporaryDirectory() as tmp:
         qsrc = os.path.join(SHADERS, "ameva_qmm.comp")
         qbind, qpush, qlocal = source_info(qsrc)
         for name, define, belems, bbytes in QMM_TYPES:
             for ncols in QMM_NCOLS:
                 spv = os.path.join(tmp, "qmm_%s_n%d.spv" % (name, ncols))
-                data, rsize = compile_module(args, qsrc, [define, "NCOLS=%d" % ncols], spv)
+                data, rsize = compile_module(args, qsrc, [define, "NCOLS=%d" % ncols], spv, cl["qmm"])
                 if rsize is not None and rsize != qpush:
                     fail("ameva_qmm %s: reflection says %d push-constant bytes, source %d" % (name, rsize, qpush))
                 var = "kAmevaQmm_%s_n%d" % (name, ncols)
@@ -236,7 +448,10 @@ def main():
                     if QMV_ABLATE not in ("1", "2", "3"):
                         fail("AMEVA_BUILD_QMV_ABLATE must be 1, 2 or 3 (got %r)" % QMV_ABLATE)
                     defs.append("ABLATE=%s" % QMV_ABLATE)
-                data, rsize = compile_module(args, vsrc, defs, spv)
+                # loop pragmas in the OpenCL C of the 8-column GEMV (M>1): private memory 176 -> 128 bytes and GPU time
+                # 0.29-0.81x (median 0.58, lower in 5 of 5 rotated rounds) on Mali-G78; in llama-completion only the
+                # 2-token warm-up graph runs it (ameva-foundation N-20261107-opencl-forced-unroll section 9)
+                data, rsize = compile_module(args, vsrc, defs, spv, cl["qmv"], cl_unroll=cols == 8)
                 if rsize is not None and rsize != vpush:
                     fail("ameva_qmv %s: reflection says %d push-constant bytes, source %d" % (name, rsize, vpush))
                 if spec_defaults(data):
@@ -250,7 +465,7 @@ def main():
         mbind_mali, mpush_mali, mlocal_mali = source_info(msrc_mali)
         for name, define in QMV_TYPES:
             spv = os.path.join(tmp, "mali_qmv_%s.spv" % name)
-            data, rsize = compile_module(args, msrc_mali, [define], spv)
+            data, rsize = compile_module(args, msrc_mali, [define], spv, cl["mali_qmv"])
             if rsize is not None and rsize != mpush_mali:
                 fail("mali_qmv %s: reflection says %d push-constant bytes, source %d" % (name, rsize, mpush_mali))
             var = "kAmevaMaliQmv_%s" % name
@@ -261,7 +476,7 @@ def main():
         gbind, gpush, glocal = source_info(gsrc)
         for name, define in QMV_TYPES:
             spv = os.path.join(tmp, "qgemm_%s.spv" % name)
-            data, rsize = compile_module(args, gsrc, [define], spv)
+            data, rsize = compile_module(args, gsrc, [define], spv, cl["qgemm"])
             if rsize is not None and rsize != gpush:
                 fail("ameva_qgemm %s: reflection says %d push-constant bytes, source %d" % (name, rsize, gpush))
             var = "kAmevaQgemm_%s" % name
@@ -272,19 +487,39 @@ def main():
         mbind, mpush, mlocal = source_info(msrc)
         for name, define in QMV_TYPES:
             spv = os.path.join(tmp, "mmq_%s.spv" % name)
-            data, rsize = compile_module(args, msrc, [define], spv)
+            override = cl_override("ameva_mmq", name, msrc)
+            if override is None:
+                data, rsize = compile_module(args, msrc, [define], spv, cl["mmq"])
+            else:
+                data, rsize = compile_module(args, msrc, [define], spv, None)
+                cl["mmq"].append(override)
+                print("mmq   %-6s OpenCL C from shaders/opencl/ameva_mmq_%s.cl" % (name, name))
             if rsize is not None and rsize != mpush:
                 fail("ameva_mmq %s: reflection says %d push-constant bytes, source %d" % (name, rsize, mpush))
             var = "kAmevaMmq_%s" % name
             emit_array(lines, var, data)
             mmq.append((name, var, len(data), hashlib.sha256(data).hexdigest()))
             print("mmq   %-6s %6d bytes sha256=%s" % (name, len(data), mmq[-1][3]))
+        bsrc = os.path.join(SHADERS, "ameva_mmqb.comp")
+        bbind, bpush, _ = source_info(bsrc)
+        for name, define in MMQB_TYPES:
+            for drw, dra, lx, ly in MMQB_LAYOUTS:
+                tag = "%s_w%da%d_l%dx%d" % (name, drw, dra, lx, ly)
+                spv = os.path.join(tmp, "mmqb_%s.spv" % tag)
+                data, rsize = compile_module(args, bsrc, [define, "DRW=%du" % drw, "DRA=%du" % dra, "LX=%d" % lx,
+                                                          "LY=%d" % ly], spv, cl["mmqb"], (lx, ly, 1))
+                if rsize is not None and rsize != bpush:
+                    fail("ameva_mmqb %s: reflection says %d push-constant bytes, source %d" % (tag, rsize, bpush))
+                var = "kAmevaMmqb_%s" % tag
+                emit_array(lines, var, data)
+                mmqb.append((name, drw, dra, lx, ly, var, len(data), hashlib.sha256(data).hexdigest()))
+                print("mmqb  %-6s w%d a%-2d l%dx%d %6d bytes sha256=%s" % (name, drw, dra, lx, ly, len(data), mmqb[-1][7]))
         vqsrc = os.path.join(SHADERS, "ameva_mmvq.comp")
         vqbind, vqpush, vqlocal = source_info(vqsrc)
         for name, define in QMV_TYPES:
             for rows in MMVQ_ROWS:
                 spv = os.path.join(tmp, "mmvq_%s_r%d.spv" % (name, rows))
-                data, rsize = compile_module(args, vqsrc, [define, "ROWS=%d" % rows], spv)
+                data, rsize = compile_module(args, vqsrc, [define, "ROWS=%d" % rows], spv, cl["mmvq"])
                 if rsize is not None and rsize != vqpush:
                     fail("ameva_mmvq %s: reflection says %d push-constant bytes, source %d" % (name, rsize, vqpush))
                 if spec_defaults(data):
@@ -297,7 +532,7 @@ def main():
         for name, define in MMVQE_TYPES:
             for rows in MMVQ_ROWS:
                 spv = os.path.join(tmp, "mmvqe_%s_r%d.spv" % (name, rows))
-                data, rsize = compile_module(args, vqsrc, [define, "ROWS=%d" % rows, "EMU_DOT"], spv)
+                data, rsize = compile_module(args, vqsrc, [define, "ROWS=%d" % rows, "EMU_DOT"], spv, cl["mmvqe"])
                 if rsize is not None and rsize != vqpush:
                     fail("ameva_mmvq (emulated) %s: reflection says %d push-constant bytes, source %d" % (name, rsize, vqpush))
                 if spec_defaults(data):
@@ -308,25 +543,33 @@ def main():
                 mmvqe.append((name, rows, var, len(data), hashlib.sha256(data).hexdigest()))
                 print("mmvqe %-6s rows=%d %6d bytes sha256=%s" % (name, rows, len(data), mmvqe[-1][4]))
         fsrc = os.path.join(SHADERS, "ameva_flash_attn.comp")
+        fsrc_r1 = os.path.join(SHADERS, "ameva_flash_attn_r1.comp")
         fbind, fpush, flocal = source_info(fsrc)
         if fpush > 128:
             fail("flash_attn: %d push-constant bytes exceed the runtime limit of 128" % fpush)
-        for dmax, bq, bk in FA_VARIANTS:
-            spv = os.path.join(tmp, "fa_d%d.spv" % dmax)
-            data, rsize = compile_module(args, fsrc, ["DMAX=%du" % dmax, "BQ=%du" % bq, "BK=%du" % bk], spv)
+        if source_info(fsrc_r1) != (fbind, fpush, flocal):
+            fail("ameva_flash_attn_r1.comp and ameva_flash_attn.comp disagree on bindings, push constants or local size")
+        fa_list, fa_experiment = fa_variants()
+        for dmax, bq, bk, rpi, dunroll in fa_list:
+            fa_check(dmax, bq, bk, rpi, dunroll)
+            tag = "d%d_q%d_k%d_r%d_u%d" % (dmax, bq, bk, rpi, dunroll)
+            spv = os.path.join(tmp, "fa_%s.spv" % tag)
+            data, rsize = compile_module(args, fsrc_r1 if rpi == 1 and dunroll == 1 else fsrc, ["DMAX=%du" % dmax, "BQ=%du" % bq, "BK=%du" % bk, "RPI=%du" % rpi,
+                                                      "DUNROLL=%du" % dunroll], spv, cl["fa"])
             if rsize is not None and rsize != fpush:
                 fail("ameva_flash_attn d%d: reflection says %d push-constant bytes, source %d" % (dmax, rsize, fpush))
-            var = "kAmevaFa_d%d" % dmax
+            var = "kAmevaFa_%s" % tag
             emit_array(lines, var, data)
-            fa.append((dmax, bq, bk, var, len(data), hashlib.sha256(data).hexdigest()))
-            print("fa  dmax=%-3d bq=%-2d bk=%-2d %6d bytes sha256=%s" % (dmax, bq, bk, len(data), fa[-1][5]))
+            fa.append((dmax, bq, bk, rpi, dunroll, var, len(data), hashlib.sha256(data).hexdigest()))
+            print("fa  dmax=%-3d bq=%-2d bk=%-2d rpi=%d dunroll=%-2d %6d bytes sha256=%s%s"
+                  % (dmax, bq, bk, rpi, dunroll, len(data), fa[-1][7], " (AMEVA_FA_VARIANTS experiment)" if fa_experiment else ""))
         for op, stem, defines in [(o, o, []) for o in OPS] + OPS_DEFINED:
             src = os.path.join(SHADERS, "ameva_%s.comp" % stem)
             nbind, npush, nlocal = source_info(src)
             if npush > 128:
                 fail("%s: %d push-constant bytes exceed the runtime limit of 128" % (op, npush))
             spv = os.path.join(tmp, "%s.spv" % op)
-            data, rsize = compile_module(args, src, defines, spv)
+            data, rsize = compile_module(args, src, defines, spv, cl["ops"])
             if rsize is not None and rsize != npush:
                 fail("%s: reflection says %d push-constant bytes, source %d" % (op, rsize, npush))
             var = "kAmevaOp_%s" % op
@@ -334,6 +577,29 @@ def main():
             ops.append((op, var, len(data), hashlib.sha256(data).hexdigest(), nbind, npush, nlocal))
             print("op  %-10s %6d bytes bindings=%d push=%d local=%d sha256=%s" % (op, len(data), nbind, npush, nlocal,
                                                                                    ops[-1][3]))
+        for name, stem, defines in VK_ONLY:
+            src = os.path.join(SHADERS, "ameva_%s.comp" % stem)
+            nbind, npush, nlocal = source_info(src)
+            if npush > 128:
+                fail("%s: %d push-constant bytes exceed the runtime limit of 128" % (name, npush))
+            spv = os.path.join(tmp, "%s.spv" % name)
+            # loop pragmas in the OpenCL C only where measured faster: the 32-position convolution tile (S21, GPU time
+            # 0.79-0.82x of the rolled translation, 2026-11-07). On every kernel they made the BM64 tile 8.3x and the
+            # LLM prompt 1.16x slower (ameva-foundation N-20261107-opencl-conv-gap). BM64 with vec4 staging: every loop
+            # unrolled but the 32-step product loop by 2 (private memory stays 80 bytes; by 4 it is 208 bytes, 4.2x
+            # slower): GPU time 0.92-0.93x of the rolled translation on Mali-G78, within 0-4 % of Vulkan
+            # (N-20261107-opencl-forced-unroll section 10). BM64 with scalar staging: not measured, rolled.
+            bm64v = stem == "conv" and "BM64" in defines and "STAGE_VEC4" in defines
+            cl_unroll = stem == "conv" and ("BM64" not in defines or bm64v)
+            cl_partial = {r"\bk < 32u;": 2} if bm64v else None
+            data, rsize = compile_module(args, src, defines, spv, cl["vk"], cl_unroll=cl_unroll, cl_partial=cl_partial)
+            if rsize is not None and rsize != npush:
+                fail("%s: reflection says %d push-constant bytes, source %d" % (name, rsize, npush))
+            var = "kAmevaVk_%s" % name
+            emit_array(lines, var, data)
+            vk.append((name, var, len(data), hashlib.sha256(data).hexdigest(), nbind, npush, nlocal))
+            print("vk  %-12s %6d bytes bindings=%d push=%d local=%d sha256=%s" % (name, len(data), nbind, npush, nlocal,
+                                                                                     vk[-1][3]))
 
     lines += ["", "typedef struct {",
               "    const char* type_name;   /* ggml_type_name() of the weight type */",
@@ -398,6 +664,18 @@ def main():
               "#define AMEVA_MMQ_LOCAL_SIZE_X %d" % mlocal, "",
               "typedef struct {",
               "    const char* type_name;   /* ggml_type_name() of the weight type (stored repacked) */",
+              "    uint32_t drw, dra;       /* weight rows and activation rows per invocation */",
+              "    uint32_t local_x, local_y;",
+              "    const uint32_t* spirv;", "    size_t spirv_bytes;", "    const char* spirv_sha256;",
+              "} AmevaMmqbVariant;", "",
+              "static const AmevaMmqbVariant kAmevaMmqbVariants[] = {"]
+    for name, drw, dra, lx, ly, var, nbytes, sha in mmqb:
+        lines.append('    { "%s", %du, %du, %du, %du, %s, %du, "%s" },' % (name, drw, dra, lx, ly, var, nbytes, sha))
+    lines += ["};", "#define AMEVA_MMQB_VARIANT_COUNT %d" % len(mmqb),
+              "#define AMEVA_MMQB_BINDINGS %d" % bbind,
+              "#define AMEVA_MMQB_PUSH_CONSTANT_BYTES %d" % bpush, "",
+              "typedef struct {",
+              "    const char* type_name;   /* ggml_type_name() of the weight type (stored repacked) */",
               "    uint32_t rows;           /* weight rows per lane group */",
               "    const uint32_t* spirv;", "    size_t spirv_bytes;", "    const char* spirv_sha256;",
               "} AmevaMmvqVariant;", "",
@@ -417,11 +695,15 @@ def main():
               "    uint32_t dmax;           /* largest head size (D and DV) the variant takes */",
               "    uint32_t bq;             /* rows (query position x head) per workgroup */",
               "    uint32_t bk;             /* keys per block */",
+              "    uint32_t rpi;            /* rows per invocation */",
+              "    uint32_t dunroll;        /* head-loop vec4 steps per iteration */",
               "    const uint32_t* spirv;", "    size_t spirv_bytes;", "    const char* spirv_sha256;",
               "} AmevaFaVariant;", "",
               "static const AmevaFaVariant kAmevaFaVariants[] = {"]
-    for dmax, bq, bk, var, nbytes, sha in fa:
-        lines.append('    { %du, %du, %du, %s, %du, "%s" },' % (dmax, bq, bk, var, nbytes, sha))
+    if fa_experiment:
+        lines.append("/* experiment build: flash-attention variants from AMEVA_FA_VARIANTS=%s */" % os.environ["AMEVA_FA_VARIANTS"])
+    for dmax, bq, bk, rpi, dunroll, var, nbytes, sha in fa:
+        lines.append('    { %du, %du, %du, %du, %du, %s, %du, "%s" },' % (dmax, bq, bk, rpi, dunroll, var, nbytes, sha))
     lines += ["};", "#define AMEVA_FA_VARIANT_COUNT %d" % len(fa),
               "#define AMEVA_FA_BINDINGS %d" % fbind,
               "#define AMEVA_FA_PUSH_CONSTANT_BYTES %d" % fpush,
@@ -437,11 +719,28 @@ def main():
               "static const AmevaOpKernel kAmevaOpKernels[AMEVA_K_COUNT] = {"]
     for op, var, nbytes, sha, nbind, npush, nlocal in ops:
         lines.append('    { "ameva_%s", %du, %du, %du, %s, %du, "%s" },' % (op, nbind, npush, nlocal, var, nbytes, sha))
+    lines += ["};", "",
+              "/* VK_ONLY family (SPIR-V only until 2026-11-06; OpenCL C in kAmevaClVk of ggml_ameva_kernels_cl.h). */",
+              "typedef enum {"]
+    for name, *_ in vk:
+        lines.append("    AMEVA_VK_%s," % name.upper())
+    lines += ["    AMEVA_VK_COUNT", "} AmevaVkKernelId;", "",
+              "static const AmevaOpKernel kAmevaVkKernels[AMEVA_VK_COUNT] = {"]
+    for name, var, nbytes, sha, nbind, npush, nlocal in vk:
+        lines.append('    { "ameva_%s", %du, %du, %du, %s, %du, "%s" },' % (name, nbind, npush, nlocal, var, nbytes, sha))
     lines += ["};", "", "#endif /* GGML_AMEVA_KERNELS_SPV_H */", ""]
     with open(args.out, "w", newline="\n") as f:
         f.write("\n".join(lines))
-    print("wrote %s (%d qmm, %d qmv, %d mali_qmv, %d qgemm, %d mmq, %d mmvq, %d mmvqe, %d fa variants, %d op kernels)" %
-          (args.out, len(qmm), len(qmv), len(mali_qmv), len(qgemm), len(mmq), len(mmvq), len(mmvqe), len(fa), len(ops)))
+    counts = [len(qmm), len(qmv), len(mali_qmv), len(qgemm), len(mmq), len(mmqb), len(mmvq), len(mmvqe), len(fa),
+              len(ops), len(vk)]
+    if [len(cl[key]) for key, _ in CL_TABLES] != counts:
+        fail("OpenCL C tables %s do not match the SPIR-V tables %s" % ([len(cl[key]) for key, _ in CL_TABLES], counts))
+    cl_bytes = write_cl_header(args.cl_out, version, cl)
+    print("wrote %s (%d kernels as OpenCL C, %d bytes of kernel text)" % (args.cl_out, sum(counts), cl_bytes))
+    # the summary of the SPIR-V header stays the last line (scripts read it)
+    print("wrote %s (%d qmm, %d qmv, %d mali_qmv, %d qgemm, %d mmq, %d mmqb, %d mmvq, %d mmvqe, %d fa variants, "
+          "%d op kernels, %d VK_ONLY-family kernels)" % (args.out, len(qmm), len(qmv), len(mali_qmv), len(qgemm), len(mmq),
+                                                      len(mmqb), len(mmvq), len(mmvqe), len(fa), len(ops), len(vk)))
 
 
 if __name__ == "__main__":

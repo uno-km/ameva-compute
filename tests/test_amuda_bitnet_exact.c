@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
+ */
+/**
  * @file test_amuda_bitnet_exact.c
  * @brief Zero-Hype Ground Truth: Bit-Exact BitNet I2_S GPU GEMV vs llama.cpp Reference
  */

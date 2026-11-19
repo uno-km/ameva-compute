@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // AMEVA row-chunked element-wise ops: SCALE -> TANH -> SCALE (the final logit softcap of Gemma-2) on f32 tensors larger
 // than one storage-buffer binding, which the engine processes in row chunks.
 //

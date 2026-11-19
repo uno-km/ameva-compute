@@ -1,0 +1,33 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// AMEVA CUMSUM, f32: running sum along dimension 0 of every row, y[0] = x[0], y[i] = y[i-1] + x[i] in this order
+// (ggml_vec_cumsum_f32), one invocation per row, so the sums equal the CPU's in every bit. Rows contiguous along
+// dimension 0, any row strides. A row is sequential work: the kernel is meant for the short rows of a model's
+// control signals (e.g. the phase of a harmonic source at the F0 frame rate), not for long reductions.
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+
+layout(std430, binding = 0) readonly buffer A { float a[]; };
+layout(std430, binding = 1) writeonly buffer D { float d[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint ne0, ne1, ne2, ne3;
+    uint a_off, a_s1, a_s2, a_s3;
+    uint d_off, d_s1, d_s2, d_s3;
+} pc;
+
+void main() {
+    const uint row = ameva_linear_id();
+    if (row >= pc.ne1 * pc.ne2 * pc.ne3) return;
+    const uint i1 = row % pc.ne1;
+    const uint i2 = (row / pc.ne1) % pc.ne2;
+    const uint i3 = row / (pc.ne1 * pc.ne2);
+    const uint ab = pc.a_off + i1 * pc.a_s1 + i2 * pc.a_s2 + i3 * pc.a_s3;
+    const uint db = pc.d_off + i1 * pc.d_s1 + i2 * pc.d_s2 + i3 * pc.d_s3;
+    precise float acc = 0.0;
+    for (uint i = 0u; i < pc.ne0; ++i) {
+        acc = i == 0u ? a[ab] : acc + a[ab + i];
+        d[db + i] = acc;
+    }
+}

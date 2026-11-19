@@ -1,0 +1,44 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// AMEVA activation rounding (AMEVA_ACT_FQ, docs/design/opencl-prompt-path.md stage A): f32 activation rows -> int8 per
+// block of `blk` elements and back to f32, written as contiguous rows of K floats.
+//   d = amax / 127, q = clamp(roundEven(x * 127 / amax), -127, 127) (ggml's quantize_row_q8_K / q8_0 rounding),
+//   out = q * d
+// A MUL_MAT of the f32 kernels on these rows computes what a kernel with block-wise int8 activations computes (up to
+// float rounding), so the effect of such activations on a model can be measured on a device without integer dot
+// products. One invocation per (row m, block b); gi = m * (K / blk) + b.
+//   binding 0: src1 F32 as vec4, binding 1: out F32 as vec4
+//   push: M (rows), K, a_off, s1 (floats; multiples of 4), out_off (floats; multiple of 4), blk (32 or 256)
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+
+layout(std430, binding = 0) readonly buffer BufA { vec4 a4[]; };
+layout(std430, binding = 1) writeonly buffer BufO { vec4 o4[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint M, K, a_off, s1;
+    uint out_off, blk;
+} pc;
+
+void main() {
+    const uint gi = ameva_linear_id();
+    const uint B = pc.K / pc.blk;
+    if (gi >= pc.M * B) return;
+    const uint m = gi / B;
+    const uint b = gi - m * B;
+    const uint src = (pc.a_off + m * pc.s1 + b * pc.blk) >> 2u;
+    const uint dst = (pc.out_off + m * pc.K + b * pc.blk) >> 2u;
+    const uint nv = pc.blk >> 2u;
+    float amax = 0.0;
+    for (uint i = 0u; i < nv; ++i) {
+        const vec4 ax = abs(a4[src + i]);
+        amax = max(amax, max(max(ax.x, ax.y), max(ax.z, ax.w)));
+    }
+    const float d = amax / 127.0;
+    const float id = amax > 0.0 ? 127.0 / amax : 0.0;
+    for (uint i = 0u; i < nv; ++i) {
+        const vec4 q = clamp(roundEven(a4[src + i] * id), vec4(-127.0), vec4(127.0));
+        o4[dst + i] = q * d;
+    }
+}

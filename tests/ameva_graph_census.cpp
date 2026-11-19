@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // Graph census: the exact ggml nodes llama.cpp builds for a model, as input for the AMEVA op coverage.
 //
 // The model runs on the CPU backend only; the scheduler's eval callback sees every node before it is computed.

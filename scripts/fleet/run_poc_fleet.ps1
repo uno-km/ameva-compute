@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 # AMUDA CUDA-like POC fleet runner (Windows PC -> Termux phones over the existing ssh aliases).
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\fleet\run_poc_fleet.ps1

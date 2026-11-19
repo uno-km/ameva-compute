@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
+ */
+/**
  * @file ac_error.h
  * @brief Formal Generation-Based Error Tracking Definitions and ABI
  * Owned by AMEVA Compute Runtime Core.

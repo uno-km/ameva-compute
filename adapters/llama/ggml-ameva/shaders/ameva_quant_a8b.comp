@@ -1,0 +1,71 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : require
+// AMEVA activation quantization for ameva_mmqb: f32 rows -> int8 with one scale per 256-element block.
+//   d = amax / 127 over the block (f32), q = round(x / d) with ties to even, |q| <= 127, and the sums of q over the
+//   sixteen 16-element halves of the block's eight 32-element units (for the offsets of the weight types).
+// One scale per 256 elements is what ggml's Q8_K has, the form the CPU backend multiplies the 256-weight super-block
+// types with; with it the weight scales of a block can be applied to integer sums (shaders/ameva_mmqb.comp).
+// One invocation per (row m, block b); gi = m * B + b with B = K / 256, U = K / 32. Output (scratch of the graph
+// engine), 320 bytes per block as ameva_quant_a8 writes for its eight units:
+//   AQ[aq_off + 2 (m U + 8 b + u) + h] (uvec4): q of elements 16h .. 16h + 15 of unit u of the block, byte k of
+//                                               component c = element 16h + 4c + k (the layout of ameva_quant_a8)
+//   AB[ab_off + 4 gi]      (uvec4): x = bits of d
+//   AB[ab_off + 4 gi + 1]  (uvec4): component u = sums of unit u (u = 0..3): elements 0..15 (int16, low half) |
+//                                   elements 16..31 (high half)
+//   AB[ab_off + 4 gi + 2]  (uvec4): the same for units 4..7
+//   AB[ab_off + 4 gi + 3]  not written
+//
+//   binding 0: src1 F32 as vec4, binding 1: AQ, binding 2: AB
+//   push: M (rows), K (a multiple of 256), a_off, s1 (floats; multiples of 4), aq_off (uvec4), ab_off (uvec4)
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+
+layout(std430, binding = 0) readonly buffer BufA { vec4 a4[]; };
+layout(std430, binding = 1) writeonly buffer BufQ { uvec4 aq[]; };
+layout(std430, binding = 2) writeonly buffer BufB { uvec4 ab[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint M, K, a_off, s1;
+    uint aq_off, ab_off;
+} pc;
+
+void main() {
+    const uint gi = ameva_linear_id();
+    const uint B = pc.K >> 8u;
+    if (gi >= pc.M * B) return;
+    const uint m = gi / B;
+    const uint b = gi - m * B;
+    const uint base = (pc.a_off + m * pc.s1 + 256u * b) >> 2u;
+    float amax = 0.0;
+    for (uint i = 0u; i < 64u; ++i) {
+        const vec4 ax = abs(a4[base + i]);
+        amax = max(amax, max(max(ax.x, ax.y), max(ax.z, ax.w)));
+    }
+    const float d = amax / 127.0;
+    const float id = d != 0.0 ? 1.0 / d : 0.0;
+    const uint qo = pc.aq_off + 2u * (m * (pc.K >> 5u) + 8u * b);
+    uint hs[8];
+    for (uint u = 0u; u < 8u; ++u) {
+        uint w[8];
+        int s0 = 0, s1 = 0;
+        [[unroll]] for (uint i = 0u; i < 8u; ++i) {
+            const ivec4 q = clamp(ivec4(roundEven(a4[base + 8u * u + i] * id)), ivec4(-127), ivec4(127));
+            w[i] = (uint(q.x) & 0xFFu) | ((uint(q.y) & 0xFFu) << 8u) | ((uint(q.z) & 0xFFu) << 16u) | (uint(q.w) << 24u);
+            const int qs = q.x + q.y + q.z + q.w;
+            if (i < 4u) {
+                s0 += qs;
+            } else {
+                s1 += qs;
+            }
+        }
+        aq[qo + 2u * u] = uvec4(w[0], w[1], w[2], w[3]);
+        aq[qo + 2u * u + 1u] = uvec4(w[4], w[5], w[6], w[7]);
+        hs[u] = (uint(s0) & 0xFFFFu) | (uint(s1) << 16u);
+    }
+    const uint o = pc.ab_off + 4u * gi;
+    ab[o] = uvec4(floatBitsToUint(d), 0u, 0u, 0u);
+    ab[o + 1u] = uvec4(hs[0], hs[1], hs[2], hs[3]);
+    ab[o + 2u] = uvec4(hs[4], hs[5], hs[6], hs[7]);
+}

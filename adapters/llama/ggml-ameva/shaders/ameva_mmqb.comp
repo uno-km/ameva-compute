@@ -1,0 +1,157 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_EXT_integer_dot_product : require
+// AMEVA MMQB: ggml MUL_MAT (dst = src0^T x src1) for many activation rows (prompt processing) with integer dot
+// products and integer accumulation over a 256-weight block: src0 a 256-weight super-block type stored in the AMEVA
+// repacked layout (ggml-ameva-repack.h), src1 quantized to int8 with one scale per 256-element block by
+// ameva_quant_a8b (d_a, q_a, sums of q_a per 16-element half).
+// The weight scales of these types are small integers per 32-weight unit (or 16-weight half) times one f16 per block,
+// so with one activation scale per block the scales leave the unit loop. Per block, weight row and activation row:
+//   q4_K, q5_K (weight k of unit u = d sc_u v_k - dmin m_u, v unsigned):
+//       d_a * (d * sum_u sc_u * dot(v, q_a)_u  -  dmin * sum_u m_u * sum(q_a)_u)
+//   q6_K (weight k of half h = d sc_h (v_k - 32), sc_h int8): d_a * d * sum_h sc_h * dot(v - 32, q_a)_h
+// with the sums over u and h exact in 32-bit integers (dotPacked4x8EXT, signed 8-bit x 8-bit; at most 8 * 63 * 32 * 31
+// * 127 < 2^26 for q5_K and 16 * 128 * 16 * 32 * 127 < 2^27 for q6_K). The difference from ameva_qgemm is the rounding
+// of the activations to int8 per block (|error| <= d_a / 2 per element); the weights are used at full precision.
+// Against ameva_mmq (one activation scale per 32 elements, a tile in shared memory): per unit and pair of rows the
+// unit loop loads the weights and the two halves of the activation unit and nothing else, and there is no shared
+// memory and no barrier. On Mali the loads are what limits these kernels (docs/design/opencl-mali-int8.md).
+//
+// An invocation owns DRW weight rows (n0 + i * LX) x DRA activation rows; rows past N and M are computed from the last row and not
+// stored.
+//   bindings 0..2: repacked weights (ameva_qdecode.glsl), binding 3: AQ (uvec4), binding 4: AB (uvec4),
+//   binding 5: dst F32
+//   push: M, K, N (weight rows of this dispatch), q_off, h_off (Q / H vector elements), s_off (bytes, even),
+//         aq_off, ab_off (uvec4), d_off, sd (floats)
+//   grid: (ceil(N / (DRW * LX)), ceil(M / (DRA * LY)))
+//   variants: -DTYPE_Q4_K, -DTYPE_Q5_K, -DTYPE_Q6_K; -DDRW=<n>u -DDRA=<n>u (rows per invocation), -DLX=<n> -DLY=<n>
+//   (local size)
+
+#if !defined(DRW) || !defined(DRA) || !defined(LX) || !defined(LY)
+#error "ameva_mmqb: DRW, DRA, LX and LY must be defined"
+#endif
+
+layout(local_size_x = LX, local_size_y = LY, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+#include "ameva_qdecode.glsl"
+
+layout(std430, binding = 3) readonly buffer BufAQ { uvec4 aq[]; };
+layout(std430, binding = 4) readonly buffer BufAB { uvec4 ab[]; };
+layout(std430, binding = 5) writeonly buffer BufD { float dst[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint M, K, N, q_off;
+    uint h_off, s_off, aq_off, ab_off;
+    uint d_off, sd;
+    uint qt; // weight rows from the first 16-row tile of the binding << 4 | rows before the first row (qunit)
+} pc;
+
+#define ROW_STEP uint(LX)
+#include "ameva_blk.glsl"
+
+void main() {
+    qdecode_init(gl_LocalInvocationID.x);
+    // weight rows n0 + i * LX (i < DRW): the LX invocations of a row of the work group take LX consecutive rows, which
+    // the 16-row tiles of q4_K, q5_K and q6_K hold side by side (ggml-ameva-repack.h). Against rows 2x, 2x + 1 of the
+    // same tiles this was 1.15-1.21x faster, and 1.66-2.05x against row-major weights (q4_K 2x4, Mali-G78 OpenCL,
+    // ameva-foundation N-20261107-hw-bottleneck section 4.8).
+    const uint n0 = gl_WorkGroupID.x * (DRW * uint(LX)) + gl_LocalInvocationID.x;
+    const uint m0 = gl_GlobalInvocationID.y * DRA;
+    if (n0 >= pc.N || m0 >= pc.M) return;
+    const uint U = pc.K >> 5u;
+    const uint B = pc.K >> 8u;
+    const uint s_row = B * SB;
+    float acc[DRA * DRW]; // [j * DRW + i]: activation row m0 + j, weight row n0 + i
+    [[unroll]] for (uint x = 0u; x < DRA * DRW; ++x) {
+        acc[x] = 0.0;
+    }
+
+    for (uint b = 0u; b < B; ++b) {
+        // The first 16 bytes of the block's scales per weight row, as they are stored: q4_K, q5_K d and dmin (f16),
+        // then the 12 bytes of ggml's get_scale_min_k4; q6_K the sixteen int8 scales of the halves. They are decoded
+        // where they are used. What is decoded here stays in registers through the unit loop, and that loop has none
+        // to spare: with the minima of two weight rows as four ivec4 from here on, the kernel of two weight rows took
+        // 26.4 ms instead of 19.7 (Mali-G68, OpenCL, q4_K 352x2048x2048, 2026-10-07).
+        uint scw[4u * DRW];
+        [[unroll]] for (uint i = 0u; i < DRW; ++i) {
+            uint w[4];
+            sld4(pc.s_off + min(n0 + i * ROW_STEP, pc.N - 1u) * s_row + b * SB, w);
+            scw[4u * i] = w[0];
+            scw[4u * i + 1u] = w[1];
+            scw[4u * i + 2u] = w[2];
+            scw[4u * i + 3u] = w[3];
+        }
+
+        int isum[DRA * DRW];
+        [[unroll]] for (uint x = 0u; x < DRA * DRW; ++x) {
+            isum[x] = 0;
+        }
+        for (uint j8 = 0u; j8 < 8u; ++j8) {
+            const uint u = 8u * b + j8;
+            uvec4 wlo[DRW], whi[DRW];
+            int sc0[DRW];
+#if defined(HALF_SCALES)
+            int sc1[DRW];
+#endif
+            // the weight rows written out, not looped over: see UNIT_ROW (ameva_blk.glsl)
+            UNIT_ROW(0u)
+            if (DRW > 1u) UNIT_ROW(DRW - 1u)
+            [[unroll]] for (uint j = 0u; j < DRA; ++j) {
+                const uint g = pc.aq_off + 2u * (min(m0 + j, pc.M - 1u) * U + u);
+                const uvec4 a0 = aq[g], a1 = aq[g + 1u];
+                [[unroll]] for (uint i = 0u; i < DRW; ++i) {
+#if defined(HALF_SCALES)
+                    isum[j * DRW + i] += sc0[i] * dot16(wlo[i], a0) + sc1[i] * dot16(whi[i], a1);
+#else
+                    isum[j * DRW + i] += sc0[i] * (dot16(wlo[i], a0) + dot16(whi[i], a1));
+#endif
+                }
+            }
+        }
+
+        // the block's contribution: the scales that are one per block and weight row, and for q4_K, q5_K the minima
+        float dw[DRW];
+#if defined(HALF_SCALES)
+        [[unroll]] for (uint i = 0u; i < DRW; ++i) {
+            dw[i] = sldh(pc.s_off + min(n0 + i * ROW_STEP, pc.N - 1u) * s_row + b * SB + 16u);
+        }
+#else
+        float dm[DRW];
+        ivec4 mn0[DRW], mn1[DRW]; // the minima of units 0..3 and 4..7
+        [[unroll]] for (uint i = 0u; i < DRW; ++i) {
+            dw[i] = ameva_h2f(scw[4u * i] & 0xFFFFu);
+            dm[i] = ameva_h2f(scw[4u * i] >> 16u);
+            mn0[i] = ub4(scw[4u * i + 2u]) & 63;
+            mn1[i] = (ub4(scw[4u * i + 3u]) >> 4) | ((ub4(scw[4u * i + 2u]) >> 6) << 4);
+        }
+#endif
+        [[unroll]] for (uint j = 0u; j < DRA; ++j) {
+            const uint gb = pc.ab_off + 4u * (min(m0 + j, pc.M - 1u) * B + b);
+            const float da = uintBitsToFloat(ab[gb].x);
+#if defined(HALF_SCALES)
+            [[unroll]] for (uint i = 0u; i < DRW; ++i) {
+                acc[j * DRW + i] += da * (dw[i] * float(isum[j * DRW + i]));
+            }
+#else
+            const ivec4 p0 = ivec4(ab[gb + 1u]), p1 = ivec4(ab[gb + 2u]);
+            const ivec4 su0 = lo16(p0) + hi16(p0), su1 = lo16(p1) + hi16(p1); // sums of q_a over units 0..3, 4..7
+            [[unroll]] for (uint i = 0u; i < DRW; ++i) {
+                const ivec4 t = mn0[i] * su0 + mn1[i] * su1;
+                acc[j * DRW + i] += da * (dw[i] * float(isum[j * DRW + i]) - dm[i] * float(t.x + t.y + t.z + t.w));
+            }
+#endif
+        }
+    }
+
+    [[unroll]] for (uint j = 0u; j < DRA; ++j) {
+        const uint m = m0 + j;
+        if (m < pc.M) {
+            const uint o = pc.d_off + m * pc.sd + n0;
+            [[unroll]] for (uint i = 0u; i < DRW; ++i) {
+                if (n0 + i * ROW_STEP < pc.N) dst[o + i * ROW_STEP] = acc[j * DRW + i];
+            }
+        }
+    }
+}

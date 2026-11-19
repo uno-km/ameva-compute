@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // AMEVA MUL_MAT timing: one MUL_MAT node through the ggml backend, repeated, for kernel tuning.
 //
 //   ameva_mm_bench TYPE M N K [ITER]

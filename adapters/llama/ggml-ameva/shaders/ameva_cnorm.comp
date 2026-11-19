@@ -1,0 +1,44 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// AMEVA CNORM, second pass of GROUP_NORM for one batch element: y = (x - mean) * scale with the statistics of the
+// element's channel group (shaders/ameva_cnorm_stat.comp), the two rounded steps of
+// ggml_compute_forward_group_norm_f32. When the graph engine fused the nodes that follow the norm (the GroupNorm +
+// SiLU of the 2D decoders: GROUP_NORM -> MUL by a per-channel weight -> ADD of a per-channel bias -> SILU, each
+// result stored in place of the one before), it also computes that chain:
+//   flags bit 0: y = y * weight[c]       (ameva_binary MUL)
+//         bit 1: y = y + bias[c]         (ameva_binary ADD)
+//         bit 2: y = y / (1 + exp(-y))   (ameva_unary SILU)
+// Every step is rounded on its own (precise: no multiply-add contraction), as the separate dispatches round.
+// Source and destination may be the same elements: element i is read and written by one invocation.
+//
+//   source, dst  f32 [W, H, C], contiguous: channel c, position p at c * plane + p
+//   stats        two floats per group of cpg channels: mean, scale
+//   weight, bias f32, one per channel (any range of any buffer when the flag is clear)
+//   push: plane (W * H), cpg, a_off, s_off, w_off, b_off, d_off (floats; a_off, s_off and d_off of this batch
+//         element), flags
+//   grid: (ceil(plane / 256), C, 1)
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer BufA { float src[]; };
+layout(std430, binding = 1) readonly buffer BufS { float stats[]; };
+layout(std430, binding = 2) readonly buffer BufW { float weight[]; };
+layout(std430, binding = 3) readonly buffer BufB { float bias[]; };
+layout(std430, binding = 4) writeonly buffer BufD { float dst[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint plane, cpg, a_off, s_off;
+    uint w_off, b_off, d_off, flags;
+} pc;
+
+void main() {
+    const uint p = gl_WorkGroupID.x * 256u + gl_LocalInvocationID.x;
+    if (p >= pc.plane) return;
+    const uint c = gl_WorkGroupID.y;
+    const uint i = c * pc.plane + p;
+    const uint sg = pc.s_off + 2u * (c / pc.cpg);
+    precise float y = (src[pc.a_off + i] - stats[sg]) * stats[sg + 1u];
+    if ((pc.flags & 1u) != 0u) y = y * weight[pc.w_off + c];
+    if ((pc.flags & 2u) != 0u) y = y + bias[pc.b_off + c];
+    if ((pc.flags & 4u) != 0u) y = y / (1.0 + exp(-y));
+    dst[pc.d_off + i] = y;
+}

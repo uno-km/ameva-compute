@@ -20,7 +20,12 @@
 //      memory and the block's V replaces K;
 //   4. each invocation rescales and accumulates its DMAX / (128 / BQ) output columns.
 // Scores, probabilities and accumulation are f32 (ggml's CPU kernel rounds Q to f16 and accumulates V in f16 when V is
-// f16). Variants: -DDMAX=64|128|256 (at least max(D, DV); D and DV multiples of 4), -DBQ, -DBK.
+// f16). Variants: -DDMAX=64|128|256 (at least max(D, DV); D and DV multiples of 4), -DBQ, -DBK, -DRPI, -DDUNROLL.
+// RPI rows per invocation (default 1): an invocation computes the scores of RPI rows x KPT keys and accumulates RPI
+// rows x NV output vec4, so each staged K / V vec4 it reads serves RPI rows (fewer shared-memory reads and barriers
+// per row). DUNROLL head-loop steps per iteration (default 1, a loop over D / 4; a divisor of DMAX / 4): above 1 the
+// loop runs over DMAX / 4 vec4 with Q and K zero past D. Either way the sums are those of a loop over D (adding exact
+// zeros), in the same order for every RPI and DUNROLL.
 //
 // Key splits (flash decoding): with split_keys > 0, workgroup z handles keys [z * split_keys, (z + 1) * split_keys)
 // and writes its partial result per output row r = iq1 * n_head + iq2 to binding 5 at
@@ -59,16 +64,24 @@ layout(push_constant) uniform PushConstants {
 #ifndef BK
 #define BK 32u
 #endif
-#define TPR (128u / BQ)        // invocations per row
+#ifndef RPI
+#define RPI 1u                 // rows per invocation (register tile: RPI rows x KPT keys, RPI rows x NV columns)
+#endif
+#ifndef DUNROLL
+#define DUNROLL 1u             // head-loop vec4 steps per iteration: 1 = a loop over D / 4, QS = fully unrolled
+#endif
+#define DEND (DUNROLL == 1u ? D4 : QS)
+#define TPR (128u * RPI / BQ)  // invocations per row
+#define RG (BQ / RPI)          // invocations per key / column lane; row i_a = rg + RG * a
 #define KPT (BK / TPR)         // keys per invocation and block
-#define NV (DMAX / 4u / TPR)   // output vec4 per invocation
+#define NV (DMAX / 4u / TPR)   // output vec4 per invocation and row
 #define QS (DMAX / 4u)         // vec4 per staged Q row
 #define KS (DMAX / 4u + 1u)    // vec4 per staged K/V row (padded: neighbouring keys in different banks)
 
 shared vec4 sQ[BQ * QS];
 shared vec4 sKV[BK * KS];
 shared float sP[BQ * BK];
-shared float sMax[128];
+shared float sMax[BQ * TPR];
 shared uint sAny[2]; // per block parity: some key of the block is unmasked for some row
 
 // K / V element types (pc.kv_types)
@@ -128,13 +141,8 @@ void main() {
     const uint hkv = gl_WorkGroupID.y;
     const uint tile = pc.tile_base + gl_WorkGroupID.x;
     const uint nrows = pc.n_q * G;
-    const uint i = tid / TPR;     // row of the tile owned by this invocation
+    const uint rg = tid / TPR;    // rows rg + RG * a (a < RPI) of the tile are this invocation's
     const uint lane = tid % TPR;
-    const uint r = tile * BQ + i;
-    const bool row_ok = r < nrows;
-    const uint rc = min(r, nrows - 1u);
-    const uint iq1 = rc / G;
-    const uint iq2 = hkv * G + rc % G;
     const uint D4 = pc.D >> 2u, DV4 = pc.DV >> 2u;
 
     // Q rows of the tile (zero past the last row and past D)
@@ -154,40 +162,60 @@ void main() {
     const float softcap = uintBitsToFloat(pc.softcap);
     if (softcap != 0.0) scale /= softcap;
     const float max_bias = uintBitsToFloat(pc.max_bias);
-    float slope = 1.0;
-    if (max_bias > 0.0) {
-        slope = iq2 < pc.n_head_log2 ? pow(uintBitsToFloat(pc.m0), float(iq2 + 1u))
-                                     : pow(uintBitsToFloat(pc.m1), float(2u * (iq2 - pc.n_head_log2) + 1u));
-    }
     const float NEG_INF = -1.0 / 0.0;
+
+    bool row_ok[RPI];
+    uint iq1[RPI];
+    uint iq2[RPI];
+    uint mrow[RPI];
+    float slope[RPI];
+    [[unroll]] for (uint a = 0u; a < RPI; ++a) {
+        const uint r = tile * BQ + rg + RG * a;
+        row_ok[a] = r < nrows;
+        const uint rc = min(r, nrows - 1u);
+        iq1[a] = rc / G;
+        iq2[a] = hkv * G + rc % G;
+        mrow[a] = pc.m_off + iq1[a] * pc.m_s1 + (iq2[a] % pc.m_ne2) * pc.m_s2;
+        float sl = 1.0;
+        if (max_bias > 0.0) {
+            sl = iq2[a] < pc.n_head_log2 ? pow(uintBitsToFloat(pc.m0), float(iq2[a] + 1u))
+                                         : pow(uintBitsToFloat(pc.m1), float(2u * (iq2[a] - pc.n_head_log2) + 1u));
+        }
+        slope[a] = sl;
+    }
     const uint kbase = pc.k_off + hkv * pc.k_s2;
     const uint vbase = pc.v_off + hkv * pc.v_s2;
-    const uint mrow = pc.m_off + iq1 * pc.m_s1 + (iq2 % pc.m_ne2) * pc.m_s2;
     const uint split = gl_WorkGroupID.z;
     const uint kv_begin = pc.split_keys != 0u ? split * pc.split_keys : 0u;
     const uint kv_end = pc.split_keys != 0u ? min(pc.n_kv, kv_begin + pc.split_keys) : pc.n_kv;
 
-    vec4 acc[NV];
-    [[unroll]] for (uint n = 0u; n < NV; ++n) {
+    vec4 acc[RPI * NV];
+    [[unroll]] for (uint n = 0u; n < RPI * NV; ++n) {
         acc[n] = vec4(0.0);
     }
-    float m_run = NEG_INF;
-    float l_run = 0.0;
+    float m_run[RPI];
+    float l_run[RPI];
+    [[unroll]] for (uint a = 0u; a < RPI; ++a) {
+        m_run[a] = NEG_INF;
+        l_run[a] = 0.0;
+    }
     barrier();
 
     uint blk = 0u;
     for (uint kb = kv_begin; kb < kv_end; kb += BK, ++blk) {
         // 0. mask of this invocation's keys (-inf: masked or past the key range or not a row of the tile)
-        float mv[KPT];
+        float mv[RPI * KPT];
         bool any = false;
-        [[unroll]] for (uint c = 0u; c < KPT; ++c) {
-            const uint j = kb + lane + TPR * c;
-            float m = NEG_INF;
-            if (row_ok && j < kv_end) {
-                m = pc.has_mask != 0u ? slope * AMEVA_LOAD_F16(mask, mrow + j) : 0.0;
+        [[unroll]] for (uint a = 0u; a < RPI; ++a) {
+            [[unroll]] for (uint c = 0u; c < KPT; ++c) {
+                const uint j = kb + lane + TPR * c;
+                float m = NEG_INF;
+                if (row_ok[a] && j < kv_end) {
+                    m = pc.has_mask != 0u ? slope[a] * AMEVA_LOAD_F16(mask, mrow[a] + j) : 0.0;
+                }
+                mv[a * KPT + c] = m;
+                any = any || m != NEG_INF;
             }
-            mv[c] = m;
-            any = any || m != NEG_INF;
         }
         if (any) sAny[blk & 1u] = 1u;
         // the other flag was last read before a barrier this invocation has passed (or in a skipped block, where it
@@ -198,42 +226,63 @@ void main() {
             continue; // uniform: every key of the block is masked for every row
         }
 
-        // 1. K of the block
-        for (uint e = tid; e < BK * D4; e += 128u) {
-            const uint j = e / D4, d4 = e % D4;
-            sKV[j * KS + d4] = kb + j < kv_end ? load4(true, kbase + (kb + j) * pc.k_s1, 4u * d4) : vec4(0.0);
+        // 1. K of the block (zero past D, so that the head loop can run over DMAX / 4 vec4)
+        for (uint e = tid; e < BK * QS; e += 128u) {
+            const uint j = e / QS, d4 = e % QS;
+            sKV[j * KS + d4] =
+                (kb + j < kv_end && d4 < D4) ? load4(true, kbase + (kb + j) * pc.k_s1, 4u * d4) : vec4(0.0);
         }
         barrier();
 
-        // 2. scores of this invocation's keys
-        float s[KPT];
-        float mloc = NEG_INF;
-        [[unroll]] for (uint c = 0u; c < KPT; ++c) {
-            float x = NEG_INF;
-            if (mv[c] != NEG_INF) {
-                const uint jl = lane + TPR * c;
-                float dotv = 0.0;
-                for (uint d4 = 0u; d4 < D4; ++d4) {
-                    dotv += dot(sQ[i * QS + d4], sKV[jl * KS + d4]);
+        // 2. scores of this invocation's rows and keys: each staged Q and K vec4 is read once per head-loop step
+        float s[RPI * KPT];
+        [[unroll]] for (uint x = 0u; x < RPI * KPT; ++x) {
+            s[x] = 0.0;
+        }
+        [[dont_unroll]] for (uint d0 = 0u; d0 < DEND; d0 += DUNROLL) {
+            [[unroll]] for (uint du = 0u; du < DUNROLL; ++du) {
+                const uint d4 = d0 + du;
+                vec4 qv[RPI];
+                [[unroll]] for (uint a = 0u; a < RPI; ++a) {
+                    qv[a] = sQ[(rg + RG * a) * QS + d4];
                 }
-                x = dotv * scale;
-                if (softcap != 0.0) x = softcap * ameva_tanh(x);
-                x += mv[c];
+                [[unroll]] for (uint c = 0u; c < KPT; ++c) {
+                    const vec4 kv = sKV[(lane + TPR * c) * KS + d4];
+                    [[unroll]] for (uint a = 0u; a < RPI; ++a) {
+                        s[a * KPT + c] += dot(qv[a], kv);
+                    }
+                }
             }
-            s[c] = x;
-            mloc = max(mloc, x);
         }
-        sMax[tid] = mloc;
+        [[unroll]] for (uint a = 0u; a < RPI; ++a) {
+            float mloc = NEG_INF;
+            [[unroll]] for (uint c = 0u; c < KPT; ++c) {
+                float x = NEG_INF;
+                if (mv[a * KPT + c] != NEG_INF) {
+                    x = s[a * KPT + c] * scale;
+                    if (softcap != 0.0) x = softcap * ameva_tanh(x);
+                    x += mv[a * KPT + c];
+                }
+                s[a * KPT + c] = x;
+                mloc = max(mloc, x);
+            }
+            sMax[(rg + RG * a) * TPR + lane] = mloc;
+        }
         barrier();
 
-        // 3. running maximum of the row, probabilities, V of the block
-        float mblk = NEG_INF;
-        [[unroll]] for (uint l2 = 0u; l2 < TPR; ++l2) {
-            mblk = max(mblk, sMax[i * TPR + l2]);
-        }
-        const float m_new = max(m_run, mblk);
-        [[unroll]] for (uint c = 0u; c < KPT; ++c) {
-            sP[i * BK + lane + TPR * c] = (m_new == NEG_INF || s[c] == NEG_INF) ? 0.0 : exp(s[c] - m_new);
+        // 3. running maximum of each row, probabilities, V of the block
+        float m_new[RPI];
+        [[unroll]] for (uint a = 0u; a < RPI; ++a) {
+            const uint i = rg + RG * a;
+            float mblk = NEG_INF;
+            [[unroll]] for (uint l2 = 0u; l2 < TPR; ++l2) {
+                mblk = max(mblk, sMax[i * TPR + l2]);
+            }
+            m_new[a] = max(m_run[a], mblk);
+            [[unroll]] for (uint c = 0u; c < KPT; ++c) {
+                const float x = s[a * KPT + c];
+                sP[i * BK + lane + TPR * c] = (m_new[a] == NEG_INF || x == NEG_INF) ? 0.0 : exp(x - m_new[a]);
+            }
         }
         for (uint e = tid; e < BK * DV4; e += 128u) {
             const uint j = e / DV4, d4 = e % DV4;
@@ -241,50 +290,66 @@ void main() {
         }
         barrier();
 
-        // 4. rescale and accumulate this invocation's output columns
-        const float alpha = m_run == NEG_INF ? 0.0 : exp(m_run - m_new);
-        [[unroll]] for (uint n = 0u; n < NV; ++n) {
-            acc[n] *= alpha;
-        }
-        float lblk = 0.0;
-        for (uint jl = 0u; jl < BK; ++jl) {
-            const float p = sP[i * BK + jl];
-            lblk += p;
+        // 4. rescale and accumulate this invocation's output columns of its rows: each staged V vec4 serves RPI rows
+        float lblk[RPI];
+        [[unroll]] for (uint a = 0u; a < RPI; ++a) {
+            const float alpha = m_run[a] == NEG_INF ? 0.0 : exp(m_run[a] - m_new[a]);
             [[unroll]] for (uint n = 0u; n < NV; ++n) {
-                acc[n] += p * sKV[jl * KS + lane + TPR * n];
+                acc[a * NV + n] *= alpha;
+            }
+            l_run[a] *= alpha;
+            lblk[a] = 0.0;
+        }
+        for (uint jl = 0u; jl < BK; ++jl) {
+            vec4 vv[NV];
+            [[unroll]] for (uint n = 0u; n < NV; ++n) {
+                vv[n] = sKV[jl * KS + lane + TPR * n];
+            }
+            [[unroll]] for (uint a = 0u; a < RPI; ++a) {
+                const float p = sP[(rg + RG * a) * BK + jl];
+                lblk[a] += p;
+                [[unroll]] for (uint n = 0u; n < NV; ++n) {
+                    acc[a * NV + n] += p * vv[n];
+                }
             }
         }
-        l_run = l_run * alpha + lblk;
-        m_run = m_new;
+        [[unroll]] for (uint a = 0u; a < RPI; ++a) {
+            l_run[a] += lblk[a];
+            m_run[a] = m_new[a];
+        }
         barrier();
     }
 
-    if (row_ok && pc.split_keys != 0u) {
-        const uint pb = pc.part_off + (split * pc.n_q * pc.n_head + iq1 * pc.n_head + iq2) * (pc.DV + 2u);
-        if (lane == 0u) {
-            part[pb] = floatBitsToUint(m_run);
-            part[pb + 1u] = floatBitsToUint(l_run);
-        }
-        [[unroll]] for (uint n = 0u; n < NV; ++n) {
-            const uint d4 = lane + TPR * n;
-            if (d4 < DV4) {
-                part[pb + 2u + 4u * d4 + 0u] = floatBitsToUint(acc[n].x);
-                part[pb + 2u + 4u * d4 + 1u] = floatBitsToUint(acc[n].y);
-                part[pb + 2u + 4u * d4 + 2u] = floatBitsToUint(acc[n].z);
-                part[pb + 2u + 4u * d4 + 3u] = floatBitsToUint(acc[n].w);
+    [[unroll]] for (uint a = 0u; a < RPI; ++a) {
+        if (!row_ok[a]) continue;
+        if (pc.split_keys != 0u) {
+            const uint pb = pc.part_off + (split * pc.n_q * pc.n_head + iq1[a] * pc.n_head + iq2[a]) * (pc.DV + 2u);
+            if (lane == 0u) {
+                part[pb] = floatBitsToUint(m_run[a]);
+                part[pb + 1u] = floatBitsToUint(l_run[a]);
             }
-        }
-    } else if (row_ok) {
-        const float inv = l_run == 0.0 ? 0.0 : 1.0 / l_run;
-        const uint ob = pc.o_off + (iq1 * pc.n_head + iq2) * pc.DV;
-        [[unroll]] for (uint n = 0u; n < NV; ++n) {
-            const uint d4 = lane + TPR * n;
-            if (d4 < DV4) {
-                const vec4 x = acc[n] * inv;
-                o[ob + 4u * d4 + 0u] = floatBitsToUint(x.x);
-                o[ob + 4u * d4 + 1u] = floatBitsToUint(x.y);
-                o[ob + 4u * d4 + 2u] = floatBitsToUint(x.z);
-                o[ob + 4u * d4 + 3u] = floatBitsToUint(x.w);
+            [[unroll]] for (uint n = 0u; n < NV; ++n) {
+                const uint d4 = lane + TPR * n;
+                if (d4 < DV4) {
+                    const vec4 x = acc[a * NV + n];
+                    part[pb + 2u + 4u * d4 + 0u] = floatBitsToUint(x.x);
+                    part[pb + 2u + 4u * d4 + 1u] = floatBitsToUint(x.y);
+                    part[pb + 2u + 4u * d4 + 2u] = floatBitsToUint(x.z);
+                    part[pb + 2u + 4u * d4 + 3u] = floatBitsToUint(x.w);
+                }
+            }
+        } else {
+            const float inv = l_run[a] == 0.0 ? 0.0 : 1.0 / l_run[a];
+            const uint ob = pc.o_off + (iq1[a] * pc.n_head + iq2[a]) * pc.DV;
+            [[unroll]] for (uint n = 0u; n < NV; ++n) {
+                const uint d4 = lane + TPR * n;
+                if (d4 < DV4) {
+                    const vec4 x = acc[a * NV + n] * inv;
+                    o[ob + 4u * d4 + 0u] = floatBitsToUint(x.x);
+                    o[ob + 4u * d4 + 1u] = floatBitsToUint(x.y);
+                    o[ob + 4u * d4 + 2u] = floatBitsToUint(x.z);
+                    o[ob + 4u * d4 + 3u] = floatBitsToUint(x.w);
+                }
             }
         }
     }

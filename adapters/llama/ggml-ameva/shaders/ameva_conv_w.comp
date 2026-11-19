@@ -1,0 +1,61 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// AMEVA CONV_W: the weights of a convolution from ggml's layout into the K order of ameva_conv, bit pattern by bit
+// pattern (no conversion, so nothing is rounded).
+//
+//   src  f16, or f32 with -DF32, [KW, KH, IC, N]: weight (n, c, tap) at tap + taps * (c + IC * n),
+//        tap = kw + KW * kh
+//   dst  N rows of U units of 32 weights. Unit u = group * taps + tap holds channels c0 + 32 * group ..
+//        c0 + 32 * group + 31 at that tap (all taps of a channel group, then the next group); channels past IC are
+//        zero. This is the Q region ameva_conv decodes with TYPE_F16 / TYPE_F32. The whole kernel is c0 = 0 and
+//        U = taps * ceil(IC / 32); a pass over a window of channel groups (a source above one binding, or weights
+//        above one) takes c0 = 32 * its first group and U = taps * its groups.
+//
+//   binding 0: src as words, binding 1: dst as words
+//   push: taps, IC, N, U, s_off (elements of src), d_off (words of dst), c0 (first channel of the rows written)
+//   grid: one invocation per dst word (f16: 16 per unit, f32: 32 per unit), 1-D index space (ameva_linear_id)
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+
+layout(std430, binding = 0) readonly buffer BufS { uint sw[]; };
+layout(std430, binding = 1) writeonly buffer BufD { uint dw[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint taps, IC, N, U;
+    uint s_off, d_off, c0;
+} pc;
+
+#if defined(F32)
+#define WPU 32u // dst words per unit
+#else
+#define WPU 16u
+#endif
+
+// bit pattern of weight (n, c0 + c, tap); zero for a padded channel
+uint weight_bits(uint n, uint cw, uint tap) {
+    const uint c = pc.c0 + cw;
+    if (c >= pc.IC) return 0u;
+    const uint i = pc.s_off + tap + pc.taps * (c + pc.IC * n);
+#if defined(F32)
+    return sw[i];
+#else
+    return (sw[i >> 1u] >> ((i & 1u) * 16u)) & 0xFFFFu;
+#endif
+}
+
+void main() {
+    const uint wi = ameva_linear_id();
+    const uint row_words = pc.U * WPU;
+    if (wi >= pc.N * row_words) return;
+    const uint n = wi / row_words;
+    const uint r = wi - n * row_words;
+    const uint u = r / WPU, j = r - u * WPU;
+    const uint group = u / pc.taps, tap = u - group * pc.taps;
+#if defined(F32)
+    dw[pc.d_off + wi] = weight_bits(n, group * 32u + j, tap);
+#else
+    dw[pc.d_off + wi] = weight_bits(n, group * 32u + 2u * j, tap) | (weight_bits(n, group * 32u + 2u * j + 1u, tap) << 16u);
+#endif
+}

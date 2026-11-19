@@ -1,0 +1,416 @@
+# Mali OpenCL 프롬프트 경로 실모델 연결 설계 (안 B 최소 범위)
+
+- 작성: 2026-10-05 (사용자 승인: 안 B 최소 범위 = 프롬프트 경로 우선 OpenCL화, 브랜치 `perf/opencl-mali`)
+- 선행 문서: `docs/design/opencl-mali-int8.md`(커널 프로토타입과 실측). 이 문서는 그 6장 3번(B의 최소 범위)을 실행 설계로 구체화합니다.
+- 목표: S21(Mali-G78)·A53(Mali-G68)에서 블록 정수 누적 타일을 **실제 모델 프롬프트에 연결하여 프롬프트 t/s와 CPU 대비 KL 발산**을 측정한다. 판정 기준은 Vulkan 경로와 같다(`kld_mean <= 0.01`, `verify_kv.sh`).
+
+## 1. 현재 구조 (현물 확인)
+
+- `libac_runtime.so.2`(ggml-ameva가 링크하는 층)는 **Vulkan 전용**이다(`include/ac_runtime.h`: `backend_kind`는 `AC_BACKEND_VULKAN`이어야 함).
+- ac_runtime 하위 `amuda_rt`에는 **레거시 OpenCL 엔진**(`src/amuda/`, `libamuda`)과 어댑터(`src/amuda_rt/amuda_rt_opencl.c`, `AMU_BACKEND_OPENCL`)가 있으나, ggml-ameva가 쓰는 상위 AC 경로에는 OpenCL 백엔드가 없다.
+- 프로토타입 OpenCL 커널(`adapters/llama/ggml-ameva/opencl/ameva_cl_q4k.cl`)은 ac_runtime을 거치지 않는 독립 벤치(`tests/ameva_cl_bench.c`)로만 돈다.
+- 백엔드가 프롬프트 그래프에서 GPU로 수용하는 연산(`ggml-ameva.cpp` `supports_op`): MUL_MAT, ADD/SUB/MUL/DIV, SCALE, UNARY, GLU, RMS_NORM, ROPE, SET_ROWS, GET_ROWS, CPY/CONT/DUP, FLASH_ATTN_EXT, 그리고 뷰 계열.
+
+## 2. 설계 원칙: 수학 검증과 실행 이식을 분리한다
+
+블록 정수 누적 커널에는 두 개의 독립된 질문이 있다. 섞으면 둘 다 불명확해진다.
+
+1. **수학(품질)**: 활성값 스케일을 32개 단위가 아니라 256개 블록마다 하나로 두면(ggml의 Q8_K) 모델 품질이 떨어지는가? 프로토타입 난수 데이터에서는 역양자화 대비 거리가 블록 1.2e-3 대 단위 6.8e-4였다(단위마다 크기를 다르게 만든, 블록에 불리한 데이터). **실모델 가중치·활성값에서의 KL 발산은 아직 없다.**
+2. **실행(속도)**: 그 커널을 OpenCL로 실모델 그래프에서 돌리면 프롬프트 t/s가 Vulkan f32 경로보다 빠른가? 커널 시간은 1.6~2.9배 빨랐으나 **그래프 전체의 t/s는 아직 없다.**
+
+질문 1은 OpenCL 없이, 지금 있는 Vulkan/CPU 경로에서 **싸게** 답할 수 있다. 질문 2만 OpenCL AC 백엔드라는 큰 작업이 필요하다.
+
+## 3. 단계
+
+### 단계 A — 블록 양자화의 수학을 실모델에서 검증 (OpenCL 불필요, 먼저)
+
+- 활성값을 256개 블록마다 하나의 스케일로 int8 양자화하는 경로를 **기존 백엔드(Vulkan) 또는 CPU 참조**에 선택 기능으로 추가한다. CPU 백엔드가 q4_K 가중치에 곱할 때 쓰는 Q8_K와 같은 형식이므로 큰 위험은 없을 것으로 **예상**하지만, 재기 전에는 결과가 아니다.
+- `ameva_llm_parity`로 CPU(f16 활성, 참조) 대비 KL 발산을 잰다. Qwen2.5-0.5B, Llama-3.2-1B. 기준 `kld_mean <= 0.01`.
+- 산출물: "블록 단위 활성 양자화가 모델 품질 기준 안인가"에 대한 수치. 기준을 넘으면 안 B 전체를 재검토한다(단위 스케일을 유지하되 로드를 줄이는 다른 형태로).
+- 비용: 커널 1종(활성 양자화)과 파서 옵션. OpenCL 백엔드 불필요.
+
+#### 단계 A 결과 (2026-10-06, 통과)
+
+구현: ggml-ameva에 `AMEVA_ACT_FQ`(shaders/ameva_act_fq.comp). 양자화 가중치 MUL_MAT의 활성값을 블록 단위로
+int8 반올림·복원(d = amax/127, ties-to-even, CPU의 quantize_row_q8_K / q8_0과 같은 규칙)한 뒤 f32 커널이 읽는다.
+`256` = 256-원소 수퍼블록 타입(q4_K·q6_K…)만 Q8_K, `cpu` = CPU 백엔드 선택(수퍼블록 256, 나머지 32), `32` = 전부 32.
+f32 커널만 쓰도록 `AMEVA_MMQ=0 AMEVA_MMVQ=0`을 요구(아니면 abort). 기존 커널 SPIR-V 194개 불변, `act_fq` 1개 추가,
+`ameva_qmm_check` 516/516(S25 빌드). 측정: ameva-runtime `tools/fleet/lab/actfq_matrix.sh`(parity_long.sh, 문맥 256,
+16위치, CPU 대비). 근거: ameva-runtime `docs/handover/evidence/20261006-stageA-actfq/`.
+
+| CPU 대비 kld_mean (기준 0.01) | 활성 f32 (off) | Q8_K (256) | CPU 방식 (cpu) |
+| :--- | :---: | :---: | :---: |
+| S21 Qwen2.5-0.5B 배치 / 토큰 단위 | 4.21e-3 / 4.19e-3 | 5.10e-3 / 4.96e-3 | 4.71e-3 / 4.79e-3 |
+| S21 Llama-3.2-1B 배치 / 토큰 단위 | 2.32e-3 / 2.31e-3 | 3.55e-3 / 2.30e-3 | 3.55e-3 / 2.30e-3 |
+| A53 Qwen2.5-0.5B 배치 / 토큰 단위 | 4.21e-3 / 4.22e-3 | 5.10e-3 / 4.27e-3 | 4.71e-3 / 4.29e-3 |
+| A53 Llama-3.2-1B 배치 / 토큰 단위 | 2.32e-3 / 2.31e-3 | 3.55e-3 / 2.80e-3 | 3.55e-3 / 2.80e-3 |
+
+- **모든 조합이 기준 안**(최대 5.10e-3, 기준의 절반). top-1 93.75~100 %(off와 같음). CPU 자신의 배치·토큰 단위 경로 사이
+  거리가 Qwen 4.76e-3, Llama 3.30e-3이므로, 블록 int8 활성의 GPU 결과는 CPU의 자기 경로 간 차이와 같은 수준이다.
+- f32 활성 대비 변화는 +0.0~1.2e-3. perplexity(16위치)는 Qwen 9.32~9.48(CPU 9.50~9.53), Llama 18.40~18.87(CPU
+  18.86~19.71)로 CPU의 두 경로 범위와 겹친다.
+- 배치 결과는 S21과 A53에서 비트 단위로 같다(같은 f32 타일 커널). 토큰 단위는 기기별 GEMV 레이아웃 차이로 조금 다르다.
+- Llama는 전부 수퍼블록 타입이라 `256`과 `cpu`가 같다. Qwen은 q5_0·q8_0(K=896)도 32블록으로 맞춘 `cpu`가 CPU에 더 가깝다.
+- 예상과 다른 점: CPU의 Q8_K와 같은 반올림을 넣었는데도 배치 KLD가 f32 활성보다 조금 올랐다(하강 예상). 원인(CPU 배치
+  경로의 다른 활성 처리, 연산별 오차의 상쇄 변화)은 확인하지 못했다. 판정에는 영향 없음.
+- **결론: 블록 정수 누적 커널이 계산하는 수학은 실모델에서 기준을 통과한다. 단계 B(OpenCL 실행)로 진행한다.**
+
+### 단계 B — OpenCL AC 백엔드의 프롬프트 경로 최소 구현 (속도)
+
+단계 A가 기준을 통과하면 착수한다. 프롬프트 t/s는 그래프 전체가 한 큐에서 돌아야 정직하게 나온다(연산마다 Vulkan↔OpenCL을 오가는 안 A는 "그래프 한 번 제출" 구조를 깨므로 기각됨, 선행 문서 6장).
+
+- **AC OpenCL 백엔드**: Vulkan 백엔드가 구현하는 AC 표면(장치/버퍼/커널 로드/디스패치, `AcDeviceLimits`)을 OpenCL로 미러링한다. `amuda_rt`의 레거시 OpenCL 엔진을 재사용할지, 새 CL 경로를 둘지는 그 표면의 적합성으로 정한다(레거시 엔진의 커널 로드·버퍼 수명·동기화가 AC 계약과 맞는지 먼저 확인).
+- **프롬프트 경로 연산 이식**: 프롬프트 그래프가 GPU로 돌리는 연산 중 프롬프트에 실제로 쓰이는 것부터. 최소 집합은 MUL_MAT(블록 정수 타일), RMS_NORM, ROPE, GLU(SwiGLU), ADD/MUL/SCALE, CPY/CONT, FLASH_ATTN_EXT. GET_ROWS·SET_ROWS는 토큰당 1회로 CPU에 둘 수 있는지 확인한다.
+- 수용 못 하는 연산은 **거절하지 않고 실패한다**(철학 1, Fail-Fast). 프롬프트 경로가 완성되기 전에는 OpenCL 백엔드를 기본값으로 두지 않는다.
+
+#### 단계 B 사전 측정: Vulkan과 OpenCL의 메모리 공유 (2026-10-06, S21에서 불가)
+
+OpenCL 백엔드 전체 대신 "Vulkan 그래프 + MUL_MAT만 OpenCL"(같은 메모리를 두 API가 공유, 복사 없음)이 가능한지 먼저 쟀다.
+가능하면 이식할 연산이 MUL_MAT 하나로 줄어든다.
+
+- 공유 수단(현물 확인): Mali 드라이버는 Vulkan 메모리를 dma_buf로 내보내지 못하고 AHardwareBuffer(AHB)로만 내보낸다.
+  OpenCL은 `cl_arm_import_memory_android_hardware_buffer`로 AHB를 가져온다. Vulkan 매핑 주소의 호스트 가져오기는 거부된다
+  (`tests/ameva_vk_cl_interop_probe.c`, -6). AHB로 내보낼 수 있는 메모리 타입은 모두 host-visible이다(0x7, 0xB).
+  가져온 메모리에 대한 `clEnqueueMapBuffer`·`clEnqueueWriteBuffer`는 -59(CL_INVALID_OPERATION)로 거부된다.
+- 시험(`tests/ameva_vk_cl_gpu_handoff_probe.c`, 256 MB × 10라운드): 라운드마다 앞 절반에 새 값 e를 쓰고(생성), OpenCL 커널이
+  `2·a + 라운드 + 1`을 뒤 절반에 쓰고, Vulkan 커널이 두 절반을 검사해 **공유되지 않은 별도 버퍼**에 판정을 쓴다.
+  오류는 본 값으로 분류한다(OpenCL이 이전 라운드 입력을 읽음 / Vulkan이 이전 라운드 OpenCL 결과를 읽음 / Vulkan 입력 오류).
+  생성 경로 5종: gpu(Vulkan 커널이 씀, 그래프의 활성값과 같은 경우, 호스트는 공유 메모리에 접근하지 않음), cpu, launder,
+  staged(vkCmdCopyBuffer), compute(셰이더 복사).
+
+| 기기 (GPU, 드라이버) | 결과 |
+| :--- | :--- |
+| A53 (Mali-G68 r1p1, r32p1) | 5개 경로 14/14 통과 (이전 판 포함 추가 12회 통과) |
+| A35 (Mali-G68 r1p1, r38p1) | 5개 경로 11/11 통과 |
+| S21 (Mali-G78 r0p1, r38p0) | **모든 경로·모든 동기화 변형에서 실패** (회당 1~115개 64바이트 라인) |
+
+- S21의 실패는 거의 전부 **"OpenCL이 이전 라운드의 입력을 읽음"**이다. 값이 64바이트 라인 단위로 틀리고, 같은 라인이 이어지는
+  라운드에서 반복되기도 한다. 반대 방향(OpenCL이 쓴 결과를 Vulkan이 읽음)은 결과 버퍼를 분리한 뒤 오류가 없었다.
+- S21에서 효과가 없었던 동기화 변형(모두 각 3~12회): 호스트 대기 뒤 50 ms 지연, `VK_QUEUE_FAMILY_FOREIGN_EXT` 소유권 이전,
+  매 라운드 재가져오기, `clEnqueueMigrateMemObjects`, 커널 시작의 device-scope acquire 펜스, 일반 CL 버퍼 map/unmap,
+  host-cached 메모리 타입, dma_buf를 `CL_IMPORT_DMA_BUF_DATA_CONSISTENCY_WITH_HOST_ARM`으로 가져오기(OpenCL 시간 약 6배),
+  volatile 로드, 외부 세마포어(Vulkan sync_fd → `cl_khr_external_semaphore_sync_fd`, 호스트 대기 없음).
+- 지연이 효과가 없으므로 타이밍 경쟁이 아니라 S21의 OpenCL 작업이 다른 API가 쓴 라인을 무효화하지 않는 것으로 **추정**한다.
+  같은 r38 계열 드라이버의 A35(G68)는 통과하므로 G78 또는 r38p0 고유 문제로 보이나, 원인은 확인하지 못했다.
+- **결론: 두 API가 메모리를 공유하는 혼합 구조는 S21에서 결과가 틀린다. 단계 B는 API 간 메모리 공유 없이 구성한다.**
+  A53·A35에서는 공유가 성립하지만, 기기별로 구조를 나누면 S21이 빠지므로 기본 설계로 삼지 않는다.
+
+#### 단계 B 사전 측정 2: CPU가 가중치를 갖고 큰 MUL_MAT만 GPU로 보내는 구조 (2026-10-06, 기각)
+
+공유 없이 가능한 다른 구조는 ggml 스케줄러의 op offload다(`-ngl 0`, 가중치는 CPU 메모리, GPU 백엔드의 `offload_op`가
+true인 MUL_MAT은 가중치를 매 그래프 복사해 GPU에서 실행). OpenCL 백엔드를 이 위에 만들기 전에 구조의 비용을 기존 Vulkan
+백엔드로 쟀다. 구현: `AMEVA_OFFLOAD=<행 수>`(ggml-ameva-device.cpp, 기본 꺼짐). 측정: ameva-runtime
+`tools/fleet/lab/offload_bench.sh`(프롬프트 약 370토큰, 디코드 64토큰, 번갈아 2회, 2.8.1 번들). 반복 배치(repack)된 CPU
+가중치는 host 버퍼가 아니어서 offload 대상이 아니므로 `-nr`이 필요하다.
+
+| t/s (프롬프트 / 디코드) | CPU | CPU `-nr` | offload | GPU 전체 |
+| :--- | :---: | :---: | :---: | :---: |
+| A53 Qwen2.5-0.5B | 55.3 / 22.6 | 48.3 / 17.2 | 15.9 / 17.1 | 67.1 / 14.6 |
+| A53 Llama-3.2-1B 프롬프트 | 47.7 | 26.5 | 6.5 | 27.1 |
+| S21 Qwen2.5-0.5B 프롬프트 | 120.6 | 95.0 | 41.6 | 221.6 |
+| S21 Llama-3.2-1B 프롬프트 | 53~68 | 25~33 | 7.8 | 46~50 |
+
+- S21은 이 시간대에 발열로 흔들렸다(같은 모드의 두 회가 최대 2배 차이). 위 S21 값은 구조 비교용이며 기준선이 아니다.
+- offload는 GPU 전체 경로보다 3.5~6배 느렸다. 재배열되지 않은 가중치를 매 그래프 복사해 범용 커널(`ameva_qmm`)이 처리하고,
+  스케줄러가 인접 연산까지 GPU로 옮겨 분할이 195~338개가 된다(Qwen: GPU 그래프 213개, 그래프당 GPU 78~101 ms).
+- `-nr`은 A53 CPU 디코드를 24 %, Llama 프롬프트를 44 % 낮춘다. 출력 텍스트는 모든 모드에서 같았다.
+- **기각 이유**: 토큰 생성이 구조상 CPU에 남고(GPU 경로가 목표라는 원칙과 충돌), 그 CPU 경로도 `-nr` 때문에 느려진다.
+
+#### 단계 B 개정 (2026-10-06): ac_runtime에 OpenCL 백엔드를 두고 그래프 전체를 그 위에서 실행
+
+두 사전 측정에 따라, Mali의 정수 내적을 쓰려면 **한 API(OpenCL) 위에서 그래프 전체(프롬프트와 토큰 생성)를 실행**한다.
+원래 단계 B의 "AC OpenCL 백엔드"와 같고, 범위가 토큰 생성까지 넓어진다.
+
+- 장치 기능(실측, S21 r38p0·A53 r32p1 공통): OpenCL 3.0, 거친 단위 SVM(세밀 단위 없음), SPIR-V 1.0 IL, 기준 주소 정렬
+  128바이트, 로컬 메모리 32 KB, 최대 워크그룹 512, 커널 인자 최대 1 KB, 서브그룹, `arm_dot_acc`(S21은 표준 내적도 있음).
+- ac_runtime: `AC_BACKEND_OPENCL`. 버퍼는 SVM(바인딩 오프셋 = 포인터 + 오프셋), 커널은 OpenCL C 소스와 빌드 옵션,
+  푸시 상수는 값으로 넘기는 구조체 인자, 배치는 in-order 큐(배리어는 큐 순서). 거친 단위 SVM은 호스트가 포인터에 직접
+  쓰는 것을 허용하지 않으므로, 백엔드 중립의 호스트 접근 API(구간 쓰기·읽기·채우기)를 추가하고 ggml-ameva가 그것을 쓴다.
+- ggml-ameva: 그래프 엔진과 정합성 시험(`ameva_qmm_check`, kvq, chunk, fuse, `test-backend-ops`)은 그대로 두고, 각 GLSL
+  커널과 같은 바인딩·푸시 상수 배치의 OpenCL C 커널을 둔다(셰이더 27개 약 3,300줄, 서브그룹 연산 없음). MUL_MAT은 블록 정수
+  커널(`opencl/ameva_cl_q4k.cl`)을 쓴다.
+- 순서: (1) ac_runtime OpenCL 백엔드와 KAT, (2) 호스트 접근 API로 ggml-ameva 전환(Vulkan 결과 불변 확인), (3) 연산 커널
+  이식과 시험 통과, (4) 블록 정수 MUL_MAT, (5) S21·A53 실모델 프롬프트·토큰 생성 t/s와 KLD.
+
+#### 단계 B 진행 (2026-10-07): 그래프 전체가 OpenCL에서 실행된다 (순서 1~3 완료, 5의 첫 측정)
+
+- **커널은 손으로 옮기지 않고 번역한다.** `scripts/glsl_to_opencl.py`가 `glslangValidator -E` 출력(전처리된 GLSL)을
+  OpenCL C로 바꾸고, `scripts/build_ameva_kernels.py`가 SPIR-V 헤더와 같은 실행에서 `ggml_ameva_kernels_cl.h`를 쓴다
+  (195개 커널, 저장소의 헤더는 S25 생성본). 바인딩 수·푸시 상수 크기·로컬 크기는 SPIR-V 쪽 값과 대조한다. GLSL의
+  `.length()`는 바인딩 범위 인자(`AC_KERNEL_SOURCE_BINDING_RANGES`)로 넘긴다. `AMEVA_BACKEND=opencl`로 선택한다.
+- **드라이버 적재**: `libvndksupport.so`의 `android_load_sphal_library("libOpenCL.so")`(벤더 링커 네임스페이스).
+  `LD_LIBRARY_PATH`와 ICD 설정이 필요 없다(A53, A35, S25 확인).
+- **찾아서 고친 결함**
+  1. 공유 메모리의 벡터 성분 쓰기. 타일 커널은 한 워크그룹의 호출들이 같은 `vec4`의 서로 다른 성분을 쓴다(GLSL에서는
+     스칼라 저장). 번역본의 `v->x = x`는 벡터 전체를 읽고 고쳐 다시 쓰는 코드가 되어 호출끼리 덮어썼다. M≥8의 재배열
+     가중치 144건(`ameva_qgemm`, `ameva_mmq`)이 실패했고, 성분 주소에 스칼라로 저장하도록 고쳐 516/516이 되었다.
+  2. 캐시 키. Mali는 `CL_DRIVER_VERSION`이 DDK와 무관하게 "3.0"이고 DDK 빌드는 `CL_DEVICE_VERSION`에 있다. 두 문자열을
+     모두 드라이버 식별에 넣었다.
+  3. GEMV 튜닝 파일. 파일 하나에 기기 키가 하나라서 OpenCL 실행이 Vulkan 측정값을 버리고 덮어썼다(A53, A35에서 실제로
+     발생. 다음 Vulkan 실행이 다시 측정한다). 백엔드별 파일로 나누었다(`ggml-ameva-qmv-tune-cl.txt`).
+  4. `ameva_fuse_check`는 f32 커널을 1e-5로 비교하는 시험인데, int8 토큰 생성 레이아웃이 자동 선택되면 1e-3 오차로
+     실패한다(Vulkan의 A35·S20에서도 같다). 시험이 `AMEVA_MMVQ=0`을 스스로 고정하고 다른 값은 거부한다.
+- **정합성(OpenCL 백엔드, A53 r32p1와 A35 r38p1 각각)**: `ac_cl_kat` 96항목, `ameva_qmm_check` 516/516(기본,
+  `AMEVA_MMQ=0`, `AMEVA_MMVQ=1`), kvq, chunk, fuse(융합 유무 해시 동일), `test-backend-ops` 2025/2025와
+  `AMEVA_REPACK_ALL=1` 1768/1768. 모든 실행에서 플러그인의 OpenCL 선언 행을 확인했다(`cl_backend_check.sh`,
+  `cl_tbo.sh`). Vulkan 회귀: S25 전체 빌드에서 516/516, 배치 KAT 통과, SPIR-V 헤더는 커밋본과 바이트 동일.
+- **실모델 첫 측정** (Qwen2.5-0.5B Q4_K_M, `-c 2048 -t 4`, 같은 플러그인, 3회 교대, t/s. `cl_model.sh`).
+  프롬프트는 약 370토큰, 생성은 64토큰이고 탐욕 디코딩 텍스트는 모든 실행에서 CPU와 같다.
+
+  | 기기 (ssh 코어) | 구간 | CPU | Vulkan | OpenCL | OpenCL, `AMEVA_CL_WAIT=sleep` |
+  | :--- | :--- | :--- | :--- | :--- | :--- |
+  | A53 (0-7) | 프롬프트 | 54.9~55.1 | 67.1~67.2 | 110.4~110.9 | 94.4~95.2 |
+  | A53 (0-7) | 생성 | 21.2~22.6 | 14.6 | 19.95~20.0 | 11.9~12.9 |
+  | A35 (0-2) | 프롬프트 | (14.4) | 188.8~189.0 | 90.8~93.1 | 87.9~91.2 |
+  | A35 (0-2) | 생성 | (5.5~6.1) | 18.9~19.0 | 22.4~22.7 | 19.2~19.3 |
+
+  A35의 ssh 세션은 A55 코어 3개만 쓰므로 괄호 안의 CPU 값은 기준이 아니다(전 코어 기준선은 프롬프트 109~110, 생성 35~37).
+  A53의 Vulkan에는 정수 내적이 없고(f32 타일), A35의 Vulkan에는 있다.
+- **읽는 법**
+  - A53: 프롬프트는 CPU의 2.0배, Vulkan의 1.65배. 생성은 Vulkan의 1.37배이지만 CPU의 0.89~0.94배로 아직 못 넘었다.
+  - A35: 생성은 Vulkan의 1.19배. 프롬프트는 Vulkan의 0.49배다. 같은 GLSL에서 나온 `ameva_mmq`가 같은 GPU에서 OpenCL로는
+    2.1~2.9배 느리다(`AMEVA_PROFILE=2`: q5_0 4864x896 7.8 ms 대 19.9 ms, q6_K 896x4864 11.7 대 34.3 ms). 번역된 타일
+    커널의 비용이며 원인은 아직 분리하지 못했다. A53의 프롬프트 수치도 같은 커널이므로 같은 여지가 있다.
+- **CPU가 모두 쉬면 OpenCL 커널이 느려진다 (A53에서 측정, `AMEVA_CL_TRACE`)**. 대기 스레드가 잠들어 모든 코어가 유휴이면
+  같은 커널이 같은 데이터에서 최대 2배 걸린다(한 행 곱 q5_0 4864x896 평균 520 µs 대 326 µs, 출력 투영 26.9 ms 대 12.4 ms).
+  느린 구간은 수십 ms 단위로 이어지고, 커널 사이 공백은 없으며, GPU 클럭은 내내 최대(897 MHz)다. 어느 클러스터든 코어
+  하나가 바쁘면 사라진다(토큰당 커널 시간 75 → 46 ms). 드라이버 아래의 원인은 앱에서 볼 수 없다. 그래서 OpenCL 백엔드의
+  배치 대기는 잠들지 않고 상태를 읽는다(`AMEVA_CL_WAIT=spin`, 기본값. `sleep`은 이전 방식). 대가는 배치 동안 코어 하나의
+  전력이다. 같은 조건에서 Vulkan 경로의 변화는 14.5 → 15.0 t/s로 작다.
+- **생성의 한계선(A53)**: spin 대기에서 토큰당 커널 시간 45.7 ms 가운데 출력 투영(q8_0 136 MB)이 12.4 ms(약 11 GB/s),
+  FFN 두 곱(q5_0)이 15.6 ms(약 8.4 GB/s)다. 토큰마다 재배열 가중치 373 MB를 전부 읽으므로 메모리 대역이 하한이고,
+  CPU(토큰당 44~47 ms)도 같은 하한 근처다. 생성에서 CPU를 크게 넘을 여지는 구조상 작다.
+- **KL 발산 (CPU 대비, Qwen2.5-0.5B, `parity_long.sh`, 기준 `kld_mean <= 0.01`)**
+
+  | 구간 | A53 OpenCL | A53 Vulkan(f32) | A35 OpenCL | A35 Vulkan(int8) |
+  | :--- | :--- | :--- | :--- | :--- |
+  | 문맥 256: 배치 / 한 토큰씩 (16위치) | 3.97e-3 / 4.16e-3 | 4.21e-3 / 3.89e-3 | 3.97e-3 / 5.68e-3 | 5.87e-3 / 3.99e-3 |
+  | 문맥 2048: 배치 / 한 토큰씩 (128위치) | 1.83e-3 / 1.81e-3 | - | 1.83e-3 / 1.93e-3 | - |
+  | 문맥 256, 이동 후 (32위치) | **1.52e-2** | 6.16e-3 | **1.11e-2** | 8.65e-3 |
+  | KV 셀 재사용 `kld_max` | 0 | 0 | 0 | 0 |
+  | 생성 64토큰 | CPU와 동일 | CPU와 동일 | CPU와 동일 | CPU와 동일 |
+
+  - 배치·한 토큰씩·2048토큰 구간은 기준 안이다(CPU 자신의 두 경로 사이가 4.76e-3, 2048에서 1.83e-3).
+  - **이동 후 구간은 OpenCL 기본 구성이 기준을 넘었다.** A53에서 분리하면 f32 전용 6.67e-3, 프롬프트만 int8 6.74e-3,
+    한 행 곱만 int8 7.83e-3으로 각각 기준 안이고 둘을 함께 쓸 때만 1.52e-2다(32위치 중 한 위치가 0.20).
+  - 표본을 늘리면(A53, 문맥 512, 이동 후 128위치) 구성 사이 차이가 없어지고 **전부 기준을 넘는다**: Vulkan f32 3.35e-2,
+    OpenCL 기본 3.11e-2, 프롬프트만 int8 3.10e-2, 한 행 곱만 int8 3.69e-2, OpenCL f32 전용 3.32e-2. Vulkan f32는 2.8.1로
+    게시된 경로와 같은 커널이다.
+  - 기준을 f32 KV 캐시의 CPU로 바꾸면(`KV=f16 REFKV=f32`) **f16 캐시의 CPU 자신**이 이동 후 1.69e-2(문맥 512, 128위치),
+    1.40e-2(문맥 256, 32위치)이고 GPU(Vulkan f32 커널)는 1.78e-2, 1.07e-2다. 이동 뒤에는 모델의 perplexity가 220~350이어서
+    f16 키 회전의 반올림만으로 0.01을 넘는다. 따라서 이동 후 KLD는 두 구현의 f16 반올림 잡음을 재는 값이고, 현재 기준
+    (f16 CPU 대비 0.01)으로는 구성의 우열도 결함 유무도 가리지 못한다. 32위치에서 통과·실패가 갈린 것은 표본 크기다.
+  - 할 일: 이동 구간의 판정을 f32 캐시 기준과 CPU 자신의 거리 대비로 바꾸는 안을 정한다(도구는 `--ref-kv`로 이미 잰다).
+    2.8.1의 이동 후 수치(문맥 256, 32위치, 2.6e-3~8.65e-3)는 잰 그대로이나 같은 한계를 가진다.
+- **남은 것**: (a) 번역 타일 커널이 Vulkan보다 느린 원인 분리, (b) 순서 4의 블록 정수 MUL_MAT(로컬 메모리 없는 형태),
+  (c) 긴 응답 텍스트(`text_soak.sh`)와 Llama-3.2-1B의 OpenCL 측정, 이동 구간 판정 기준 재정의, (d) S21 측정(2026-10-07
+  접속 불가), (e) Adreno 830 컴파일러가 거부하는 10개 변형(q2_K·q6_K의 2·4행 GEMV). 이 항목들이 끝나기 전에는 "Mali에서
+  GPU가 CPU를 넘었다"고 쓰지 않는다. 프롬프트 구간의 A53 수치만 그 문장에 해당한다.
+
+#### 단계 B 순서 4 (2026-10-07): 블록 정수 MUL_MAT을 GLSL 커널군으로
+
+- **구현**: `shaders/ameva_mmqb.comp`(q4_K·q5_K·q6_K, 공유 메모리 없음, 호출 하나가 가중치행 DRW x 활성행 DRA를 맡는다.
+  레이아웃 2x8·2x4·2x16·1x8·1x4·1x16, 로컬 8x4)와 `shaders/ameva_quant_a8b.comp`(256원소 블록마다 스케일 하나).
+  같은 GLSL이 SPIR-V와 OpenCL C로 나간다(커널 195 → 214개, A53의 glslang 16.3.0으로 생성, 기존 SPIR-V는 바이트 동일).
+  프로토타입에 없던 꼬리 행과 행 범위(가중치 슬라이스, 활성행 청크)를 처리한다. 스크래치 크기는 `ameva_mmq`와 같다.
+  `AMEVA_MMQB`로 켠다(기본 꺼짐): `1`, `<w>x<a>`, 또는 타입별 `q4_K=2x8,q6_K=1x8`. 없는 레이아웃과 MMQ 없는 요청은 중단한다.
+- **정합성**: `ameva_qmm_check` 516/516 — A53 OpenCL(레이아웃 6종, 타입별 선택, `AMEVA_BINDING_LIMIT=16384`),
+  A35 Vulkan(레이아웃 5종), A35 OpenCL. 블록 경로를 탄 사례(카운터 `mmqb_mul_mat_count`)는 256원소 단위로 반올림한
+  기준값과 비교한다(허용 1e-5, A53에서 잰 최대 4.9e-8). 선택한 타입이 블록 경로를 타지 않으면 시험이 실패한다.
+- **커널 시간** (352x2048x2048, ms. A53은 `AMEVA_CL_TRACE`의 MUL_MAT 커널 시간, A35는 `AMEVA_PROFILE=2`의 양자화 포함
+  시간. 2회 교대. A35는 ssh 코어 0-2, GPU 클럭 표본 351 MHz로 회차 간 편차가 크다)
+
+  | 기기·API | 타입 | `ameva_mmq` | `ameva_mmqb` 가장 빠른 레이아웃 | 2행 레이아웃 |
+  | :--- | :--- | :--- | :--- | :--- |
+  | A53 OpenCL | q4_K | 27.8~28.3 | 2x8 18.8~19.8 | (왼쪽) |
+  | A53 OpenCL | q6_K | 33.0~33.7 | 1x8 31.9~32.0 | 59~96 |
+  | A53 OpenCL | q5_K | 31.9~33.6 | 1x16 34.2 | 59~90 |
+  | A35 OpenCL | q4_K | 33.5~42.2 | 2x8 15.8~16.0 | (왼쪽) |
+  | A35 OpenCL | q6_K | 59.6~66.0 | 1x8 25.3~25.4 | 72~95 |
+  | A35 Vulkan | q4_K | 14.7~14.9 | 1x16 22.9~40.0 | 62~86 |
+  | A35 Vulkan | q6_K | 20.2~22.5 | 1x8 24.9~25.0 (1x16 23.8~38.6) | 72~110 |
+  | A35 Vulkan | q5_K | 26.3~26.8 | 1x16 42.3~42.9 | 69~116 |
+  | S25 Vulkan | q4_K | 2.44 | 2x4 2.93~2.97 | 2.93~3.11 (2x16은 18.7~18.8) |
+  | S25 Vulkan | q5_K | 2.50~2.51 | 2x4 3.18~3.19 (2x8 3.16~3.41) | 3.16~3.41 (2x16은 19.5~19.7) |
+  | S25 Vulkan | q6_K | 2.68~2.69 | 2x4 3.21~3.23 (2x16 3.01~4.42) | 3.01~4.42 |
+  | S25 OpenCL | q4_K | 3.83~3.84 | 1x4 6.12~6.16 | 6.59~11.7 |
+  | S25 OpenCL | q5_K | 3.95~4.00 | 1x4 7.31~7.35 | 8.18~13.1 |
+  | S25 OpenCL | q6_K | 4.08~4.10 | 1x4 7.60~7.63 | 7.84~12.7 |
+  | S20 Vulkan | q4_K | 14.57~14.62 | 1x4 52.7 | 58.6~63.5 (2x16은 700~702) |
+  | S20 Vulkan | q5_K | 15.79~15.82 | 1x4 56.8 | 63.4~72.7 (2x16은 691~693) |
+  | S20 Vulkan | q6_K | 14.54~14.56 | 1x4 56.9~57.0 | 65.2~157 (2x16은 484~493) |
+
+  - OpenCL에서는 q4_K가 타일 커널의 1.45배(A53), 2.1~2.7배(A35)다. A35 OpenCL의 q6_K도 1x8에서 2.4~2.6배다.
+  - **A35 Vulkan에서는 모든 레이아웃이 타일 커널보다 느리다.** 블록 커널은 OpenCL 경로의 것이다.
+  - **S25(Adreno 830)에서는 두 API 모두 모든 레이아웃이 타일 커널보다 느리다** (2026-10-07 17:03~17:07, `29b5362`, 2회 교대,
+    ssh 코어 0-1,4-5, GPU 클럭 상한 832 MHz. Vulkan 열은 `AMEVA_PROFILE=2`의 그래프당 GPU 시간으로 양자화를 포함하고,
+    OpenCL 열은 `AMEVA_CL_TRACE`의 MUL_MAT 커널 시간이다. 다른 세션의 CPU 전용 `llama-server`가 유휴 상태로 떠 있었다).
+    가장 빠른 블록 레이아웃이 Vulkan에서 타일의 1.1~1.3배, OpenCL에서 1.6~1.9배 걸린다. S25에서는 블록 커널을 켜지 않는다.
+    정합성: Vulkan `ameva_qmm_check` 516/516(기본·레이아웃 6종·타입별 선택·`AMEVA_BINDING_LIMIT=16384`, 9/9).
+    OpenCL은 9개 설정 모두 510/516이고, 실패 6건은 기본 구성에도 있는 q2_K M=1 사례다(`ameva_qmv_q2_K_c1_r4` 빌드가 -6으로
+    실패. 블록 커널과 무관하며 블록 경로 사례 36건은 통과한다).
+  - **S20(Adreno 650) Vulkan에서도 모든 레이아웃이 타일 커널보다 느리다** (2026-10-07 18:51~19:02, 2회 교대, 코어 0-7,
+    GPU 클럭 상한 587 MHz, 다른 작업 없음. S25에서 빌드한 같은 바이너리, 플러그인 `2d5e09344441`. 이 드라이버는 정수 내적
+    확장은 있으나 4x8 묶음 내적을 가속한다고 보고하지 않는다). 가장 빠른 블록 레이아웃(1x4)이 타일의 3.6~3.9배 걸리고,
+    활성행 16개 레이아웃은 484~934 ms다. S20에서는 블록 커널을 켜지 않는다. 정합성: Vulkan `ameva_qmm_check` 516/516(9/9).
+    S20의 OpenCL에는 int8 내적이 없어 MMQ가 꺼지고 `AMEVA_MMQB` 요청은 설계대로 중단한다. 같은 실행에서 본 것(원인 미조사):
+    OpenCL f32 타일 커널(`ameva_qgemm`)이 커널당 8.6~16.3초 걸리고, OpenCL의 `ameva_qmm_check`는 139로 끝난다.
+  - 도구: ameva-runtime `tools/fleet/lab/mmqb_dev.sh`(정합성 + 레이아웃 훑기), `mmqb_wait.sh`(다른 GPU 작업이 끝난 뒤 실행).
+    A53에서 같은 도구로 다시 잰 값은 위 표와 같다(q4_K 28.6~28.9 → 2x8 18.8~18.9, q6_K 33.1~34.3 → 1x8 31.8~32.0).
+  - q5_K·q6_K는 2행 레이아웃이 1행의 약 2배 걸린다. 상위 비트 풀기를 벡터 연산으로 바꿔도 같았고 원인은 모른다.
+- **원인을 가른 것 한 건** (A53, 커널 텍스트를 기기에서 바꿔 끼우는 실험): 처음 번역본의 q4_K 2x8은 26.4~29.8 ms로
+  손으로 쓴 프로토타입(19.4 ms)보다 느렸다. 내적 형태, 스케일 로드, 인덱스 산술, 행 클램프, 부호 없는 카운터 등 아홉
+  가지는 차이가 없었고, **블록의 최솟값을 단위 루프 전에 ivec4 넷으로 풀어 두는 것** 하나가 19.7 → 26.4 ms였다.
+  저장된 스케일 워드만 루프를 지나게 하고 루프 뒤에서 풀도록 고쳐 18.8~19.8 ms가 되었다.
+- **실모델** (A53, Llama-3.2-1B Q4_K_M, OpenCL, `cl_model.sh` 3회 교대, 프롬프트 약 370토큰 t/s): CPU 47.2~47.9,
+  OpenCL 기본(`ameva_mmq`) 45.9~46.1, `AMEVA_MMQB=q4_K=2x8` **57.4~57.9**, `q4_K=2x8,q6_K=1x8` 56.9~57.1.
+  프롬프트 1토큰 생성 텍스트는 모든 실행에서 CPU와 같다. 토큰 생성은 경로가 같아 변화가 없다(10.6~11.1, CPU 13.4).
+  KLD(CPU 대비, 문맥 256, 16위치, 기준 0.01): 배치 2.14e-3(기본) → 3.13e-3(q4_K=2x8), 2.76e-3(q4_K·q6_K), top-1 100 %.
+- **함께 본 것**: 이 모델의 OpenCL 64토큰 생성 텍스트는 블록 커널과 무관하게(기본 구성에서) CPU와 70번째 바이트부터
+  다르다. Llama-3.2-1B의 OpenCL 생성 경로는 이번이 첫 측정이며 원인은 보지 않았다.
+- **남은 것**: S21 측정(2026-10-07 기기에 대기 작업으로 걸어 두었다. 다른 세션의 확산 모델 작업이 GPU를 쓰는 중이다),
+  기기·타입별 기본값
+  (지금은 요청할 때만 켠다), Qwen2.5-0.5B(K=896이라 대부분 q5_0).
+
+#### 단계 B 순서 4 보충 (2026-10-07 저녁): q5_K·q6_K 2행의 원인, 토큰 생성용 블록 커널
+
+- **2행 레이아웃이 느린 원인을 가른 실험** (A53, Mali-G68 r32p1, OpenCL, 352x2048x2048, 2x8, 커널 ms. 번역된 커널 텍스트의
+  루프를 하나씩 소스에서 풀어 써서 기기에서 바꿔 끼웠다. 산술과 결과는 모든 변형에서 같다):
+
+  | 소스에서 풀어 쓴 루프 | q5_K | q6_K |
+  | :--- | :--- | :--- |
+  | 없음(번역본 그대로) | 67.3~67.9 | 62.2~62.9 |
+  | 블록의 스케일 워드를 읽는 가중치행 루프 | 70.5~70.8 | 65.9~67.2 |
+  | **단위 루프 안에서 가중치행의 가중치를 int8로 푸는 루프** | **23.7~23.8** | **28.7~28.9** |
+  | 내적의 가중치행 루프 | 61.5~62.1 | 56.9~57.8 |
+  | 블록 마무리와 저장의 가중치행 루프 | 70.4~70.7 | 69.3~70.3 |
+  | 가중치행 루프 전부 + 내적의 활성행 루프 | 32.5~32.9 | 45.9~47.2 |
+
+  - 시간을 바꾼 것은 **가중치를 푸는 루프 하나**다. 두 행을 루프로 두면 q5_K·q6_K에서 2.2~2.8배 걸린다. q4_K는 어느 쪽이든
+    18.7~18.9 ms다. 활성행 루프까지 풀어 쓰면 다시 느려진다(모든 루프를 풀어 쓴 q4_K는 56~58 ms).
+  - 해석(직접 재지 않은 추정): 상위 비트 풀기가 들어가 본문이 커지면 컴파일러가 이 루프를 풀지 않고, 풀어 둔 가중치 벡터를
+    배열에 둔 채 활성행마다 다시 읽는다. 이 GPU에서 비용은 로드다.
+- **수정**: 블록 정수 커널의 공용 부분을 `shaders/ameva_blk.glsl`로 옮기고, 가중치행을 `UNIT_ROW` 매크로로 풀어 썼다
+  (`ameva_mmqb.comp`). 커널 헤더는 A53(glslang 16.3.0)에서 다시 생성했고 214개 중 `ameva_mmqb` 18개의 SHA만 바뀐다.
+- **수정 후** (A53 OpenCL, `mmqb_dev.sh` 2회 교대, 커널 ms. 수정 전 값은 같은 날 같은 도구로 잰 것):
+
+  | 타입 | `ameva_mmq` | `ameva_mmqb` 2x8 수정 전 → 후 | 1행 가장 빠른 레이아웃 |
+  | :--- | :--- | :--- | :--- |
+  | q4_K | 27.7~28.0 | 18.8~18.9 → 18.7~18.9 | 1x16 29.1~30.9 |
+  | q5_K | 31.2~32.1 | 72.6~76.0 → **23.8~24.0** | 1x16 34.4 |
+  | q6_K | 32.3~32.8 | 58.8~71.1 → **27.8~28.9** | 1x8 31.8~32.0 |
+
+  q5_K는 타일 커널의 1.3배, q6_K는 1.1~1.2배 빨라졌다. 1행 레이아웃은 변화가 없다. `ameva_qmm_check` 516/516(9/9 설정).
+- **A35** (Mali-G68 r38p1, ssh 코어 0-2, 수정 전 2회 사이에 수정 후 1회. GPU 클럭 표본이 221~949 MHz로 움직여 편차가 크다):
+  OpenCL 2x8 커널 ms — q4_K 19.6·21.5 → 15.5, q5_K 89.7·88.9 → **22.9**(2x4 22.0), q6_K 89.5·80.5 → 40.2(2x4 31.0. 가장 빠른
+  것은 여전히 1x8 24.5). **Vulkan의 2행 레이아웃은 그대로 느리다**(2x8, 그래프당 ms: q4_K 59.9·68.3 → 73.7, q5_K 85.6·87.8 →
+  94.9, q6_K 100·107 → 95.7. 타일 커널 14.8~39.6). 이 수정이 고친 것은 Mali OpenCL 컴파일러의 경우이고, Vulkan 쪽 원인은
+  가르지 않았다. `ameva_qmm_check` 516/516: Vulkan 9/9, OpenCL 9/9 설정.
+- **실모델** (A53, Llama-3.2-1B Q4_K_M, OpenCL, `cl_model.sh` 3회 교대, 프롬프트 349토큰 t/s, `-c 2048 -t 4`, 코어 0-7,
+  커밋 `e3a3af8`의 소스로 빌드한 플러그인 `cedaf25f6bea`): CPU 47.1~47.5, 타일(`ameva_mmq`) 45.8~46.7,
+  `AMEVA_MMQB=q4_K=2x8` 57.3~58.2, `AMEVA_MMQB=2x8`(q4_K·q5_K·q6_K 모두 2x8) **57.8~58.8**. 프롬프트 뒤 1토큰 텍스트는 GPU
+  실행 9회 모두 CPU와 같다. 이 모델은 q6_K의 몫이 작아 타입을 모두 켠 것과 q4_K만 켠 것의 차이가 회차 편차 안이다.
+  토큰 생성은 경로가 같아 변화가 없다(64토큰 10.9~11.1, CPU 13.5~13.8. 64토큰 텍스트가 CPU와 다른 것은 블록 커널을 끈
+  구성에서도 같다). KLD는 다시 재지 않았다(커널의 산술은 수정 전과 같다).
+- **실모델, A35** (Mali-G68 r38p1, 같은 모델·프롬프트·옵션, 3회 교대, 플러그인 `7f8501322218`. **ssh 코어 0-2**라 CPU 값은
+  A55 코어 셋의 것이다): 프롬프트 t/s — CPU 16.8~17.0, **Vulkan(`ameva_mmq`) 82.2~82.5**, OpenCL 타일 39.6~40.4,
+  `AMEVA_MMQB=q4_K=2x8` 55.1~61.1, `AMEVA_MMQB=2x8` 59.1~67.3(매 회차 q4_K만 켠 것보다 7~10 % 빠르다). 프롬프트 뒤 1토큰
+  텍스트는 GPU 실행 12회 모두 CPU와 같다. **A35에서는 블록 커널을 켠 OpenCL도 Vulkan 타일보다 느리다**(0.72~0.82배).
+  토큰 생성 64토큰 t/s — CPU 4.5~4.6, Vulkan 11.8~12.0, OpenCL 13.9~14.0(세 OpenCL 구성 모두).
+  64토큰 텍스트는 Vulkan·OpenCL 모두 CPU와 70번째 바이트에서 갈린다(A53 OpenCL에서 본 것과 같은 자리이고 두 텍스트 모두
+  정상 문장이다. 원인은 재지 않았다).
+- **토큰 생성용 블록 커널** `shaders/ameva_mmvqb.comp`(`gemv_q4k_i8_blk`의 GLSL판. q4_K·q5_K·q6_K, 그룹당 가중치행 1·2개,
+  `ameva_mmvq`와 같은 바인딩·푸시 상수·작업 분할이고 레인은 256원소 블록 단위로 건너뛴다). SPIR-V로 컴파일되고 OpenCL C로
+  번역된다. **플러그인에는 넣지 않았다.** A53에서 제품 안의 `ameva_mmvq` 자리에 텍스트를 바꿔 끼워 잰 결과(커널 ms,
+  백엔드가 재서 고른 레이아웃 → 이 커널의 가장 빠른 행x레인):
+
+  | 모양 (N x K) | 기존(고른 레이아웃) | 블록 커널 |
+  | :--- | :--- | :--- |
+  | q4_K 2048x2048 | 0.25~0.26 | 0.25~0.26 (1x1, 1x2) |
+  | q4_K 8192x2048 | 0.97 | 0.91 (1x2), 0.95~0.96 (1x1) |
+  | q4_K 2048x8192 | 1.00~1.02 | 1.11 (2x16), 1.19~1.25 (1x4~1x16), 1.94~2.00 (1x1) |
+  | q5_K 8192x2048 | 1.50 | 1.80 (1x1) |
+  | q6_K 32064x2048 | 5.10 | 11.4 (1x8), 17.7 (1x1) |
+
+  - 같은 작업 분할(행당 호출 하나)의 단위별 스케일 커널(`ameva_mmvq` 1x1, 0.74 ms)보다는 3배 빠르다(프로토타입 벤치와 같은
+    방향). 그러나 **백엔드가 고르는 기존 레이아웃을 넘는 모양이 없다.** 기존 레이아웃이 이미 가중치를 캐시 밖 메모리의
+    속도로 읽고 있다(9.4 MB를 0.97 ms, 53.9 MB를 5.1 ms: 9.7~10.6 GB/s). 블록 형태가 줄이는 것은 캐시에 있는 활성값과
+    스케일의 로드다. q6_K가 2.2~3.5배 느린 원인은 보지 않았다.
+  - 결과는 f32 곱과만 비교했다(출력 RMS 대비 최대 차 1.3e-2~1.9e-2, `ameva_mmvq`는 1.2e-2~1.7e-2). 블록 단위로 반올림한
+    기준값과의 비교(`ameva_qmm_check`)는 플러그인에 넣어야 가능하므로 하지 않았다. S21에서 이득이 재어지면 그때 넣는다.
+
+### 단계 C — 실모델 측정과 판정
+
+- `verify_kv.sh`와 같은 틀로 S21·A53에서 CPU 대비 프롬프트 t/s와 KL 발산, `test-backend-ops`(OpenCL 백엔드), 응답 텍스트를 잰다.
+- 판정: 프롬프트 t/s가 CPU를 넘고 `kld_mean <= 0.01`. A53 기준선은 1B 프롬프트 GPU(Vulkan) 27 대 CPU 47~48 t/s이므로, 블록 정수 타일의 커널 2.9배가 그래프 t/s로 얼마나 전달되는지가 관건이다.
+- 토큰 생성 경로의 OpenCL 실행은 이 결과를 본 뒤에 정한다.
+
+## 4. 위험
+
+- **그래프 오버헤드가 커널 이득을 먹는다**: 커널이 2.9배라도 제출·동기화·타입 변환이 그래프 시간을 지배하면 t/s 이득이 작을 수 있다. 단계 A의 수학이 통과해도 단계 B의 t/s가 CPU를 못 넘을 수 있다. 그 경우 정직하게 "커널은 빠르나 그래프는 못 넘었다"로 보고한다.
+- **레거시 OpenCL 엔진의 적합성**: `libamuda`가 AC 계약(버퍼 수명, 비동기 디스패치, 파이프라인 캐시)을 만족하지 못하면 OpenCL 백엔드를 새로 써야 하고 범위가 커진다. 단계 B 착수 전에 이 적합성부터 확인한다.
+- **기기별 커널 조합**: 작업 항목당 행 수·로컬 크기가 기기마다 다르고 3배까지 차이 난다(선행 문서 4.3). GEMV 레이아웃처럼 기기에서 측정해 고르는 선택 단계가 백엔드에 필요하다.
+- **드라이버별 수치**: OpenCL 커널의 변환·반올림이 드라이버마다 다를 수 있다. `ameva_qmm_check`에 해당하는 OpenCL 정합성 검사를 두 기기에서 돌린다.
+
+## 5. 다음 한 걸음
+
+단계 A부터 착수한다(OpenCL 없이, 위험 가장 낮고 안 B 전체의 전제를 가른다). 구체적으로:
+- 블록 단위 활성 양자화를 기존 경로에 선택 기능으로 추가하고 `ameva_llm_parity`로 S21·A53에서 CPU 대비 KL 발산 측정.
+- 결과가 기준 안이면 단계 B(레거시 OpenCL 엔진 적합성 확인 → AC OpenCL 백엔드 → 프롬프트 연산 이식)로 넘어간다.
+
+이 설계는 2.8.1 게시가 끝난 뒤 본격 구현한다(사용자 결정: 2.8.1 우선).
+
+#### q5_0 prompt product on OpenCL is 2.5x slower than the same GLSL on Vulkan (Galaxy A35, 2026-11-18)
+
+Candidate backend `c0dbdca`, Qwen2.5-0.5B Q4_K_M, a 1500-byte prompt, `AMEVA_PROFILE=2`, warm program cache (a cold
+cache puts the driver's first-dispatch compile into the average: SWIGLU, ADD and ROPE read 10x too slow in the first
+run and normal in the second and third; read the second run).
+
+- GPU time per dispatch, Vulkan against OpenCL: `ameva_mmq` q5_0 4864x896 7.85 ms against 20.0-20.7 ms (92 dispatches,
+  55 % of the OpenCL GPU time) and 896x896 1.55 against 3.4-3.7 ms (10 %). q6_K and q4_K on OpenCL (`ameva_mmqb`) are
+  13.5 and 9.1 ms against 10.4 and 7.5 ms of Vulkan `ameva_mmq`, 1.2-1.3x slower. Attention is 3x faster on OpenCL
+  (4.8 against 14.3 ms per dispatch).
+- The kernel's resources do not show a private-memory problem: `ameva_mmq_q5_0` private 128 bytes, local memory 4608
+  bytes (`AMEVA_CL_KERNEL_INFO`).
+- Bisection of the translated text with `AMEVA_CL_SOURCE_DIR` (4864x896, microseconds; results of the variants are wrong
+  on purpose): original 19,414-20,300; no barriers 24,096 (slower); no accumulation loop 9,843; no decode 10,698;
+  `#pragma unroll` on the six constant-bound loops 21,978; `arm_dot_acc` instead of `arm_dot` + add 23,426; both
+  20,761. The decode and the accumulation each take about half, each alone as long as Vulkan's whole kernel; barriers,
+  loop unrolling and the dot form are not the cause. Data: `ameva-runtime docs/handover/evidence/20261118-stage2-rc290/q5_0_opencl_a35/`.
+- What this rules out: a "block-integer" q5_0 kernel. The ameva_mmqb trick needs the weight scale to be a small integer
+  per 32 weights under one f16 per 256-weight block (q4_K, q5_K, q6_K); q5_0 has an f16 scale per 32 weights.
+- What is left: the whole kernel is slow on the OpenCL compiler (decode stores and accumulation loads through `__local`
+  with component-wise stores, 128 invocations, two barriers per 32-weight unit), or a kernel with another structure
+  (no shared memory, more activation rows per invocation to amortise the decode) is needed. The latter changes the
+  host geometry and is a new kernel family (about 49 places in ggml-ameva.cpp for ameva_mmqb). Estimated, not
+  measured: q5_0 at Vulkan's speed would take the OpenCL GPU time of this prompt from about 3.3 s to about 2.0 s, below
+  Vulkan's 2.4 s.
+
+#### q5_0 and q8_0 prompt kernels as hand-written OpenCL C: integrated (Galaxy A35, 2026-11-19)
+
+`shaders/opencl/ameva_mmq_q5_0.cl` and `ameva_mmq_q8_0.cl` replace the translation of `ameva_mmq.comp` in the OpenCL
+tables (commit `a5c0141`). The SPIR-V is still compiled from the GLSL; `build_ameva_kernels.py` (`cl_override`) refuses a
+file whose bindings, push-constant words or work-group size differ from the GLSL source. Same algorithm and arithmetic
+as the GLSL; the structure differs where the Mali OpenCL compiler loses (no context-by-pointer helpers, no private
+arrays, scalar shared stores, one weight-offset tile and one activation-sum tile fewer). The header holds the two
+replaced entries only: the other 263 text blocks were compared byte for byte with `HEAD`. The build phones with
+glslang 16.3.0 (S21, S25) did not answer; regenerating the header with the script reads the same two files and must
+reproduce them.
+
+Measured on the Galaxy A35 with the rebuilt plugin (built on the phone by `build_ggml_ameva.sh`; it has no patchelf,
+so `build_runtime_backend.sh` stops there and the same test commands were run by hand), cores 0-2, warm program cache,
+Qwen2.5-0.5B Q4_K_M, 1500-byte prompt, five rounds rotated (new / previous backend / Vulkan), GPU time per dispatch:
+
+| kernel (A35) | previous OpenCL | new OpenCL | Vulkan |
+| :--- | ---: | ---: | ---: |
+| q5_0 4864x896 | 20.0-23.7 ms | 9.5-9.8 ms | 7.74-7.83 ms |
+| q5_0 896x896 | 3.52-4.20 ms | 1.98-2.01 ms | 1.50 ms |
+| q5_0 128x896 | 0.64-0.69 ms | 0.53-0.54 ms | 0.34 ms |
+| q8_0 128x896 | 0.67-0.74 ms | 0.56-0.57 ms | 0.34 ms |
+| prompt t/s | 103-118 | 179.7-183.1 | 174.8-176.0 |
+
+Correctness on the A35: `ameva_qmm_check` 516/516; `parity_long` (ctx 256): kld_mean 6.414e-3 (batch) and 4.985e-3
+(one token at a time), the same digits as the previous backend, greedy text identical to the CPU for 64 of 64 tokens.
+Not measured: the Galaxy A53 (the previous prototype run gave only 1.2x there; the phone did not answer today), S21,
+temperature, `test-backend-ops`, and q4_0, q4_1, q5_1, iq4_nl. The q8_0 128-row product is still 1.7x slower than
+Vulkan. Grade B (five rounds, no temperature gate).

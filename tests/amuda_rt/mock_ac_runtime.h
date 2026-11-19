@@ -1,3 +1,7 @@
+/**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
+ */
 /* TEST DOUBLE state, see mock_ac_runtime.c */
 #ifndef MOCK_AC_RUNTIME_H
 #define MOCK_AC_RUNTIME_H

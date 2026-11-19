@@ -1,0 +1,7 @@
+#version 450
+// disp_bench: one invocation increments one word (a tiny dependent write, so a barrier is meaningful)
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer B { uint b[]; };
+void main() {
+    if (gl_GlobalInvocationID.x == 0u) b[0] += 1u;
+}

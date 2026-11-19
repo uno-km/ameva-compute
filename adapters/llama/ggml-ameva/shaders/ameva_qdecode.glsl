@@ -1,4 +1,4 @@
-// AMEVA repacked-weight decoder (ggml-ameva-repack.h), shared by ameva_qmv and ameva_qgemm. Included after
+// AMEVA repacked-weight decoder (ggml-ameva-repack.h), shared by ameva_qmv, ameva_qgemm and ameva_conv. Included after
 // ameva_common.glsl, with exactly one -DTYPE_<T> defined. Declares bindings 0..2:
 //   binding 0: Q (QVEC elements), binding 1: H (HVEC elements; any range when the type has no high bits),
 //   binding 2: S as 32-bit words
@@ -6,10 +6,18 @@
 // decode_i8() gives the same unit as 32 small integers v (int8 bytes) and per 16-weight half a scale and an offset,
 // weight k = sc[k / 16] * v[k] + mc[k / 16], for integer dot products (ameva_mmq).
 // qdecode_init() must be called by every invocation at the start of main (it contains a barrier for the IQ4 table).
+// TYPE_F16 and TYPE_F32 (convolution kernels, exact mode): a unit is 32 f16 or f32 values in weight order in Q (64 or
+// 128 bytes), H and S are not read, and there is no decode_i8().
 
 #if defined(TYPE_Q8_0)
 #define QVEC uvec4
 #define QPER 2u // Q vector elements per unit
+#elif defined(TYPE_F16)
+#define QVEC uvec4
+#define QPER 4u
+#elif defined(TYPE_F32)
+#define QVEC uvec4
+#define QPER 8u
 #elif defined(TYPE_Q2_K) || defined(TYPE_Q3_K)
 #define QVEC uvec2
 #define QPER 1u
@@ -26,6 +34,11 @@
 layout(std430, binding = 0) readonly buffer BufQ { QVEC qv[]; };
 layout(std430, binding = 1) readonly buffer BufH { HVEC hv[]; };
 layout(std430, binding = 2) readonly buffer BufS { uint sw[]; };
+#if (defined(TYPE_Q4_K) || defined(TYPE_Q5_K)) && !defined(AMEVA_OPENCL)
+// the same binding as 16-byte vectors: a q4_K / q5_K block's S fields (16 bytes) in one load when they start at a
+// multiple of 16 bytes (Vulkan allows several variables at one binding; the OpenCL translation keeps the word loads)
+layout(std430, binding = 2) readonly buffer BufS4 { uvec4 sw4[]; };
+#endif
 
 uint s_last; // last word of the S binding: a clamped word only feeds bytes outside the field being read
 uint sw_at(uint wi) { return sw[min(wi, s_last)]; }
@@ -37,6 +50,17 @@ uint sld32(uint a) {
 }
 uint sld16(uint a) { return (sw_at(a >> 2u) >> ((a & 2u) * 8u)) & 0xFFFFu; }
 float sldh(uint a) { return ameva_h2f(sld16(a)); }
+#if defined(TYPE_Q4_K) || defined(TYPE_Q5_K)
+// the 16 bytes of S fields of a q4_K / q5_K block at byte address a (even): d | dmin << 16, then scales[12].
+// 2026-11-08, Adreno 650 (Galaxy S20): the five to eight word loads of these fields per 32-weight unit, each lane of a
+// warp at another row, held the q4_K GEMV at 11-15 GB/s against 24 GB/s for q6_K (two S loads per unit).
+uvec4 s_blk16(uint a) {
+#if !defined(AMEVA_OPENCL)
+    if ((a & 15u) == 0u) return sw4[a >> 4u]; // uniform: a block's fields are 16-byte aligned when s_off is
+#endif
+    return uvec4(sld32(a), sld32(a + 4u), sld32(a + 8u), sld32(a + 12u));
+}
+#endif
 
 vec4 u8x4(uint w) { return vec4(uvec4(w, w >> 8u, w >> 16u, w >> 24u) & 0xFFu); }
 vec4 s8x4(uint w) {
@@ -60,7 +84,7 @@ vec4 kv4(uint q) { return vec4(s_kv[q & 0xFu], s_kv[(q >> 8u) & 0xFu], s_kv[(q >
 #endif
 
 #if defined(TYPE_Q4_0) || defined(TYPE_Q4_1) || defined(TYPE_Q5_0) || defined(TYPE_Q5_1) || defined(TYPE_Q8_0) || \
-    defined(TYPE_IQ4_NL)
+    defined(TYPE_IQ4_NL) || defined(TYPE_F16) || defined(TYPE_F32)
 #define BLOCK_ELEMS 32u
 #else
 #define BLOCK_ELEMS 256u
@@ -80,10 +104,24 @@ vec4 kv4(uint q) { return vec4(s_kv[q & 0xFu], s_kv[(q >> 8u) & 0xFu], s_kv[(q >
 #define SB 18u
 #elif defined(TYPE_IQ4_XS)
 #define SB 8u
+#elif defined(TYPE_F16) || defined(TYPE_F32)
+#define SB 0u
 #else
 #error "define one TYPE_<T>"
 #endif
 #define UPB (BLOCK_ELEMS / 32u)
+
+#if defined(TYPE_F16)
+// Four IEEE binary16 -> binary32 without branches, with the values of ameva_h2f (exact for every input, subnormals
+// included): exponent 0 is m * 2^-24, exponent 31 becomes 255, the others are rebiased by 112.
+vec4 h2f4(uvec4 h) {
+    const uvec4 e = (h >> 10u) & 0x1Fu;
+    const uvec4 m = h & 0x3FFu;
+    const uvec4 e32 = e + 112u + 112u * uvec4(equal(e, uvec4(31u)));
+    const vec4 mag = mix(uintBitsToFloat((e32 << 23u) | (m << 13u)), vec4(m) * 5.9604644775390625e-8, equal(e, uvec4(0u)));
+    return uintBitsToFloat(floatBitsToUint(mag) | ((h & 0x8000u) << 16u));
+}
+#endif
 
 // One unit: qi / hi = its Q / H vector index, sb = byte address of its block's S fields, j = unit inside the block.
 // w[i] = weights 4i..4i+3, w[i + 4] = weights 16+4i..16+4i+3 (i = 0..3).
@@ -183,8 +221,9 @@ void decode(uint qi, uint hi, uint sb, uint j, out vec4 w[8]) {
 #elif defined(TYPE_Q4_K) || defined(TYPE_Q5_K)
     // S: d@0 dmin@2 scales[12]@4 (get_scale_min_k4(j)). y = d * sc * q - dmin * m
     const uvec4 q = qv[qi];
-    const float d = sldh(sb), dmin = sldh(sb + 2u);
-    const uint s0 = sld32(sb + 4u), s1 = sld32(sb + 8u), s2 = sld32(sb + 12u);
+    const uvec4 sb4 = s_blk16(sb);
+    const float d = ameva_h2f(sb4.x & 0xFFFFu), dmin = ameva_h2f(sb4.x >> 16u);
+    const uint s0 = sb4.y, s1 = sb4.z, s2 = sb4.w;
     // get_scale_min_k4 without a branch (the lanes of a row hold different j)
     const uint k = 8u * (j & 3u);
     const uint b0 = (s0 >> k) & 0xFFu, b1 = (s1 >> k) & 0xFFu, b2 = (s2 >> k) & 0xFFu;
@@ -217,6 +256,24 @@ void decode(uint qi, uint hi, uint sb, uint j, out vec4 w[8]) {
         w[i] = (u8x4((q[i] & 0x0F0F0F0Fu) | (spread2((h.x >> (8u * i)) & 0xFFu) << 4u)) - 32.0) * dl0;
         w[i + 4u] = (u8x4(((q[i] >> 4u) & 0x0F0F0F0Fu) | (spread2((h.y >> (8u * i)) & 0xFFu) << 4u)) - 32.0) * dl1;
     }
+#elif defined(TYPE_F16)
+    // Q: 32 f16, weight k in half k % 2 of word k / 2. y = the f16 value
+    [[unroll]] for (uint i = 0u; i < 4u; ++i) {
+        const uvec4 q = qv[qi + i];
+#if defined(F16_UNPACK)
+        // kernel tuning: the built-in conversion, which an implementation may round to zero for f16 subnormals
+        w[2u * i] = vec4(unpackHalf2x16(q.x), unpackHalf2x16(q.y));
+        w[2u * i + 1u] = vec4(unpackHalf2x16(q.z), unpackHalf2x16(q.w));
+#else
+        w[2u * i] = h2f4(uvec4(q.x & 0xFFFFu, q.x >> 16u, q.y & 0xFFFFu, q.y >> 16u));
+        w[2u * i + 1u] = h2f4(uvec4(q.z & 0xFFFFu, q.z >> 16u, q.w & 0xFFFFu, q.w >> 16u));
+#endif
+    }
+#elif defined(TYPE_F32)
+    // Q: 32 f32, weight k in word k
+    [[unroll]] for (uint i = 0u; i < 8u; ++i) {
+        w[i] = uintBitsToFloat(qv[qi + i]);
+    }
 #endif
 }
 
@@ -236,6 +293,7 @@ uint kv_bytes4(uint q) {
 // One unit as int8: byte k % 4 of v[k / 4] is v_k (unsigned 0..63 or, for q8_0 and the IQ4 types, signed), and
 // weight k = sc[h] * v_k + mc[h] with h = k / 16. The scales are those of decode(); the constant offsets of the
 // types without a stored minimum (-8 d, -16 d, -4 dl, -32 dl) move into mc, so v stays non-negative.
+#if !defined(TYPE_F16) && !defined(TYPE_F32)
 void decode_i8(uint qi, uint hi, uint sb, uint j, out uint v[8], out vec2 sc, out vec2 mc) {
 #if defined(TYPE_Q4_0)
     const uvec4 q = qv[qi];
@@ -324,8 +382,9 @@ void decode_i8(uint qi, uint hi, uint sb, uint j, out uint v[8], out vec2 sc, ou
     mc = vec2(-4.0 * dl0, -4.0 * dl1);
 #elif defined(TYPE_Q4_K) || defined(TYPE_Q5_K)
     const uvec4 q = qv[qi];
-    const float d = sldh(sb), dmin = sldh(sb + 2u);
-    const uint s0 = sld32(sb + 4u), s1 = sld32(sb + 8u), s2 = sld32(sb + 12u);
+    const uvec4 sb4 = s_blk16(sb);
+    const float d = ameva_h2f(sb4.x & 0xFFFFu), dmin = ameva_h2f(sb4.x >> 16u);
+    const uint s0 = sb4.y, s1 = sb4.z, s2 = sb4.w;
     const uint k = 8u * (j & 3u);
     const uint b0 = (s0 >> k) & 0xFFu, b1 = (s1 >> k) & 0xFFu, b2 = (s2 >> k) & 0xFFu;
     const bool lo = j < 4u;
@@ -360,6 +419,7 @@ void decode_i8(uint qi, uint hi, uint sb, uint j, out uint v[8], out vec2 sc, ou
     mc = vec2(-32.0 * dl0, -32.0 * dl1);
 #endif
 }
+#endif // !TYPE_F16 && !TYPE_F32
 
 void qdecode_init(uint tid) {
     s_last = uint(sw.length()) - 1u;

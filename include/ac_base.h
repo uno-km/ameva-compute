@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
+ */
+/**
  * @file ac_base.h
  * @brief AMUDA Base Types, Status Codes, and ABI Versioning
  *
@@ -22,10 +26,24 @@ extern "C" {
  * @brief AMUDA ABI Version Specification (Major.Minor.Patch -> 0xMMNNPP00)
  */
 #define AC_ABI_VERSION_MAJOR 2u
-#define AC_ABI_VERSION_MINOR 1u
+#define AC_ABI_VERSION_MINOR 3u
 #define AC_ABI_VERSION_PATCH 0u
 
-#define AC_ABI_VERSION 0x00020100u
+#define AC_ABI_VERSION 0x00020300u
+
+/**
+ * @brief Oldest minor version of this major that the runtime still serves (docs/abi/AC_RUNTIME_ABI.md).
+ *
+ * A caller passes the AC_ABI_VERSION of the header it was built with. The runtime accepts it when the major version
+ * is its own and the minor version lies in [AC_ABI_MIN_MINOR, AC_ABI_VERSION_MINOR]: a minor version only adds
+ * functions, flags, enum values and fields appended to structs that say so, so an older caller keeps working with a
+ * newer runtime. A newer caller (minor above the runtime's), another major version, a minor below the floor (2.0:
+ * descriptor layouts changed in 2.1) and any value with bits in the low byte are refused with AC_ERR_INVALID_ARGUMENT.
+ */
+#define AC_ABI_MIN_MINOR 1u
+#define AC_ABI_COMPATIBLE(v) \
+    ((((v) >> 16) == AC_ABI_VERSION_MAJOR) && ((((v) >> 8) & 0xFFu) >= AC_ABI_MIN_MINOR) && \
+     ((((v) >> 8) & 0xFFu) <= AC_ABI_VERSION_MINOR) && (((v) & 0xFFu) == 0u))
 
 /**
  * @brief Supported Hardware Compute Backend Targets
@@ -34,6 +52,7 @@ typedef uint32_t AcBackendKind;
 
 #define AC_BACKEND_UNKNOWN ((AcBackendKind)0u)
 #define AC_BACKEND_VULKAN  ((AcBackendKind)1u)
+#define AC_BACKEND_OPENCL  ((AcBackendKind)2u) /* AMUDA 2.3: OpenCL 2.0+ with coarse-grained SVM (ac_runtime.h) */
 
 /**
  * @brief Specialization Constant Types
@@ -84,7 +103,8 @@ typedef enum {
     AC_ERR_FEATURE_NOT_SUPPORTED        = -108,
     AC_ERR_INVALID_SHAPE                = -109,
     AC_ERR_ABI_MISMATCH                 = -110,
-    
+    AC_ERR_BACKEND_UNAVAILABLE          = -111, /* context creation refused for this host process (ac_security_guard) */
+
     /* Memory Management Errors (200-299) */
     AC_ERR_OUT_OF_HOST_MEMORY           = -201,
     AC_ERR_OUT_OF_DEVICE_MEMORY         = -202,

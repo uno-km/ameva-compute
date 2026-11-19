@@ -1,4 +1,8 @@
-/* SPDX-License-Identifier: Apache-2.0 */
+/**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
+ */
+/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial */
 /* Host-plumbing tests for amuda_rt against the ac_runtime TEST DOUBLE (no GPU, nothing executes). */
 #include <math.h>
 #include <stdlib.h>

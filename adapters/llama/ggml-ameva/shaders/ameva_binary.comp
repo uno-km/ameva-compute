@@ -4,13 +4,33 @@
 //   op: 0 ADD, 1 SUB, 2 MUL, 3 DIV
 // src0 and dst have the dst shape; src1 repeats along every dimension where its extent is smaller. Dimension 0 is
 // contiguous for all three tensors (the host checks nb[0] == 4); higher strides are free.
+//
+// -DF16 (op kernel binary_f16): src0 and dst are f16 with the dst shape, src1 is f32 (op & 4 == 0) or f16 (op & 4 != 0);
+// every offset and stride counts elements of its own tensor's type. stable-diffusion.cpp merges a LoRA into the
+// weights of an f16 model with ggml_add_inplace(weight, diff), so src0 and dst may be the same range: an invocation
+// reads its element before it writes it and no other invocation touches it. The values are converted as the CPU
+// backend does (exact f16 -> f32, the op in f32, f32 -> f16 to nearest even), and the two halves of a 32-bit word,
+// which belong to different invocations, are stored with atomics (AMEVA_STORE_F16).
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 #include "ameva_common.glsl"
 
 layout(std430, binding = 0) readonly buffer A { uint a[]; };
 layout(std430, binding = 1) readonly buffer B { uint b[]; };
-layout(std430, binding = 2) writeonly buffer D { uint d[]; };
+#ifdef F16
+#define D_ACCESS // read and written: the f16 stores are atomics on half words
+#define LOAD_A(i) AMEVA_LOAD_F16(a, i)
+#define LOAD_B(i) ((pc.op & 4u) != 0u ? AMEVA_LOAD_F16(b, i) : uintBitsToFloat(b[i]))
+#define STORE_D(i, v) AMEVA_STORE_F16(d, i, v)
+#define OP (pc.op & 3u)
+#else
+#define D_ACCESS writeonly
+#define LOAD_A(i) uintBitsToFloat(a[i])
+#define LOAD_B(i) uintBitsToFloat(b[i])
+#define STORE_D(i, v) d[i] = floatBitsToUint(v)
+#define OP pc.op
+#endif
+layout(std430, binding = 2) D_ACCESS buffer D { uint d[]; };
 
 layout(push_constant) uniform PushConstants {
     uint ne0, ne1, ne2, ne3;
@@ -31,18 +51,18 @@ void main() {
     t /= pc.ne1;
     const uint i2 = t % pc.ne2;
     const uint i3 = t / pc.ne2;
-    const float x = uintBitsToFloat(a[pc.a_off + i0 + i1 * pc.a_s1 + i2 * pc.a_s2 + i3 * pc.a_s3]);
-    const float y = uintBitsToFloat(b[pc.b_off + (i0 % pc.b_ne0) + (i1 % pc.b_ne1) * pc.b_s1 + (i2 % pc.b_ne2) * pc.b_s2 +
-                                      (i3 % pc.b_ne3) * pc.b_s3]);
+    const float x = LOAD_A(pc.a_off + i0 + i1 * pc.a_s1 + i2 * pc.a_s2 + i3 * pc.a_s3);
+    const float y = LOAD_B(pc.b_off + (i0 % pc.b_ne0) + (i1 % pc.b_ne1) * pc.b_s1 + (i2 % pc.b_ne2) * pc.b_s2 +
+                           (i3 % pc.b_ne3) * pc.b_s3);
     float r;
-    if (pc.op == 0u) {
+    if (OP == 0u) {
         r = x + y;
-    } else if (pc.op == 1u) {
+    } else if (OP == 1u) {
         r = x - y;
-    } else if (pc.op == 2u) {
+    } else if (OP == 2u) {
         r = x * y;
     } else {
         r = x / y;
     }
-    d[pc.d_off + i0 + i1 * pc.d_s1 + i2 * pc.d_s2 + i3 * pc.d_s3] = floatBitsToUint(r);
+    STORE_D(pc.d_off + i0 + i1 * pc.d_s1 + i2 * pc.d_s2 + i3 * pc.d_s3, r);
 }

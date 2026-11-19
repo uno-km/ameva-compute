@@ -1,0 +1,72 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// AMEVA SOFT_MAX, f32, per row of ne0 elements (ggml_compute_forward_soft_max_f32 without ALiBi bias and sinks):
+// x = a * scale (+ mask), y = exp(x - max(x)) / sum(exp(x - max(x))). The mask (mask: 1 f32, 2 f16; offsets and
+// strides in elements of its type) has the row length and row count of a and is repeated over dimensions 2 and 3.
+// One workgroup per row; the maximum and the sum are reduced in shared memory (ggml accumulates the sum in double
+// on the CPU, the f32 tree reduction differs from it by rounding only). An invocation writes only the elements it
+// read itself and only after the reductions, so the result may be stored in place of the source.
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+#include "ameva_common.glsl"
+
+layout(std430, binding = 0) readonly buffer A { uint a[]; };
+layout(std430, binding = 1) writeonly buffer D { uint d[]; };
+layout(std430, binding = 2) readonly buffer M { uint m[]; }; // mask (any range when mask == 0)
+
+layout(push_constant) uniform PushConstants {
+    uint ne0, ne1, ne2, nrows;
+    uint a_off, a_s1, a_s2, a_s3;
+    uint d_off, d_s1, d_s2, d_s3;
+    uint scale; // float bits
+    uint mask, m_off, m_s1;
+    uint m_s2, m_s3, m_ne2, m_ne3;
+} pc;
+
+shared float red[128];
+
+float load_x(uint ab, uint mb, uint k) {
+    float x = uintBitsToFloat(a[ab + k]) * uintBitsToFloat(pc.scale);
+    if (pc.mask == 1u) x += uintBitsToFloat(m[mb + k]);
+    else if (pc.mask == 2u) x += AMEVA_LOAD_F16(m, mb + k);
+    return x;
+}
+
+// exp(t) for t <= 0; 0 below the smallest f32 (and for -inf, whose exp the device need not define)
+float exp_neg(float t) {
+    return t > -104.0 ? exp(t) : 0.0;
+}
+
+void main() {
+    const uint row = ameva_workgroup_id();
+    if (row >= pc.nrows) return; // uniform across the workgroup
+    const uint tid = gl_LocalInvocationID.x;
+    const uint i1 = row % pc.ne1;
+    const uint i2 = (row / pc.ne1) % pc.ne2;
+    const uint i3 = row / (pc.ne1 * pc.ne2);
+    const uint ab = pc.a_off + i1 * pc.a_s1 + i2 * pc.a_s2 + i3 * pc.a_s3;
+    const uint db = pc.d_off + i1 * pc.d_s1 + i2 * pc.d_s2 + i3 * pc.d_s3;
+    const uint mb = pc.m_off + i1 * pc.m_s1 + (i2 % pc.m_ne2) * pc.m_s2 + (i3 % pc.m_ne3) * pc.m_s3;
+    float mx = uintBitsToFloat(0xFF800000u); // -inf
+    for (uint k = tid; k < pc.ne0; k += 128u) mx = max(mx, load_x(ab, mb, k));
+    red[tid] = mx;
+    barrier();
+    for (uint st = 64u; st > 0u; st >>= 1u) {
+        if (tid < st) red[tid] = max(red[tid], red[tid + st]);
+        barrier();
+    }
+    const float row_max = red[0];
+    barrier(); // every invocation has read the maximum before red is written again
+    float s = 0.0;
+    for (uint k = tid; k < pc.ne0; k += 128u) s += exp_neg(load_x(ab, mb, k) - row_max);
+    red[tid] = s;
+    barrier();
+    for (uint st = 64u; st > 0u; st >>= 1u) {
+        if (tid < st) red[tid] += red[tid + st];
+        barrier();
+    }
+    const float inv = 1.0 / red[0];
+    for (uint k = tid; k < pc.ne0; k += 128u) {
+        d[db + k] = floatBitsToUint(exp_neg(load_x(ab, mb, k) - row_max) * inv);
+    }
+}

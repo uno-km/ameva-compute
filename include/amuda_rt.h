@@ -1,4 +1,8 @@
-/* SPDX-License-Identifier: Apache-2.0 */
+/**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
+ */
+/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial */
 /**
  * @file amuda_rt.h
  * @brief AMUDA CUDA-like runtime (POC v0.1)

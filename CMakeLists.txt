@@ -108,14 +108,23 @@ set(AC_VK_SOURCES
     src/backend/vulkan/ac_vk_dispatch.cpp
     src/backend/vulkan/ac_vk_event.cpp
     src/backend/vulkan/ac_vk_loader.cpp
+    src/backend/opencl/ac_cl_backend.cpp
     src/runtime/ac_runtime.cpp
     src/runtime/ac_error.cpp
+    src/runtime/ac_security_guard.c
 )
+# The OpenCL backend (AC_BACKEND_OPENCL) opens the vendor driver with dlopen; it needs the Khronos headers only.
+find_path(AC_OPENCL_INCLUDE_DIR CL/cl.h PATHS ${CMAKE_CURRENT_SOURCE_DIR}/include)
+if(NOT AC_OPENCL_INCLUDE_DIR)
+    message(FATAL_ERROR "ac_runtime: OpenCL headers (CL/cl.h) not found; install the Khronos OpenCL headers "
+                        "(Termux: pkg install opencl-headers) or set AC_OPENCL_INCLUDE_DIR")
+endif()
 
 add_library(ac_vulkan_core STATIC ${AC_VK_SOURCES})
 target_include_directories(ac_vulkan_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
+target_include_directories(ac_vulkan_core PRIVATE ${AC_OPENCL_INCLUDE_DIR})
 if(UNIX AND NOT APPLE)
     target_link_libraries(ac_vulkan_core vulkan dl m)
 endif()
@@ -148,6 +157,7 @@ target_include_directories(ac_runtime PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
+target_include_directories(ac_runtime PRIVATE ${AC_OPENCL_INCLUDE_DIR})
 if(MSVC)
     set_target_properties(ac_runtime PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
 elseif(UNIX AND NOT APPLE)
@@ -395,6 +405,21 @@ if(AMEVA_BUILD_VISION_NCNN_TESTS)
         add_test(NAME vision_pointwise_conv_relu COMMAND test_vision_pointwise_conv_relu)
     endif()
 endif()
+
+# =============================================================================
+# AMUDA Modality Adapters (Isolated Modules - Default OFF)
+# =============================================================================
+option(AC_BUILD_ADAPTER_BITNET "Build isolated BitNet GPU adapter" OFF)
+option(AC_BUILD_ADAPTER_VISION "Build isolated Vision GPU adapter" OFF)
+
+if(AC_BUILD_ADAPTER_BITNET)
+    add_subdirectory(adapters/bitnet)
+endif()
+
+if(AC_BUILD_ADAPTER_VISION)
+    add_subdirectory(adapters/vision)
+endif()
+
 
 
 

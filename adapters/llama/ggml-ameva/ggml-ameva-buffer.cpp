@@ -1,6 +1,11 @@
+/**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
+ */
 #include "ggml-ameva.h"
 #include "ggml-ameva-impl.h"
 #include "ggml-ameva-repack.h"
+#include "ggml-ameva-repack-cache.h"
 #include "ggml-backend-impl.h"
 #include "ac_runtime.h"
 
@@ -10,6 +15,13 @@
 #include <algorithm>
 #include <cstdint>
 #include <vector>
+#include <atomic>
+#include <chrono>
+#include <mutex>
+#if defined(__linux__)
+#include <time.h>
+#include <unistd.h>
+#endif
 
 void ameva_increment_buffer_create_count(void);
 void ameva_increment_buffer_destroy_count(void);
@@ -48,6 +60,129 @@ bool ameva_repack_all_enabled(void) {
     return ameva_repack_enabled() && ameva_repack_all();
 }
 
+// =============================================================================
+// Load profile (AMEVA_LOAD_PROFILE, see ggml-ameva-impl.h)
+// =============================================================================
+static int load_profile_value(void) {
+    static const int v = [] {
+        const char* e = getenv("AMEVA_LOAD_PROFILE");
+        if (!e || !*e || strcmp(e, "0") == 0) return 0;
+        if (strcmp(e, "1") == 0) return 1;
+        if (strcmp(e, "2") == 0) return 2;
+        GGML_ABORT("ggml-ameva: AMEVA_LOAD_PROFILE must be 0, 1 or 2 (got \"%s\")", e);
+    }();
+    return v;
+}
+
+bool ameva_load_profile_level(void) { return load_profile_value() >= 1; }
+
+static uint64_t steady_ns(void) {
+    return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+static std::atomic<uint64_t> s_load_ns[AMEVA_LOAD_NPHASES];
+static std::atomic<uint64_t> s_load_bytes[AMEVA_LOAD_NPHASES];
+static std::atomic<uint64_t> s_load_calls[AMEVA_LOAD_NPHASES];
+static std::atomic<uint64_t> s_first_graph_ns{0};
+static uint64_t s_profile_t0_ns = 0;  // first profiled event of the process
+
+// Milliseconds from process start (kernel start time, /proc/self/stat field 22) to the steady-clock instant t_ns.
+// -1 when it cannot be determined (not Linux, or /proc unreadable).
+static double since_process_start_ms(uint64_t t_ns) {
+#if defined(__linux__)
+    FILE* f = fopen("/proc/self/stat", "r");
+    if (!f) return -1;
+    char buf[1024];
+    const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    const char* p = strrchr(buf, ')');  // comm may contain spaces; fields restart after the last ')'
+    if (!p) return -1;
+    unsigned long long start_ticks = 0;
+    int field = 2;
+    for (const char* q = p + 1; *q && field < 22; ++q) {
+        if (*q == ' ') {
+            ++field;
+            if (field == 22) start_ticks = strtoull(q + 1, nullptr, 10);
+        }
+    }
+    struct timespec bt, mono;
+    if (clock_gettime(CLOCK_BOOTTIME, &bt) != 0 || clock_gettime(CLOCK_MONOTONIC, &mono) != 0) return -1;
+    const double hz = (double)sysconf(_SC_CLK_TCK);
+    const double boot_now_ms = bt.tv_sec * 1e3 + bt.tv_nsec / 1e6;
+    const double steady_now_ms = (double)steady_ns() / 1e6;
+    const double start_ms = (double)start_ticks * 1e3 / hz;
+    return (boot_now_ms - (steady_now_ms - (double)t_ns / 1e6)) - start_ms;
+#else
+    (void)t_ns;
+    return -1;
+#endif
+}
+
+static void load_profile_report(void) {
+    static const char* const names[AMEVA_LOAD_NPHASES] = {
+        "context", "alloc", "src_touch", "repack_cpu", "mapped_write", "mapped_read", "plain_write",
+        "set_repacked_total", "late_repack_total", "cache_read",
+    };
+    fprintf(stderr, "AMEVA_LOAD level=%d (set_repacked_total and late_repack_total contain the phases inside them)\n",
+            load_profile_value());
+    for (int i = 0; i < AMEVA_LOAD_NPHASES; ++i) {
+        const uint64_t c = s_load_calls[i].load();
+        if (!c) continue;
+        const double ms = (double)s_load_ns[i].load() / 1e6, mib = (double)s_load_bytes[i].load() / (1024.0 * 1024.0);
+        fprintf(stderr, "AMEVA_LOAD phase=%s calls=%llu ms=%.1f MiB=%.1f MiB_per_s=%.1f\n", names[i],
+                (unsigned long long)c, ms, mib, ms > 0 ? mib / (ms / 1e3) : 0.0);
+    }
+    const uint64_t g = s_first_graph_ns.load();
+    if (s_profile_t0_ns) {
+        fprintf(stderr, "AMEVA_LOAD first_event_since_start_ms=%.1f\n", since_process_start_ms(s_profile_t0_ns));
+    }
+    if (g) {
+        fprintf(stderr, "AMEVA_LOAD first_graph_since_start_ms=%.1f\n", since_process_start_ms(g));
+    } else {
+        fprintf(stderr, "AMEVA_LOAD first_graph_since_start_ms=none (no graph reached this backend)\n");
+    }
+}
+
+uint64_t ameva_load_now_ns(void) {
+    if (!ameva_load_profile_level()) return 0;
+    static std::once_flag once;
+    std::call_once(once, [] {
+        s_profile_t0_ns = steady_ns();
+        std::atexit(load_profile_report);
+    });
+    return steady_ns();
+}
+
+void ameva_load_add(enum AmevaLoadPhase phase, uint64_t t0_ns, uint64_t bytes) {
+    if (!t0_ns) return;
+    s_load_ns[phase] += steady_ns() - t0_ns;
+    s_load_bytes[phase] += bytes;
+    s_load_calls[phase] += 1;
+}
+
+// The load is over when the first graph runs: complete (write mode) or report (read mode) the repack cache.
+void ameva_repack_cache_first_graph(void) { ameva_rpc::finish(); }
+
+void ameva_load_mark_first_graph(void) {
+    if (!ameva_load_profile_level() || s_first_graph_ns.load()) return;
+    uint64_t expected = 0;
+    s_first_graph_ns.compare_exchange_strong(expected, ameva_load_now_ns());
+}
+
+// AMEVA_LOAD_PROFILE=2: read one byte of every page of `src` so its page faults happen here, timed apart.
+static void load_touch_source(const void* src, size_t size) {
+    if (load_profile_value() < 2 || !src || size == 0) return;
+    const uint64_t t0 = ameva_load_now_ns();
+    const volatile uint8_t* p = (const volatile uint8_t*)src;
+    uint8_t acc = 0;
+    for (size_t i = 0; i < size; i += 4096) acc ^= p[i];
+    acc ^= p[size - 1];
+    (void)acc;
+    ameva_load_add(AMEVA_LOAD_SRC_TOUCH, t0, size);
+}
+
 // tensor->extra of a repacked tensor; only the address is used
 static char s_repacked_tag;
 
@@ -58,44 +193,35 @@ const struct ggml_tensor* ameva_repacked_base(const struct ggml_tensor* t) {
     return nullptr;
 }
 
-// Byte offset of [p, p + size) inside the buffer mapping. The ggml buffer interface has no error return: an access
-// that cannot be completed aborts, because continuing would compute on data the caller believes was transferred.
-static size_t mapped_offset(const ggml_backend_ameva_buffer_context* ctx, const void* p, size_t size, const char* what) {
-    const char* base = (const char*)ctx->mapped_ptr;
+// Byte offset of [p, p + size) inside the buffer. The ggml buffer interface has no error return: an access that cannot
+// be completed aborts, because continuing would compute on data the caller believes was transferred.
+static size_t base_offset(const ggml_backend_ameva_buffer_context* ctx, const void* p, size_t size, const char* what) {
+    const char* base = (const char*)ctx->base;
     const char* c = (const char*)p;
     if (!base || c < base || (size_t)(c - base) > ctx->size || size > ctx->size - (size_t)(c - base)) {
-        GGML_ABORT("ggml-ameva-buffer: %s outside the buffer mapping", what);
+        GGML_ABORT("ggml-ameva-buffer: %s outside the buffer", what);
     }
     return (size_t)(c - base);
 }
 
-static void sync_range(ggml_backend_ameva_buffer_context* ctx, size_t off, size_t size, bool flush, const char* what) {
+// Host access to the buffer bytes: complete on return (Vulkan: copy through the mapping and flush / invalidate the
+// range; OpenCL: a blocking copy on the context's queue).
+static void host_write(ggml_backend_ameva_buffer_context* ctx, size_t off, const void* src, size_t size, const char* what) {
     if (size == 0) return;
-    const AcResult r = flush ? ac_runtime_buffer_flush(ctx->ac_buf, off, size)
-                             : ac_runtime_buffer_invalidate(ctx->ac_buf, off, size);
-    if (r != AC_SUCCESS) {
-        GGML_ABORT("ggml-ameva-buffer: %s failed in %s (code %d)", flush ? "flush" : "invalidate", what, r);
-    }
+    const AcResult r = ac_runtime_buffer_write(ctx->ac_buf, off, src, size);
+    if (r != AC_SUCCESS) GGML_ABORT("ggml-ameva-buffer: writing %zu bytes at %zu failed in %s (code %d)", size, off, what, r);
 }
 
-// Flush (GPU will read) or invalidate (CPU will read) the bytes of rows [r0, r1) of a repacked tensor: one range per
-// region, or the whole tensor when all rows are involved.
-static void sync_rows(ggml_backend_ameva_buffer_context* ctx, const ggml_tensor* base, int64_t r0, int64_t r1,
-                      bool flush, const char* what) {
-    const size_t t0 = mapped_offset(ctx, base->data, ggml_nbytes(base), what);
-    const int64_t rows = ggml_nrows(base);
-    if (r0 == 0 && r1 == rows) {
-        sync_range(ctx, t0, ggml_nbytes(base), flush, what);
-        return;
-    }
-    AmevaRepackRegions R;
-    if (!ameva_repack_regions(base->type, base->ne[0], rows, &R)) {
-        GGML_ABORT("ggml-ameva-buffer: %s: no repacked layout for %s", what, base->name);
-    }
-    const uint64_t n = (uint64_t)(r1 - r0);
-    sync_range(ctx, t0 + R.q + (uint64_t)r0 * R.q_row, n * R.q_row, flush, what);
-    sync_range(ctx, t0 + R.h + (uint64_t)r0 * R.h_row, n * R.h_row, flush, what);
-    sync_range(ctx, t0 + R.s + (uint64_t)r0 * R.s_row, n * R.s_row, flush, what);
+static void host_read(ggml_backend_ameva_buffer_context* ctx, size_t off, void* dst, size_t size, const char* what) {
+    if (size == 0) return;
+    const AcResult r = ac_runtime_buffer_read(ctx->ac_buf, off, dst, size);
+    if (r != AC_SUCCESS) GGML_ABORT("ggml-ameva-buffer: reading %zu bytes at %zu failed in %s (code %d)", size, off, what, r);
+}
+
+static void host_fill(ggml_backend_ameva_buffer_context* ctx, size_t off, size_t size, uint8_t value, const char* what) {
+    if (size == 0) return;
+    const AcResult r = ac_runtime_buffer_fill(ctx->ac_buf, off, size, value);
+    if (r != AC_SUCCESS) GGML_ABORT("ggml-ameva-buffer: filling %zu bytes at %zu failed in %s (code %d)", size, off, what, r);
 }
 
 enum class Access { Read, Write, Fill };
@@ -104,71 +230,128 @@ enum class Access { Read, Write, Fill };
 // buffer mapping is GPU memory that several drivers map uncached (the first HOST_VISIBLE | HOST_COHERENT type: Mali,
 // Turnip), where such accesses ran at 6 to 9 MB/s: Llama-3.2-1B Q4_K_M took 81 to 134 s to load and Gemma-2-2B up to
 // 294 s (Galaxy A35, A53, S21, S20, 2026-10-04; 5 and 12 s on the Galaxy S25). The codec therefore works on a staging
-// copy in ordinary memory, at most this many bytes of rows at a time, and the mapping is only written and read in whole
-// region ranges (one memcpy per region).
+// copy in ordinary memory, at most this many bytes of rows at a time, and the buffer is only written and read in whole
+// region ranges (one host access per region).
 static const uint64_t kStagingBytes = 4ull << 20;
 
-// Rows [r0, r0 + nr) of the repacked tensor at `t` with `rows` rows, between the mapping and `stage`, which holds those
+// Rows [r0, r0 + nr) of the repacked tensor at buffer offset `t_off`, between the buffer and `stage`, which holds those
 // rows as a repacked tensor of nr rows. In both, every region is row-major, so the rows are one range per region.
-static void stage_rows(const AmevaRepackRegions& R, int64_t r0, int64_t nr, uint8_t* t, uint8_t* stage, bool to_mapping) {
+static void stage_rows(ggml_backend_ameva_buffer_context* ctx, const AmevaRepackRegions& R, int64_t r0, int64_t nr,
+                       uint64_t t_off, uint8_t* stage, bool to_buffer, const char* what) {
     const uint64_t n = (uint64_t)nr, r = (uint64_t)r0;
-    const struct { uint64_t mapped, staged, len; } parts[3] = {
+    const struct { uint64_t in_buffer, staged, len; } parts[3] = {
         { R.q + r * R.q_row, 0, n * R.q_row },
         { R.h + r * R.h_row, n * R.q_row, n * R.h_row },
         { R.s + r * R.s_row, n * (R.q_row + R.h_row), n * R.s_row },
     };
+    const uint64_t t0 = ameva_load_now_ns();
+    uint64_t moved = 0;
     for (const auto& p : parts) {
         if (p.len == 0) continue;
-        if (to_mapping) memcpy(t + p.mapped, stage + p.staged, p.len);
-        else memcpy(stage + p.staged, t + p.mapped, p.len);
+        if (to_buffer) {
+            host_write(ctx, (size_t)(t_off + p.in_buffer), stage + p.staged, (size_t)p.len, what);
+            ameva_rpc::sink_put(p.in_buffer, stage + p.staged, (size_t)p.len); // repack cache recording (no-op unless set)
+        } else {
+            host_read(ctx, (size_t)(t_off + p.in_buffer), stage + p.staged, (size_t)p.len, what);
+        }
+        moved += p.len;
     }
+    ameva_load_add(to_buffer ? AMEVA_LOAD_MAPPED_WRITE : AMEVA_LOAD_MAPPED_READ, t0, moved);
 }
 
-static int64_t staging_rows(uint64_t row_bytes) {
-    return row_bytes >= kStagingBytes ? 1 : (int64_t)(kStagingBytes / row_bytes);
+// Rows per staging pass. For the tiled types (ameva_repack_tiled) a whole number of 16-row tiles, so that every pass
+// starts at a tile and its rows are one byte range per region (ggml-ameva-repack.h).
+static int64_t staging_rows(enum ggml_type type, uint64_t row_bytes) {
+    const int64_t n = row_bytes >= kStagingBytes ? 1 : (int64_t)(kStagingBytes / row_bytes);
+    if (!ameva_repack_tiled(type)) return n;
+    return std::max<int64_t>(AMEVA_REPACK_TILE_ROWS, n & ~(int64_t)(AMEVA_REPACK_TILE_ROWS - 1));
 }
 
-// Rows [r0, r0 + nr) of the repacked tensor at `t` (`rows` rows of K weights of `type`) from `ggml` (those rows in the
-// ggml layout). Not flushed.
-static void write_repacked(enum ggml_type type, int64_t K, int64_t rows, uint8_t* t, int64_t r0, int64_t nr,
-                           const uint8_t* ggml, const char* what, const char* name) {
+// The tile-aligned row range [a0, a1) around rows [r0, r0 + nr) of a tiled tensor of `rows` rows.
+static void tile_range(int64_t rows, int64_t r0, int64_t nr, int64_t* a0, int64_t* a1) {
+    const int64_t t = AMEVA_REPACK_TILE_ROWS;
+    *a0 = r0 / t * t;
+    *a1 = std::min(rows, (r0 + nr + t - 1) / t * t);
+}
+
+// Rows [r0, r0 + nr) of the repacked tensor at buffer offset `t_off` into `ggml` (ggml layout). Tiled types: r0 must
+// be a multiple of 16 and r0 + nr a multiple of 16 or `rows`.
+static void read_repacked(ggml_backend_ameva_buffer_context* ctx, enum ggml_type type, int64_t K, int64_t rows,
+                          uint64_t t_off, int64_t r0, int64_t nr, uint8_t* ggml, const char* what, const char* name) {
     const uint64_t row_bytes = ggml_row_size(type, K);
     AmevaRepackRegions R;
     if (!ameva_repack_regions(type, K, rows, &R)) {
         GGML_ABORT("ggml-ameva-buffer: %s: no repacked layout for %s", what, name);
     }
-    const int64_t chunk = staging_rows(row_bytes);
+    const int64_t chunk = staging_rows(type, row_bytes);
     std::vector<uint8_t> stage((size_t)((uint64_t)std::min(chunk, nr) * row_bytes));
     for (int64_t r = r0; r < r0 + nr; r += chunk) {
         const int64_t n = std::min(chunk, r0 + nr - r);
+        stage_rows(ctx, R, r, n, t_off, stage.data(), false, what);
+        if (!ameva_unrepack_rows(type, K, n, 0, n, stage.data(), ggml + (uint64_t)(r - r0) * row_bytes)) {
+            GGML_ABORT("ggml-ameva-buffer: %s: unpacking rows of %s failed", what, name);
+        }
+    }
+}
+
+// Rows [r0, r0 + nr) of the repacked tensor at buffer offset `t_off` (`rows` rows of K weights of `type`) from `ggml`
+// (those rows in the ggml layout). A range of a tiled type that does not start and end at tiles is widened to them:
+// the rows around it are read back, merged and written again.
+static void write_repacked(ggml_backend_ameva_buffer_context* ctx, enum ggml_type type, int64_t K, int64_t rows,
+                           uint64_t t_off, int64_t r0, int64_t nr, const uint8_t* ggml, const char* what,
+                           const char* name) {
+    const uint64_t row_bytes = ggml_row_size(type, K);
+    if (ameva_repack_tiled(type)) {
+        int64_t a0, a1;
+        tile_range(rows, r0, nr, &a0, &a1);
+        if (a0 != r0 || a1 != r0 + nr) {
+            std::vector<uint8_t> img((size_t)((uint64_t)(a1 - a0) * row_bytes));
+            read_repacked(ctx, type, K, rows, t_off, a0, a1 - a0, img.data(), what, name);
+            memcpy(img.data() + (uint64_t)(r0 - a0) * row_bytes, ggml, (size_t)((uint64_t)nr * row_bytes));
+            write_repacked(ctx, type, K, rows, t_off, a0, a1 - a0, img.data(), what, name);
+            return;
+        }
+    }
+    AmevaRepackRegions R;
+    if (!ameva_repack_regions(type, K, rows, &R)) {
+        GGML_ABORT("ggml-ameva-buffer: %s: no repacked layout for %s", what, name);
+    }
+    const int64_t chunk = staging_rows(type, row_bytes);
+    std::vector<uint8_t> stage((size_t)((uint64_t)std::min(chunk, nr) * row_bytes));
+    for (int64_t r = r0; r < r0 + nr; r += chunk) {
+        const int64_t n = std::min(chunk, r0 + nr - r);
+        const uint64_t t0 = ameva_load_now_ns();
         if (!ameva_repack_rows(type, K, n, 0, n, ggml + (uint64_t)(r - r0) * row_bytes, stage.data())) {
             GGML_ABORT("ggml-ameva-buffer: %s: repacking rows of %s failed", what, name);
         }
-        stage_rows(R, r, n, t, stage.data(), true);
+        ameva_load_add(AMEVA_LOAD_REPACK_CPU, t0, (uint64_t)n * row_bytes);
+        stage_rows(ctx, R, r, n, t_off, stage.data(), true, what);
     }
 }
 
-static void write_rows(const ggml_tensor* base, int64_t r0, int64_t nr, const uint8_t* ggml, const char* what) {
-    write_repacked(base->type, base->ne[0], ggml_nrows(base), (uint8_t*)base->data, r0, nr, ggml, what, base->name);
+static void write_rows(ggml_backend_ameva_buffer_context* ctx, const ggml_tensor* base, int64_t r0, int64_t nr,
+                       const uint8_t* ggml, const char* what) {
+    const uint64_t t_off = base_offset(ctx, base->data, ggml_nbytes(base), what);
+    write_repacked(ctx, base->type, base->ne[0], ggml_nrows(base), t_off, r0, nr, ggml, what, base->name);
 }
 
-// Rows [r0, r0 + nr) of the repacked tensor `base` into `ggml` in the ggml layout. Not invalidated.
-static void read_rows(const ggml_tensor* base, int64_t r0, int64_t nr, uint8_t* ggml, const char* what) {
+// Rows [r0, r0 + nr) of the repacked tensor `base` into `ggml` in the ggml layout.
+static void read_rows(ggml_backend_ameva_buffer_context* ctx, const ggml_tensor* base, int64_t r0, int64_t nr,
+                      uint8_t* ggml, const char* what) {
     const int64_t K = base->ne[0], rows = ggml_nrows(base);
     const uint64_t row_bytes = ggml_row_size(base->type, K);
-    AmevaRepackRegions R;
-    if (!ameva_repack_regions(base->type, K, rows, &R)) {
-        GGML_ABORT("ggml-ameva-buffer: %s: no repacked layout for %s", what, base->name);
-    }
-    const int64_t chunk = staging_rows(row_bytes);
-    std::vector<uint8_t> stage((size_t)((uint64_t)std::min(chunk, nr) * row_bytes));
-    for (int64_t r = r0; r < r0 + nr; r += chunk) {
-        const int64_t n = std::min(chunk, r0 + nr - r);
-        stage_rows(R, r, n, (uint8_t*)base->data, stage.data(), false);
-        if (!ameva_unrepack_rows(base->type, K, n, 0, n, stage.data(), ggml + (uint64_t)(r - r0) * row_bytes)) {
-            GGML_ABORT("ggml-ameva-buffer: %s: unpacking rows of %s failed", what, base->name);
+    const uint64_t t_off = base_offset(ctx, base->data, ggml_nbytes(base), what);
+    if (ameva_repack_tiled(base->type)) {
+        int64_t a0, a1;
+        tile_range(rows, r0, nr, &a0, &a1);
+        if (a0 != r0 || a1 != r0 + nr) {
+            std::vector<uint8_t> img((size_t)((uint64_t)(a1 - a0) * row_bytes));
+            read_repacked(ctx, base->type, K, rows, t_off, a0, a1 - a0, img.data(), what, base->name);
+            memcpy(ggml, img.data() + (uint64_t)(r0 - a0) * row_bytes, (size_t)((uint64_t)nr * row_bytes));
+            return;
         }
     }
+    read_repacked(ctx, base->type, K, rows, t_off, r0, nr, ggml, what, base->name);
 }
 
 // Bytes [off, off + size) of the ggml-layout image of the repacked tensor `base`: copied to `out` (Read), replaced by
@@ -186,21 +369,18 @@ static void repacked_access(ggml_backend_ameva_buffer_context* ctx, const ggml_t
     const int64_t r1 = (int64_t)((off + size + row_bytes - 1) / row_bytes);
     const uint64_t lo = off - (uint64_t)r0 * row_bytes;
     if (mode == Access::Write && lo == 0 && size % row_bytes == 0) {
-        write_rows(base, r0, r1 - r0, (const uint8_t*)in, what);
-        sync_rows(ctx, base, r0, r1, true, what);
+        write_rows(ctx, base, r0, r1 - r0, (const uint8_t*)in, what);
         return;
     }
     std::vector<uint8_t> img((size_t)((uint64_t)(r1 - r0) * row_bytes));
-    sync_rows(ctx, base, r0, r1, false, what);
-    read_rows(base, r0, r1 - r0, img.data(), what);
+    read_rows(ctx, base, r0, r1 - r0, img.data(), what);
     if (mode == Access::Read) {
         memcpy(out, img.data() + lo, size);
         return;
     }
     if (mode == Access::Write) memcpy(img.data() + lo, in, size);
     else memset(img.data() + lo, value, size);
-    write_rows(base, r0, r1 - r0, img.data(), what);
-    sync_rows(ctx, base, r0, r1, true, what);
+    write_rows(ctx, base, r0, r1 - r0, img.data(), what);
 }
 
 // The repacked tensor a write to `tensor` goes to, deciding the layout on the tensor's first write: repacked when
@@ -219,14 +399,12 @@ static const ggml_tensor* resolve_for_write(ggml_backend_buffer_t buffer, ggml_t
         return nullptr;
     }
     auto* ctx = (ggml_backend_ameva_buffer_context*)buffer->context;
-    const size_t t0 = mapped_offset(ctx, tensor->data, nbytes, what);
+    const size_t t0 = base_offset(ctx, tensor->data, nbytes, what);
     const int64_t K = tensor->ne[0], rows = ggml_nrows(tensor);
     if (offset != 0 || size != nbytes) {
         std::vector<uint8_t> img(nbytes);
-        sync_range(ctx, t0, nbytes, false, what);
-        memcpy(img.data(), tensor->data, nbytes);
-        write_rows(tensor, 0, rows, img.data(), what);
-        sync_range(ctx, t0, nbytes, true, what);
+        host_read(ctx, t0, img.data(), nbytes, what);
+        write_rows(ctx, tensor, 0, rows, img.data(), what);
     }
     tensor->extra = &s_repacked_tag;
     {
@@ -235,6 +413,39 @@ static const ggml_tensor* resolve_for_write(ggml_backend_buffer_t buffer, ggml_t
     }
     ameva_count_repacked_tensor(nbytes);
     return tensor;
+}
+
+// Called by graph_compute for each MUL_MAT src0: repack a tensor that was uploaded before its buffer was marked
+// GGML_BACKEND_BUFFER_USAGE_WEIGHTS (e.g. whisper.cpp sets usage after the model upload). Safe to call repeatedly:
+// returns immediately if already repacked or not eligible.
+bool ameva_ensure_weight_repacked(ggml_backend_buffer_t buffer, struct ggml_tensor* tensor) {
+    if (!buffer || !buffer->context || !tensor) return false;
+    if (ameva_repacked_base(tensor)) return true;
+    if (!ameva_repack_enabled() || tensor->view_src || tensor->extra) return false;
+    if (ggml_backend_buffer_get_usage(buffer) != GGML_BACKEND_BUFFER_USAGE_WEIGHTS) return false;
+    AmevaRepackLayout L;
+    if (!ameva_repack_layout(tensor->type, &L) || !ameva_qmv_has_type(tensor->type)) return false;
+    const size_t nbytes = ggml_nbytes(tensor);
+    if (!ggml_is_contiguous(tensor) || tensor->ne[0] <= 0 || tensor->ne[0] % L.block_elems != 0 || nbytes == 0)
+        return false;
+    auto* ctx = (ggml_backend_ameva_buffer_context*)buffer->context;
+    const size_t t0 = base_offset(ctx, tensor->data, nbytes, "ensure_weight_repacked");
+    const int64_t K = tensor->ne[0], rows = ggml_nrows(tensor);
+    const uint64_t prof_t0 = ameva_load_now_ns();
+    // Read ggml-layout bytes from GPU into staging memory
+    std::vector<uint8_t> img(nbytes);
+    host_read(ctx, t0, img.data(), nbytes, "ensure_weight_repacked");
+    // Mark as repacked before write_rows (write_rows calls base_offset which needs the tag set)
+    tensor->extra = &s_repacked_tag;
+    {
+        std::lock_guard<std::mutex> lock(ctx->mu);
+        ctx->repacked.push_back({ t0, nbytes, tensor->type, K, rows });
+    }
+    ameva_count_repacked_tensor(nbytes);
+    // Write back in repacked layout
+    write_rows(ctx, tensor, 0, rows, img.data(), "ensure_weight_repacked");
+    ameva_load_add(AMEVA_LOAD_LATE_REPACK, prof_t0, nbytes);
+    return true;
 }
 
 // =============================================================================
@@ -265,10 +476,10 @@ static void* ggml_backend_ameva_buffer_get_base(ggml_backend_buffer_t buffer) {
         return nullptr;
     }
     auto* ctx = (ggml_backend_ameva_buffer_context*)buffer->context;
-    if (!ctx->mapped_ptr) {
-        fprintf(stderr, "ggml-ameva-buffer: get_base called but ctx->mapped_ptr is NULL! (size=%zu)\n", ctx->size);
+    if (!ctx->base) {
+        fprintf(stderr, "ggml-ameva-buffer: get_base called but ctx->base is NULL! (size=%zu)\n", ctx->size);
     }
-    return ctx->mapped_ptr;
+    return ctx->base;
 }
 
 static void check_range(const ggml_tensor* tensor, size_t offset, size_t size, const char* what) {
@@ -286,14 +497,13 @@ static void ggml_backend_ameva_buffer_memset_tensor(ggml_backend_buffer_t buffer
     check_range(tensor, offset, size, "memset_tensor");
     auto* ctx = (ggml_backend_ameva_buffer_context*)buffer->context;
     char* dst = (char*)tensor->data + offset;
-    const size_t byte_offset = mapped_offset(ctx, dst, size, "memset_tensor");
+    const size_t byte_offset = base_offset(ctx, dst, size, "memset_tensor");
     if (const ggml_tensor* base = resolve_for_write(buffer, tensor, offset, size, "memset_tensor")) {
         repacked_access(ctx, base, (uint64_t)(dst - (char*)base->data), size, Access::Fill, nullptr, nullptr, value,
                         "memset_tensor");
         return;
     }
-    memset(dst, value, size);
-    sync_range(ctx, byte_offset, size, true, "memset_tensor");
+    host_fill(ctx, byte_offset, size, value, "memset_tensor");
 }
 
 static void ggml_backend_ameva_buffer_set_tensor(ggml_backend_buffer_t buffer, struct ggml_tensor* tensor, const void* data, size_t offset, size_t size) {
@@ -303,14 +513,35 @@ static void ggml_backend_ameva_buffer_set_tensor(ggml_backend_buffer_t buffer, s
     check_range(tensor, offset, size, "set_tensor");
     auto* ctx = (ggml_backend_ameva_buffer_context*)buffer->context;
     char* dst = (char*)tensor->data + offset;
-    const size_t byte_offset = mapped_offset(ctx, dst, size, "set_tensor");
+    const size_t byte_offset = base_offset(ctx, dst, size, "set_tensor");
     if (const ggml_tensor* base = resolve_for_write(buffer, tensor, offset, size, "set_tensor")) {
-        repacked_access(ctx, base, (uint64_t)(dst - (char*)base->data), size, Access::Write, data, nullptr, 0,
-                        "set_tensor");
+        // Offline repack cache (AMEVA_REPACK_CACHE, ggml-ameva-repack-cache.h): serve the tensor from the file, or record
+        // the bytes the conversion below produces. Both are no-ops while the variable is unset.
+        ameva_rpc::Ticket ticket;
+        ameva_rpc::open_ticket(&ticket, base, data, offset, size);
+        if (ticket.kind == ameva_rpc::Ticket::Hit) {
+            const uint64_t tc = ameva_load_now_ns();
+            for (size_t o = 0; o < size; o += (size_t)kStagingBytes) {
+                host_write(ctx, byte_offset + o, ticket.blob + o, std::min<size_t>((size_t)kStagingBytes, size - o),
+                           "set_tensor (repack cache)");
+            }
+            ameva_load_add(AMEVA_LOAD_CACHE_READ, tc, size);
+            return;
+        }
+        load_touch_source(data, size);
+        const uint64_t t0 = ameva_load_now_ns();
+        {
+            ameva_rpc::SinkScope sink(&ticket);
+            repacked_access(ctx, base, (uint64_t)(dst - (char*)base->data), size, Access::Write, data, nullptr, 0,
+                            "set_tensor");
+        }
+        ameva_rpc::close_ticket(&ticket);
+        ameva_load_add(AMEVA_LOAD_SET_REPACKED, t0, size);
         return;
     }
-    memcpy(dst, data, size);
-    sync_range(ctx, byte_offset, size, true, "set_tensor");
+    const uint64_t t0 = ameva_load_now_ns();
+    host_write(ctx, byte_offset, data, size, "set_tensor");
+    ameva_load_add(AMEVA_LOAD_PLAIN_WRITE, t0, size);
 }
 
 static void ggml_backend_ameva_buffer_get_tensor(ggml_backend_buffer_t buffer, const struct ggml_tensor* tensor, void* data, size_t offset, size_t size) {
@@ -320,14 +551,13 @@ static void ggml_backend_ameva_buffer_get_tensor(ggml_backend_buffer_t buffer, c
     check_range(tensor, offset, size, "get_tensor");
     auto* ctx = (ggml_backend_ameva_buffer_context*)buffer->context;
     const char* src = (const char*)tensor->data + offset;
-    const size_t byte_offset = mapped_offset(ctx, src, size, "get_tensor");
+    const size_t byte_offset = base_offset(ctx, src, size, "get_tensor");
     if (const ggml_tensor* base = ameva_repacked_base(tensor)) {
         repacked_access(ctx, base, (uint64_t)(src - (const char*)base->data), size, Access::Read, nullptr, data, 0,
                         "get_tensor");
         return;
     }
-    sync_range(ctx, byte_offset, size, false, "get_tensor");
-    memcpy(data, src, size);
+    host_read(ctx, byte_offset, data, size, "get_tensor");
 }
 
 static bool ggml_backend_ameva_buffer_cpy_tensor(ggml_backend_buffer_t buffer, const struct ggml_tensor* src, struct ggml_tensor* dst) {
@@ -346,7 +576,7 @@ static void ggml_backend_ameva_buffer_clear(ggml_backend_buffer_t buffer, uint8_
         GGML_ABORT("ggml-ameva-buffer: clear on a buffer without context");
     }
     auto* ctx = (ggml_backend_ameva_buffer_context*)buffer->context;
-    memset(ctx->mapped_ptr, value, buffer->size);
+    host_fill(ctx, 0, buffer->size, value, "clear");
     // Repacking permutes the bits of a tensor, so all-zero and all-one bytes stay what they are; any other value is
     // written into each repacked tensor through its layout.
     if (value != 0x00 && value != 0xFF) {
@@ -354,11 +584,10 @@ static void ggml_backend_ameva_buffer_clear(ggml_backend_buffer_t buffer, uint8_
         std::vector<uint8_t> img;
         for (const AmevaRepackSpan& s : ctx->repacked) {
             img.assign((size_t)s.bytes, value);
-            write_repacked(s.type, s.K, s.rows, (uint8_t*)ctx->mapped_ptr + s.off, 0, s.rows, img.data(), "clear",
+            write_repacked(ctx, s.type, s.K, s.rows, s.off, 0, s.rows, img.data(), "clear",
                            ggml_type_name(s.type));
         }
     }
-    sync_range(ctx, 0, buffer->size, true, "clear");
 }
 
 // Designated initializers (see ggml-ameva-device.cpp). init_tensor and reset are optional in ggml and left NULL:
@@ -400,6 +629,7 @@ static ggml_backend_buffer_t ggml_backend_ameva_buffer_type_alloc_buffer(ggml_ba
     };
 
     AcBuffer* ac_buf = nullptr;
+    const uint64_t prof_t0 = ameva_load_now_ns();
     AcResult res = ac_runtime_buffer_create(ctx, &bdesc, &ac_buf);
     if (res != AC_SUCCESS) {
         fprintf(stderr, "ggml-ameva: failed to allocate AcBuffer size %zu (code %d)\n", aligned_size, res);
@@ -407,16 +637,17 @@ static ggml_backend_buffer_t ggml_backend_ameva_buffer_type_alloc_buffer(ggml_ba
     }
     ameva_increment_buffer_create_count();
 
-    void* mapped_ptr = nullptr;
-    res = ac_runtime_buffer_get_mapped_ptr(ac_buf, &mapped_ptr);
-    if (res != AC_SUCCESS || !mapped_ptr) {
-        fprintf(stderr, "ggml-ameva: failed to get mapped ptr for AcBuffer size %zu (res=%d, ptr=%p)\n", aligned_size, res, mapped_ptr);
+    void* base = nullptr;
+    res = ac_runtime_buffer_get_address(ac_buf, &base);
+    if (res != AC_SUCCESS || !base) {
+        fprintf(stderr, "ggml-ameva: failed to get address for AcBuffer size %zu (res=%d, ptr=%p)\n", aligned_size, res, base);
         ac_runtime_buffer_destroy(ac_buf);
         ameva_increment_buffer_destroy_count();
         return nullptr;
     }
+    ameva_load_add(AMEVA_LOAD_ALLOC, prof_t0, aligned_size);
 
-    auto* buf_ctx = new ggml_backend_ameva_buffer_context{ ac_buf, mapped_ptr, aligned_size };
+    auto* buf_ctx = new ggml_backend_ameva_buffer_context{ ac_buf, base, aligned_size };
     ggml_backend_buffer_t ret_buf = ggml_backend_buffer_init(buft, ggml_backend_ameva_buffer_i, buf_ctx, aligned_size);
     if (!ret_buf) {
         fprintf(stderr, "ggml-ameva-buffer: ggml_backend_buffer_init failed for %zu bytes\n", aligned_size);
@@ -448,10 +679,11 @@ static size_t ggml_backend_ameva_buffer_type_get_alloc_size(ggml_backend_buffer_
 }
 
 // The memory is host-visible (UMA) in either case; "host buffer" in ggml means that the CPU may read and write tensor
-// data in place, which holds only while no tensor is repacked.
+// data in place, which holds only while no tensor is repacked, and never on OpenCL (SVM memory is reached through
+// ac_runtime_buffer_write / read only).
 static bool ggml_backend_ameva_buffer_type_is_host(ggml_backend_buffer_type_t buft) {
     (void)buft;
-    return !ameva_repack_enabled();
+    return !ameva_repack_enabled() && !ameva_backend_is_opencl();
 }
 
 static const struct ggml_backend_buffer_type_i ggml_backend_ameva_buffer_type_i = {

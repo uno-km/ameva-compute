@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 """
 AMEVA-COMPUTE (AMUDA) Python Native Bridge — ac_runtime.h ABI v2.1.0 Direct Binding
 ===================================================================================

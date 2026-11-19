@@ -1,4 +1,8 @@
-/* SPDX-License-Identifier: Apache-2.0 */
+/**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
+ */
+/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial */
 /* Helpers shared by the AMUDA CUDA-like samples. Every failure exits non-zero with the reason. */
 #ifndef AMU_SAMPLE_UTIL_H
 #define AMU_SAMPLE_UTIL_H

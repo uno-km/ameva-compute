@@ -25,6 +25,7 @@ models/*.bin
 
 # Generated logs, patches, wavs, text dumps, and audit evidence
 *.patch
+!patches/*.patch
 *.log
 *.txt
 !**/CMakeLists.txt

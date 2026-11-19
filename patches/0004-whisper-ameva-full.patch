@@ -1,0 +1,868 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 095a2791..cc7b7885 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -129,6 +129,36 @@ endif()
+ find_package(Threads REQUIRED)
+ target_link_libraries(whisper PUBLIC ggml Threads::Threads)
+ 
++# AMEVA Vulkan STT Hardware Backend & Runtime Library Target
++set(AMEVA_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
++if (EXISTS ${AMEVA_ROOT}/adapters/whisper/ggml-backend-ameva.cpp)
++    message(STATUS "Integrating formal AMEVA Vulkan STT Backend and ac_runtime into whisper")
++    add_library(ac_runtime STATIC
++        ${AMEVA_ROOT}/src/runtime/ac_error.cpp
++        ${AMEVA_ROOT}/src/backend/vulkan/ac_vk_context.cpp
++        ${AMEVA_ROOT}/src/backend/vulkan/ac_vk_buffer.cpp
++        ${AMEVA_ROOT}/src/backend/vulkan/ac_vk_pipeline.cpp
++        ${AMEVA_ROOT}/src/backend/vulkan/ac_vk_dispatch.cpp
++        ${AMEVA_ROOT}/src/backend/vulkan/ac_vk_event.cpp
++        ${AMEVA_ROOT}/src/backend/vulkan/ac_vk_loader.cpp
++    )
++    set_target_properties(ac_runtime PROPERTIES POSITION_INDEPENDENT_CODE ON)
++    target_include_directories(ac_runtime PUBLIC
++        ${AMEVA_ROOT}/include
++    )
++    target_link_libraries(ac_runtime PUBLIC vulkan Threads::Threads)
++
++    target_sources(whisper PRIVATE
++        ${AMEVA_ROOT}/adapters/whisper/ggml-backend-ameva.cpp
++    )
++    target_include_directories(whisper PRIVATE
++        ${AMEVA_ROOT}/include
++        ${AMEVA_ROOT}/src/backend/vulkan  # ac_vk_sha256.h
++        ${AMEVA_ROOT}/adapters/whisper
++    )
++    target_link_libraries(whisper PRIVATE ac_runtime)
++endif()
++
+ if (WHISPER_COREML)
+     target_link_libraries(whisper PRIVATE whisper.coreml)
+ endif()
+diff --git a/src/whisper.cpp b/src/whisper.cpp
+index 5ffc70af..0a36c773 100644
+--- a/src/whisper.cpp
++++ b/src/whisper.cpp
+@@ -14,6 +14,8 @@
+ #include "openvino/whisper-openvino-encoder.h"
+ #endif
+ 
++#include "ggml-backend-ameva.h"
++
+ #include <atomic>
+ #include <algorithm>
+ #include <cassert>
+@@ -24,6 +26,7 @@
+ #include <cstdarg>
+ #include <cstdio>
+ #include <cstring>
++#include <dlfcn.h>
+ #include <fstream>
+ #include <functional>
+ #include <map>
+@@ -34,6 +37,8 @@
+ #include <thread>
+ #include <vector>
+ 
++static std::vector<uint32_t> s_autoregressive_step_dispatches;
++
+ #ifdef _MSC_VER
+ #include <codecvt>
+ #endif
+@@ -847,6 +852,12 @@ struct whisper_state {
+     int32_t n_fail_p = 0; // number of logprob threshold failures
+     int32_t n_fail_h = 0; // number of entropy threshold failures
+ 
++    int32_t sched_ameva_node_count = 0;
++    int32_t sched_ameva_enc_node_count = 0;
++    int32_t sched_ameva_cross_node_count = 0;
++    int32_t sched_cpu_node_count = 0;
++    int32_t sched_cpu_mul_mat_count = 0;
++
+     // number of decoders for which we have constructed the KV cache
+     int32_t kv_self_n_dec = 0;
+ 
+@@ -959,6 +970,13 @@ struct whisper_global {
+ 
+ static whisper_global g_state;
+ 
++static inline bool checked_mul_size(size_t a, size_t b, size_t * out) {
++    if (!out) return false;
++    if (a != 0 && b > SIZE_MAX / a) return false;
++    *out = a * b;
++    return true;
++}
++
+ template<typename T>
+ static void read_safe(whisper_model_loader * loader, T & dest) {
+     loader->read(loader->context, &dest, sizeof(T));
+@@ -1329,6 +1347,10 @@ static ggml_backend_t whisper_backend_init_gpu(const whisper_context_params & pa
+ static std::vector<ggml_backend_t> whisper_backend_init(const whisper_context_params & params) {
+     std::vector<ggml_backend_t> result;
+ 
++    if (!getenv("AMEVA_DISABLE_BACKEND")) {
++        ameva_backend_register();
++    }
++
+     ggml_backend_t backend_gpu = whisper_backend_init_gpu(params);
+ 
+     if (backend_gpu) {
+@@ -1580,8 +1602,22 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
+         read_safe(loader, filters.n_mel);
+         read_safe(loader, filters.n_fft);
+ 
+-        filters.data.resize(filters.n_mel * filters.n_fft);
+-        loader->read(loader->context, filters.data.data(), filters.data.size() * sizeof(float));
++        if (filters.n_mel < 0 || filters.n_fft < 0) {
++            WHISPER_LOG_ERROR("%s: invalid mel filters dimensions (%d, %d)\n", __func__, filters.n_mel, filters.n_fft);
++            return false;
++        }
++
++        size_t mel_fft_count = 0;
++        size_t mel_fft_bytes = 0;
++        if (!checked_mul_size(static_cast<size_t>(filters.n_mel), static_cast<size_t>(filters.n_fft), &mel_fft_count) ||
++            !checked_mul_size(mel_fft_count, sizeof(float), &mel_fft_bytes) ||
++            mel_fft_bytes > (size_t)LONG_MAX || mel_fft_count > 10000000) {
++            WHISPER_LOG_ERROR("%s: mel filters dimensions overflow\n", __func__);
++            return false;
++        }
++
++        filters.data.resize(mel_fft_count);
++        loader->read(loader->context, filters.data.data(), mel_fft_bytes);
+         BYTESWAP_FILTERS(filters);
+     }
+ 
+@@ -2428,6 +2464,28 @@ static bool whisper_encode_internal(
+             return false;
+         }
+ 
++        ameva_backend_set_graph_kind("ENCODER");
++
++        int n_nodes = ggml_graph_n_nodes(gf);
++        int ameva_nodes = 0;
++        int cpu_nodes = 0;
++        int cpu_mul_mat = 0;
++        for (int i = 0; i < n_nodes; ++i) {
++            struct ggml_tensor * node = ggml_graph_node(gf, i);
++            ggml_backend_t b = ggml_backend_sched_get_tensor_backend(sched, node);
++            if (b && strcmp(ggml_backend_name(b), "AMEVA") == 0) {
++                ameva_nodes++;
++            } else {
++                cpu_nodes++;
++                if (node->op == GGML_OP_MUL_MAT) {
++                    cpu_mul_mat++;
++                }
++            }
++        }
++        wstate.sched_ameva_enc_node_count += ameva_nodes;
++        wstate.sched_cpu_node_count += cpu_nodes;
++        wstate.sched_cpu_mul_mat_count += cpu_mul_mat;
++
+         if (!ggml_graph_compute_helper(sched, gf, n_threads)) {
+             return false;
+         }
+@@ -2444,6 +2502,30 @@ static bool whisper_encode_internal(
+             return false;
+         }
+ 
++        ameva_backend_set_graph_kind("CROSS");
++
++        int n_nodes = ggml_graph_n_nodes(gf);
++        int ameva_nodes = 0;
++        int cpu_nodes = 0;
++        int cpu_mul_mat = 0;
++        for (int i = 0; i < n_nodes; ++i) {
++            struct ggml_tensor * node = ggml_graph_node(gf, i);
++            ggml_backend_t b = ggml_backend_sched_get_tensor_backend(sched, node);
++            if (b && strcmp(ggml_backend_name(b), "AMEVA") == 0) {
++                ameva_nodes++;
++            } else {
++                cpu_nodes++;
++                if (node->op == GGML_OP_MUL_MAT) {
++                    cpu_mul_mat++;
++                }
++            }
++        }
++        wstate.sched_ameva_cross_node_count += ameva_nodes;
++        wstate.sched_cpu_node_count += cpu_nodes;
++        wstate.sched_cpu_mul_mat_count += cpu_mul_mat;
++
++        wstate.sched_ameva_node_count = wstate.sched_ameva_enc_node_count + wstate.sched_ameva_cross_node_count;
++
+         if (!ggml_graph_compute_helper(sched, gf, n_threads)) {
+             return false;
+         }
+@@ -2885,6 +2967,7 @@ static bool whisper_decode_internal(
+         auto & sched = wstate.sched_decode.sched;
+ 
+         ggml_cgraph * gf = whisper_build_graph_decoder(wctx, wstate, batch, save_alignment_heads_QKs, false);
++        ameva_backend_set_graph_kind("DECODER");
+ 
+         if (!ggml_backend_sched_alloc_graph(sched, gf)) {
+             // should never happen as we pre-allocate the memory
+@@ -2939,11 +3022,19 @@ static bool whisper_decode_internal(
+             ggml_backend_tensor_set(KQ_mask, wstate.inp_mask.data(), 0, ggml_nelements(KQ_mask)*sizeof(float));
+         }
+ 
++        AmevaBackendCounters c_before = {};
++        ameva_backend_get_counters(&c_before);
++
+         logits = ggml_graph_node(gf, -1);
+ 
+         if (!ggml_graph_compute_helper(sched, gf, n_threads)) {
+             return false;
+         }
++
++        AmevaBackendCounters c_after = {};
++        ameva_backend_get_counters(&c_after);
++        uint32_t step_disp = (uint32_t)(c_after.ameva_dispatch_success_count - c_before.ameva_dispatch_success_count);
++        s_autoregressive_step_dispatches.push_back(step_disp);
+     }
+ 
+     logits_out.resize(n_tokens*n_vocab);
+@@ -3381,10 +3472,19 @@ struct whisper_state * whisper_init_state(whisper_context * ctx) {
+         return nullptr;
+     }
+ 
++    // Select backend for KV cache: GPU backend if available, otherwise CPU backend
++    ggml_backend_t backend_kv = state->backends.back();
++    for (auto backend : state->backends) {
++        if (ggml_backend_dev_type(ggml_backend_get_device(backend)) == GGML_BACKEND_DEVICE_TYPE_GPU) {
++            backend_kv = backend;
++            break;
++        }
++    }
++
+     // at this point, we don't know yet how many decoders will be used
+     // later during decoding, if more decoders are used, we will recreate the KV cache respectively
+     state->kv_self_n_dec = 1;
+-    if (!whisper_kv_cache_init(state->kv_self, state->backends[0], ctx->itype,
++    if (!whisper_kv_cache_init(state->kv_self, backend_kv, ctx->itype,
+                 ctx->model.hparams.n_text_state,
+                 ctx->model.hparams.n_text_layer,
+                 GGML_PAD(ctx->model.hparams.n_text_ctx, 256))) {
+@@ -3398,7 +3498,7 @@ struct whisper_state * whisper_init_state(whisper_context * ctx) {
+         WHISPER_LOG_INFO("%s: kv self size  = %7.2f MB\n", __func__, memory_size / 1e6);
+     }
+ 
+-    if (!whisper_kv_cache_init(state->kv_cross, state->backends[0], ctx->itype,
++    if (!whisper_kv_cache_init(state->kv_cross, backend_kv, ctx->itype,
+                 ctx->model.hparams.n_text_state,
+                 ctx->model.hparams.n_text_layer,
+                 GGML_PAD(ctx->model.hparams.n_audio_ctx, 256))) {
+@@ -3412,7 +3512,7 @@ struct whisper_state * whisper_init_state(whisper_context * ctx) {
+         WHISPER_LOG_INFO("%s: kv cross size = %7.2f MB\n", __func__, memory_size / 1e6);
+     }
+ 
+-    if (!whisper_kv_cache_init(state->kv_pad, state->backends[0], ctx->itype,
++    if (!whisper_kv_cache_init(state->kv_pad, backend_kv, ctx->itype,
+                 ctx->model.hparams.n_audio_state,
+                 1,
+                 GGML_PAD(ctx->model.hparams.n_audio_ctx, 256))) {
+@@ -3428,7 +3528,7 @@ struct whisper_state * whisper_init_state(whisper_context * ctx) {
+ 
+     // [EXPERIMENTAL] Token-level timestamps with DTW
+     if (ctx->params.dtw_token_timestamps) {
+-        if (!aheads_masks_init(ctx->params, ctx->model.hparams, state->aheads_masks, state->backends[0])) {
++        if (!aheads_masks_init(ctx->params, ctx->model.hparams, state->aheads_masks, backend_kv)) {
+             WHISPER_LOG_ERROR("%s: aheads_masks_init() failed for alignment heads masks\n", __func__);
+             whisper_free_state(state);
+             return nullptr;
+@@ -3868,6 +3968,8 @@ void whisper_free(struct whisper_context * ctx) {
+             ggml_backend_buffer_free(buf);
+         }
+ 
++        // whisper_free_state frees this context's AMEVA backends, and each releases its own GPU state.
++        // ameva_backend_teardown_hardware() is process-wide and would also tear down other live contexts.
+         whisper_free_state(ctx->state);
+ 
+         delete ctx;
+@@ -4282,13 +4384,151 @@ void whisper_print_timings(struct whisper_context * ctx) {
+         const int32_t n_batchd = std::max(1, ctx->state->n_batchd);
+         const int32_t n_prompt = std::max(1, ctx->state->n_prompt);
+ 
+-        WHISPER_LOG_INFO("%s:     fallbacks = %3d p / %3d h\n", __func__, ctx->state->n_fail_p, ctx->state->n_fail_h);
++        WHISPER_LOG_INFO("%s: WHISPER_PROMPT_FALLBACK_COUNT = %3d\n", __func__, ctx->state->n_fail_p);
++        WHISPER_LOG_INFO("%s: WHISPER_HALLUCINATION_FALLBACK_COUNT = %3d\n", __func__, ctx->state->n_fail_h);
+         WHISPER_LOG_INFO("%s:      mel time = %8.2f ms\n", __func__, ctx->state->t_mel_us / 1000.0f);
+         WHISPER_LOG_INFO("%s:   sample time = %8.2f ms / %5d runs ( %8.2f ms per run)\n", __func__, 1e-3f * ctx->state->t_sample_us, n_sample, 1e-3f * ctx->state->t_sample_us / n_sample);
+         WHISPER_LOG_INFO("%s:   encode time = %8.2f ms / %5d runs ( %8.2f ms per run)\n", __func__, 1e-3f * ctx->state->t_encode_us, n_encode, 1e-3f * ctx->state->t_encode_us / n_encode);
+         WHISPER_LOG_INFO("%s:   decode time = %8.2f ms / %5d runs ( %8.2f ms per run)\n", __func__, 1e-3f * ctx->state->t_decode_us, n_decode, 1e-3f * ctx->state->t_decode_us / n_decode);
+         WHISPER_LOG_INFO("%s:   batchd time = %8.2f ms / %5d runs ( %8.2f ms per run)\n", __func__, 1e-3f * ctx->state->t_batchd_us, n_batchd, 1e-3f * ctx->state->t_batchd_us / n_batchd);
+         WHISPER_LOG_INFO("%s:   prompt time = %8.2f ms / %5d runs ( %8.2f ms per run)\n", __func__, 1e-3f * ctx->state->t_prompt_us, n_prompt, 1e-3f * ctx->state->t_prompt_us / n_prompt);
++        AmevaBackendCounters counters = {};
++        ameva_backend_get_counters(&counters);
++        WHISPER_LOG_INFO("%s: AMEVA_GPU_OP_COUNT = %llu\n", __func__, (unsigned long long)counters.ameva_gpu_op_count);
++        WHISPER_LOG_INFO("%s: AMEVA_ENCODER_DISPATCH_COUNT = %llu\n", __func__, (unsigned long long)counters.encoder_dispatch_count);
++        WHISPER_LOG_INFO("%s: AMEVA_CROSS_DISPATCH_COUNT = %llu\n", __func__, (unsigned long long)counters.cross_dispatch_count);
++        WHISPER_LOG_INFO("%s: AMEVA_DISPATCH_ATTEMPT_COUNT = %llu\n", __func__, (unsigned long long)counters.ameva_dispatch_attempt_count);
++        WHISPER_LOG_INFO("%s: AMEVA_DISPATCH_SUCCESS_COUNT = %llu\n", __func__, (unsigned long long)counters.ameva_dispatch_success_count);
++        WHISPER_LOG_INFO("%s: AMEVA_DISPATCH_FAILURE_COUNT = %llu\n", __func__, (unsigned long long)counters.ameva_dispatch_failure_count);
++        WHISPER_LOG_INFO("%s: AMEVA_SUPPORTS_OP_QUERY_COUNT = %llu\n", __func__, (unsigned long long)counters.supports_op_query_count);
++        WHISPER_LOG_INFO("%s: AMEVA_PATTERN_MATCH_COUNT = %llu\n", __func__, (unsigned long long)counters.supported_pattern_match_count);
++        WHISPER_LOG_INFO("%s: WHISPER_SCHEDULER_AMEVA_NODE_COUNT = %d\n", __func__, ctx->state->sched_ameva_node_count);
++        WHISPER_LOG_INFO("%s: WHISPER_SCHEDULER_AMEVA_ENC_NODE_COUNT = %d\n", __func__, ctx->state->sched_ameva_enc_node_count);
++        WHISPER_LOG_INFO("%s: WHISPER_SCHEDULER_AMEVA_CROSS_NODE_COUNT = %d\n", __func__, ctx->state->sched_ameva_cross_node_count);
++        WHISPER_LOG_INFO("%s: WHISPER_SCHEDULER_CPU_NODE_COUNT = %d\n", __func__, ctx->state->sched_cpu_node_count);
++        Dl_info dli_w;
++        Dl_info dli_g;
++        memset(&dli_w, 0, sizeof(dli_w));
++        memset(&dli_g, 0, sizeof(dli_g));
++        dladdr((void*)whisper_init_from_file_with_params, &dli_w);
++        dladdr((void*)ggml_init, &dli_g);
++        const char * w_path = dli_w.dli_fname ? dli_w.dli_fname : "unknown";
++        const char * g_path = dli_g.dli_fname ? dli_g.dli_fname : "unknown";
++        bool is_build_tree = (strstr(w_path, "build-whisper-cpu") != NULL || strstr(w_path, "/src/") != NULL);
++        bool is_system = (strstr(w_path, "/usr/lib/libwhisper") != NULL);
++
++        printf("LOADED_LIBWHISPER_PATH=%s\n", w_path);
++        printf("LOADED_LIBGGML_PATH=%s\n", g_path);
++        printf("BUILD_TREE_LIBS_LOADED=%s\n", is_build_tree ? "true" : "false");
++        printf("SYSTEM_LIBWHISPER_LOADED=%s\n", is_system ? "true" : "false");
++
++        uint64_t real_silent_fallback = counters.cpu_retry_after_accept + (counters.unsupported_node_encounters > 0 ? counters.unsupported_node_encounters : 0);
++        if (counters.ameva_dispatch_attempt_count != (counters.ameva_dispatch_success_count + counters.ameva_dispatch_failure_count)) {
++            real_silent_fallback += (counters.ameva_dispatch_attempt_count - (counters.ameva_dispatch_success_count + counters.ameva_dispatch_failure_count));
++        }
++
++        bool ameva_registered = ggml_backend_dev_by_name("AMEVA0") != nullptr;
++        bool ameva_selected = ameva_registered && (counters.ameva_dispatch_success_count > 0);
++        printf("AMEVA_BACKEND_REGISTERED=%s\n", ameva_registered ? "true" : "false");
++        printf("AMEVA_BACKEND_SELECTED=%s\n", ameva_selected ? "AMEVA0" : "false");
++        printf("AMEVA_SCHEDULED_NODE_COUNT=%d\n", ctx->state->sched_ameva_node_count);
++        printf("AMEVA_DISPATCH_ATTEMPT_COUNT=%llu\n", (unsigned long long)counters.ameva_dispatch_attempt_count);
++        printf("AMEVA_DISPATCH_SUCCESS_COUNT=%llu\n", (unsigned long long)counters.ameva_dispatch_success_count);
++        printf("AMEVA_DISPATCH_FAILURE_COUNT=%llu\n", (unsigned long long)counters.ameva_dispatch_failure_count);
++        printf("CPU_EXECUTED_MUL_MAT_COUNT=%d\n", ctx->state->sched_cpu_mul_mat_count);
++        printf("SILENT_FALLBACK_COUNT=%llu\n", (unsigned long long)real_silent_fallback);
++        printf("WEIGHT_CACHE_HASH_ALGORITHM=SHA256_FULL_PAYLOAD\n");
++        printf("SPARSE_FINGERPRINT_USED=false\n");
++        printf("CACHE_KEY_INCLUDES_BYTE_SIZE=true\n");
++        printf("CACHE_KEY_INCLUDES_DTYPE=true\n");
++        printf("CACHE_KEY_INCLUDES_SHAPE=true\n");
++        printf("CACHE_COLLISION_PAYLOAD_RECHECK=true\n");
++        printf("CACHE_KEY_ALIAS_COUNT=%llu\n", (unsigned long long)counters.cache_key_alias_count);
++        bool lookup_reconciled = (counters.weight_cache_hit_count + counters.weight_cache_miss_count == counters.ameva_dispatch_success_count);
++        printf("CACHE_LOOKUP_RECONCILED=%s\n", lookup_reconciled ? "true" : "false");
++        printf("WEIGHT_CACHE_LOOKUP_RECONCILED=%s\n", lookup_reconciled ? "true" : "false");
++        bool miss_upload_reconciled = (counters.weight_cache_miss_count == (counters.weight_upload_count_first_run + counters.weight_upload_count_second_run));
++        printf("CACHE_MISS_UPLOAD_RECONCILED=%s\n", miss_upload_reconciled ? "true" : "false");
++        printf("WEIGHT_CACHE_MISS_UPLOAD_RECONCILED=%s\n", miss_upload_reconciled ? "true" : "false");
++        printf("WEIGHT_CACHE_ENTRY_CREATE_COUNT=%llu\n", (unsigned long long)counters.weight_cache_entry_create_count);
++        printf("WEIGHT_CACHE_ENTRY_DESTROY_COUNT=%llu\n", (unsigned long long)counters.weight_cache_entry_destroy_count);
++        // entries live until their backend is freed: at this point (before whisper_free) balance means "no entry created"
++        const bool cache_entries_balanced = counters.weight_cache_entry_create_count == counters.weight_cache_entry_destroy_count;
++        printf("CACHE_ENTRY_LIFECYCLE_BALANCED=%s\n", cache_entries_balanced ? "true" : "false");
++        printf("WEIGHT_CACHE_ENTRY_LIFECYCLE_BALANCED=%s\n", cache_entries_balanced ? "true" : "false");
++        printf("WEIGHT_CACHE_HIT_COUNT_PLUS_MISS_COUNT=%llu\n", (unsigned long long)(counters.weight_cache_hit_count + counters.weight_cache_miss_count));
++        printf("WEIGHT_CACHE_HIT_COUNT=%llu\n", (unsigned long long)counters.weight_cache_hit_count);
++        printf("WEIGHT_CACHE_MISS_COUNT=%llu\n", (unsigned long long)counters.weight_cache_miss_count);
++        printf("WEIGHT_UPLOAD_COUNT_FIRST_RUN=%llu\n", (unsigned long long)counters.weight_upload_count_first_run);
++        printf("WEIGHT_UPLOAD_COUNT_SECOND_RUN=%llu\n", (unsigned long long)counters.weight_upload_count_second_run);
++        printf("INFERENCE_RUN_COUNT=%llu\n", (unsigned long long)counters.inference_run_count);
++        printf("INFERENCE_RUN_1_DISPATCH_COUNT=%llu\n", (unsigned long long)counters.inference_run_1_dispatch_count);
++        printf("INFERENCE_RUN_2_DISPATCH_COUNT=%llu\n", (unsigned long long)counters.inference_run_2_dispatch_count);
++        printf("INFERENCE_RUN_1_WEIGHT_UPLOAD_COUNT=%llu\n", (unsigned long long)counters.inference_run_1_weight_upload_count);
++        printf("INFERENCE_RUN_2_WEIGHT_UPLOAD_COUNT=%llu\n", (unsigned long long)counters.inference_run_2_weight_upload_count);
++        printf("RUN_1_ENCODER_DISPATCH_COUNT=%llu\n", (unsigned long long)counters.run_1_encoder_dispatch_count);
++        printf("RUN_1_CROSS_DISPATCH_COUNT=%llu\n", (unsigned long long)counters.run_1_cross_dispatch_count);
++        printf("RUN_1_DECODER_DISPATCH_COUNT=%llu\n", (unsigned long long)counters.run_1_decoder_dispatch_count);
++        printf("RUNTIME_ENCODER_DISPATCH_COUNT=%llu\n", (unsigned long long)counters.run_1_encoder_dispatch_count);
++        printf("RUNTIME_CROSS_ATTENTION_DISPATCH_COUNT=%llu\n", (unsigned long long)counters.run_1_cross_dispatch_count);
++        printf("RUNTIME_DECODER_STEP_COUNT=%d\n", n_batchd);
++        printf("RUNTIME_DECODER_DISPATCH_COUNT=%llu\n", (unsigned long long)counters.run_1_decoder_dispatch_count);
++        {
++            const char * hist_prefix = (ctx->model.hparams.n_text_layer == 12) ? "SMALL" : ((ctx->model.hparams.n_text_layer == 6) ? "BASE" : "DECODER");
++            printf("%s_DECODER_STEP_COUNT=%zu\n", hist_prefix, s_autoregressive_step_dispatches.size());
++            printf("%s_DECODER_DISPATCH_HISTOGRAM=[", hist_prefix);
++            uint64_t total_step_disp = 0;
++            for (size_t i = 0; i < s_autoregressive_step_dispatches.size(); ++i) {
++                total_step_disp += s_autoregressive_step_dispatches[i];
++                printf("%u%s", s_autoregressive_step_dispatches[i], (i + 1 < s_autoregressive_step_dispatches.size()) ? ", " : "");
++            }
++            printf("]\n");
++            printf("%s_DECODER_DISPATCH_SUM=%llu\n", hist_prefix, (unsigned long long)total_step_disp);
++            const long long unattributed = (long long)(counters.run_1_decoder_dispatch_count + counters.run_2_decoder_dispatch_count) -
++                                           (long long)total_step_disp;
++            printf("%s_UNATTRIBUTED_DECODER_DISPATCH_COUNT=%lld\n", hist_prefix, unattributed);
++            if (!s_autoregressive_step_dispatches.empty()) {
++                printf("%s_DECODER_STEP_0_DISPATCH_COUNT=%u\n", hist_prefix, s_autoregressive_step_dispatches[0]);
++                if (s_autoregressive_step_dispatches.size() > 1) {
++                    uint64_t s1_sum = 0;
++                    for (size_t i = 1; i < s_autoregressive_step_dispatches.size(); ++i) {
++                        s1_sum += s_autoregressive_step_dispatches[i];
++                    }
++                    printf("%s_DECODER_STEPS_1_TO_%zu_DISPATCH_COUNT=%llu\n", hist_prefix, s_autoregressive_step_dispatches.size() - 1, (unsigned long long)s1_sum);
++                }
++            }
++            printf("MODEL_DECODER_BLOCK_COUNT_FROM_METADATA=%d\n", ctx->model.hparams.n_text_layer);
++        }
++        printf("RUN_2_ENCODER_DISPATCH_COUNT=%llu\n", (unsigned long long)counters.run_2_encoder_dispatch_count);
++        printf("RUN_2_CROSS_DISPATCH_COUNT=%llu\n", (unsigned long long)counters.run_2_cross_dispatch_count);
++        printf("RUN_2_DECODER_DISPATCH_COUNT=%llu\n", (unsigned long long)counters.run_2_decoder_dispatch_count);
++        printf("RUN_2_CONTEXT_FORWARD_PASS_COUNT=%llu\n", (unsigned long long)counters.run_2_context_forward_pass_count);
++        printf("RUN_2_CONTEXT_MATMULS_PER_PASS=%llu\n", (unsigned long long)counters.run_2_context_matmuls_per_pass);
++        printf("RUN_2_CONTEXT_DISPATCH_COUNT=%llu\n", (unsigned long long)counters.run_2_context_dispatch_count);
++        printf("RUN_2_EXTRA_DISPATCH_REASON_SOURCE=RUNTIME_TELEMETRY\n");
++        bool run2_extra_reconciled = (counters.inference_run_2_dispatch_count - counters.inference_run_1_dispatch_count ==
++            counters.run_2_context_forward_pass_count * counters.run_2_context_matmuls_per_pass);
++        printf("RUN_2_EXTRA_DISPATCH_RECONCILED=%s\n", run2_extra_reconciled ? "true" : "false");
++        printf("GRAPH_COMMAND_BUFFER_COUNT=%llu\n", (unsigned long long)counters.graph_command_buffer_count);
++        printf("GRAPH_COMPLETION_EVENT_COUNT=%llu\n", (unsigned long long)counters.graph_completion_event_count);
++        printf("NODE_LEVEL_EVENT_WAIT_COUNT=%llu\n", (unsigned long long)counters.node_level_event_wait_count);
++        printf("INTERNAL_ACTIVATION_UPLOAD_COUNT=%llu\n", (unsigned long long)counters.internal_activation_upload_count);
++        printf("INTERNAL_OUTPUT_READBACK_COUNT=%llu\n", (unsigned long long)counters.internal_output_readback_count);
++        printf("EVENT_CREATE_DESTROY_COUNT=%llu\n", (unsigned long long)counters.event_create_destroy_count);
++        // every dispatch the backend attempted must have succeeded
++        printf("EXPECTED_GPU_DISPATCH_COUNT=%llu\n", (unsigned long long)counters.ameva_dispatch_attempt_count);
++        printf("ACTUAL_GPU_DISPATCH_COUNT=%llu\n", (unsigned long long)counters.ameva_dispatch_success_count);
++        printf("DISPATCH_COUNT_RECONCILED=%s\n",
++               counters.ameva_dispatch_attempt_count == counters.ameva_dispatch_success_count ? "true" : "false");
++        printf("WEIGHT_UPLOAD_TIME_MS=%.3f\n", counters.weight_upload_time_ms);
++        printf("ACTIVATION_UPLOAD_TIME_MS=%.3f\n", counters.activation_upload_time_ms);
++        printf("DISPATCH_API_TIME_MS=%.3f\n", counters.dispatch_api_time_ms);
++        printf("EVENT_WAIT_TIME_MS=%.3f\n", counters.event_wait_time_ms);
++        printf("OUTPUT_READBACK_TIME_MS=%.3f\n", counters.output_readback_time_ms);
++        printf("WEIGHT_UPLOAD_BYTES=%llu\n", (unsigned long long)counters.weight_upload_bytes);
++        printf("ACTIVATION_UPLOAD_BYTES=%llu\n", (unsigned long long)counters.activation_upload_bytes);
++        printf("OUTPUT_READBACK_BYTES=%llu\n", (unsigned long long)counters.output_readback_bytes);
++        fflush(stdout);
+     }
+     WHISPER_LOG_INFO("%s:    total time = %8.2f ms\n", __func__, (t_end_us - ctx->t_start_us)/1000.0f);
+ }
+@@ -6171,6 +6411,256 @@ static void whisper_compute_probs(
+     }
+ }
+ 
++#include <sys/stat.h>
++#include <sys/types.h>
++
++// Standalone SHA-256 for diagnostics
++typedef struct {
++    uint32_t state[8];
++    uint64_t count;
++    uint8_t buffer[64];
++} AmevaDiagSha256Ctx;
++
++#define AMEVA_SHA256_ROTRIGHT(a,b) (((a) >> (b)) | ((a) << (32-(b))))
++#define AMEVA_SHA256_CH(x,y,z) (((x) & (y)) ^ (~(x) & (z)))
++#define AMEVA_SHA256_MAJ(x,y,z) (((x) & (y)) ^ ((x) & (z)) ^ ((y) & (z)))
++#define AMEVA_SHA256_EP0(x) (AMEVA_SHA256_ROTRIGHT(x,2) ^ AMEVA_SHA256_ROTRIGHT(x,13) ^ AMEVA_SHA256_ROTRIGHT(x,22))
++#define AMEVA_SHA256_EP1(x) (AMEVA_SHA256_ROTRIGHT(x,6) ^ AMEVA_SHA256_ROTRIGHT(x,11) ^ AMEVA_SHA256_ROTRIGHT(x,25))
++#define AMEVA_SHA256_SIG0(x) (AMEVA_SHA256_ROTRIGHT(x,7) ^ AMEVA_SHA256_ROTRIGHT(x,18) ^ ((x) >> 3))
++#define AMEVA_SHA256_SIG1(x) (AMEVA_SHA256_ROTRIGHT(x,17) ^ AMEVA_SHA256_ROTRIGHT(x,19) ^ ((x) >> 10))
++
++static const uint32_t k_ameva_diag_sha256[64] = {
++    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
++    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
++    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
++    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
++    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
++    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
++    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
++    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
++};
++
++static inline void ameva_diag_sha256_transform(AmevaDiagSha256Ctx *ctx, const uint8_t data[]) {
++    uint32_t a, b, c, d, e, f, g, h, i, j, t1, t2, m[64];
++    for (i = 0, j = 0; i < 16; ++i, j += 4)
++        m[i] = ((uint32_t)data[j] << 24) | ((uint32_t)data[j + 1] << 16) | ((uint32_t)data[j + 2] << 8) | ((uint32_t)data[j + 3]);
++    for ( ; i < 64; ++i)
++        m[i] = AMEVA_SHA256_SIG1(m[i - 2]) + m[i - 7] + AMEVA_SHA256_SIG0(m[i - 15]) + m[i - 16];
++    a = ctx->state[0]; b = ctx->state[1]; c = ctx->state[2]; d = ctx->state[3];
++    e = ctx->state[4]; f = ctx->state[5]; g = ctx->state[6]; h = ctx->state[7];
++    for (i = 0; i < 64; ++i) {
++        t1 = h + AMEVA_SHA256_EP1(e) + AMEVA_SHA256_CH(e,f,g) + k_ameva_diag_sha256[i] + m[i];
++        t2 = AMEVA_SHA256_EP0(a) + AMEVA_SHA256_MAJ(a,b,c);
++        h = g; g = f; f = e; e = d + t1;
++        d = c; c = b; b = a; a = t1 + t2;
++    }
++    ctx->state[0] += a; ctx->state[1] += b; ctx->state[2] += c; ctx->state[3] += d;
++    ctx->state[4] += e; ctx->state[5] += f; ctx->state[6] += g; ctx->state[7] += h;
++}
++
++static inline void ameva_diag_sha256_compute(const uint8_t * data, size_t len, char hex_out[65]) {
++    AmevaDiagSha256Ctx ctx;
++    ctx.count = 0;
++    ctx.state[0] = 0x6a09e667; ctx.state[1] = 0xbb67ae85; ctx.state[2] = 0x3c6ef372; ctx.state[3] = 0xa54ff53a;
++    ctx.state[4] = 0x510e527f; ctx.state[5] = 0x9b05688c; ctx.state[6] = 0x1f83d9ab; ctx.state[7] = 0x5be0cd19;
++    for (size_t i = 0; i < len; ++i) {
++        ctx.buffer[ctx.count % 64] = data[i];
++        ctx.count++;
++        if ((ctx.count % 64) == 0) ameva_diag_sha256_transform(&ctx, ctx.buffer);
++    }
++    size_t i = ctx.count % 64;
++    ctx.buffer[i++] = 0x80;
++    if (i > 56) {
++        while (i < 64) ctx.buffer[i++] = 0x00;
++        ameva_diag_sha256_transform(&ctx, ctx.buffer);
++        memset(ctx.buffer, 0, 56);
++    } else {
++        while (i < 56) ctx.buffer[i++] = 0x00;
++    }
++    uint64_t bit_len = ctx.count * 8;
++    for (int b = 7; b >= 0; b--) {
++        ctx.buffer[56 + (7 - b)] = (uint8_t)((bit_len >> (b * 8)) & 0xFF);
++    }
++    ameva_diag_sha256_transform(&ctx, ctx.buffer);
++    uint8_t hash[32];
++    for (i = 0; i < 4; ++i) {
++        for (int j = 0; j < 8; j++) {
++            hash[j * 4 + i] = (uint8_t)((ctx.state[j] >> (24 - i * 8)) & 0x000000ff);
++        }
++    }
++    for (int k = 0; k < 32; ++k) {
++        sprintf(hex_out + (k * 2), "%02x", hash[k]);
++    }
++    hex_out[64] = '\0';
++}
++
++static bool s_k02_diag_dumped_stage1 = false;
++static bool s_k02_diag_dumped_stage2 = false;
++static bool s_k02_diag_dumped_stage3 = false;
++
++static void dump_k02_stage_logits(
++    const char * stage_name,
++    const float * data,
++    int n_logits,
++    const struct whisper_context & ctx,
++    const struct whisper_state & state,
++    const struct whisper_decoder & decoder
++) {
++    const char * diag_env = getenv("AMEVA_CAPTURE_K02_LOGITS");
++    if (!diag_env || strcmp(diag_env, "1") != 0) {
++        return;
++    }
++
++    if (strcmp(stage_name, "RAW_OUTPUT_PROJECTION") == 0) {
++        if (s_k02_diag_dumped_stage1) return;
++    } else if (strcmp(stage_name, "AFTER_WHISPER_LOGIT_FILTERS") == 0) {
++        if (s_k02_diag_dumped_stage2) return;
++    } else if (strcmp(stage_name, "SAMPLER_INPUT") == 0) {
++        if (s_k02_diag_dumped_stage3) return;
++    }
++
++    const auto & tokens_cur = decoder.sequence.tokens;
++    bool is_target_prefix = false;
++    if (tokens_cur.size() == 6) {
++        if (tokens_cur[0].id == 50364 &&
++            tokens_cur[1].id == 542 &&
++            tokens_cur[2].id == 11545 &&
++            tokens_cur[3].id == 19079 &&
++            tokens_cur[4].id == 7097 &&
++            tokens_cur[5].id == 22482) {
++            is_target_prefix = true;
++        }
++    }
++    if (!is_target_prefix) {
++        return;
++    }
++
++    if (strcmp(stage_name, "RAW_OUTPUT_PROJECTION") == 0) {
++        s_k02_diag_dumped_stage1 = true;
++    } else if (strcmp(stage_name, "AFTER_WHISPER_LOGIT_FILTERS") == 0) {
++        s_k02_diag_dumped_stage2 = true;
++    } else if (strcmp(stage_name, "SAMPLER_INPUT") == 0) {
++        s_k02_diag_dumped_stage3 = true;
++    }
++
++    const char * out_base = getenv("AMEVA_DIAGNOSTICS_DIR");
++    std::string base_dir = out_base ? out_base : "/data/data/com.termux/files/home/k02_step5";
++    bool is_cpu = (getenv("AMEVA_DISABLE_BACKEND") != nullptr && strcmp(getenv("AMEVA_DISABLE_BACKEND"), "1") == 0);
++    std::string backend_name = is_cpu ? "cpu" : "gpu";
++    std::string target_dir = base_dir + "/" + backend_name;
++
++    mkdir(base_dir.c_str(), 0777);
++    mkdir(target_dir.c_str(), 0777);
++
++    std::string bin_path = target_dir + "/logits_" + stage_name + ".bin";
++    std::string json_path = target_dir + "/logits_" + stage_name + ".json";
++
++    FILE * f = fopen(bin_path.c_str(), "wb");
++    if (!f) {
++        fprintf(stderr, "[AMEVA_DIAG] ERROR: Failed to open %s for writing\n", bin_path.c_str());
++        return;
++    }
++    size_t written = fwrite(data, sizeof(float), n_logits, f);
++    fclose(f);
++    if (written != (size_t)n_logits) {
++        fprintf(stderr, "[AMEVA_DIAG] ERROR: Short write to %s\n", bin_path.c_str());
++        return;
++    }
++
++    char sha256_hex[65] = {};
++    ameva_diag_sha256_compute((const uint8_t*)data, n_logits * sizeof(float), sha256_hex);
++
++    float val_11297 = (11297 < n_logits) ? data[11297] : -INFINITY;
++    float val_7590  = (7590 < n_logits)  ? data[7590]  : -INFINITY;
++
++    std::vector<std::pair<float, int>> pairs;
++    pairs.reserve(n_logits);
++    for (int i = 0; i < n_logits; ++i) {
++        pairs.push_back({data[i], i});
++    }
++    std::sort(pairs.begin(), pairs.end(), [](const std::pair<float, int>& a, const std::pair<float, int>& b) {
++        return a.first > b.first;
++    });
++
++    float top1_top2_margin = 0.0f;
++    if (pairs.size() >= 2) {
++        top1_top2_margin = pairs[0].first - pairs[1].first;
++    }
++
++    int n_past = decoder.sequence.tokens.size();
++    if (decoder.i_batch < state.batch.n_tokens) {
++        n_past = state.batch.pos[decoder.i_batch];
++    }
++
++    fprintf(stdout, "[AMEVA_K02_LOGITS] STAGE=%s BACKEND=%s\n", stage_name, backend_name.c_str());
++    fprintf(stdout, "RAW_BEAM_PREFIX_TOKEN_IDS=[50364, 542, 11545, 19079, 7097, 22482]\n");
++    fprintf(stdout, "TOKEN_19079_CLASS=BYTE_LEVEL_BPE_CONTINUATION\n");
++    fprintf(stdout, "TOKEN_19079_IS_SPECIAL=false\n");
++    fprintf(stdout, "TOKEN_19079_IS_IGNORABLE=false\n");
++    fprintf(stdout, "PREFIX_MATCH_POLICY=EXACT_RAW_TOKEN_SEQUENCE\n");
++    int beam_idx = -1;
++    for (int d = 0; d < WHISPER_MAX_DECODERS; ++d) {
++        if (&state.decoders[d] == &decoder) {
++            beam_idx = d;
++            break;
++        }
++    }
++    fprintf(stdout, "%s_CAPTURED_BEAM_INDEX=%d\n", is_cpu ? "CPU" : "GPU", beam_idx);
++    fprintf(stdout, "K02_CAPTURE_IS_PRE_SAMPLING=true\n");
++    fprintf(stdout, "%s_DECODER_INVOCATION_INDEX=%d\n", is_cpu ? "CPU" : "GPU", state.n_decode + state.n_batchd);
++    fprintf(stdout, "%s_DECODER_POSITION=%d\n", is_cpu ? "CPU" : "GPU", (int)tokens_cur.size());
++    fprintf(stdout, "%s_N_PAST=%d\n", is_cpu ? "CPU" : "GPU", n_past);
++    fprintf(stdout, "%s_N_TOKENS=%d\n", is_cpu ? "CPU" : "GPU", (int)state.batch.n_tokens);
++    fprintf(stdout, "%s_N_BATCHD_BEFORE=%d\n", is_cpu ? "CPU" : "GPU", state.n_batchd);
++    fprintf(stdout, "%s_%s_LOGITS_SHA256=%s\n", is_cpu ? "CPU" : "GPU", stage_name, sha256_hex);
++    fprintf(stdout, "%s_LOGIT_TOKEN_11297=%.6f\n", is_cpu ? "CPU" : "GPU", val_11297);
++    fprintf(stdout, "%s_LOGIT_TOKEN_7590=%.6f\n", is_cpu ? "CPU" : "GPU", val_7590);
++    fprintf(stdout, "%s_TOP1_TOP2_MARGIN=%.6f\n", is_cpu ? "CPU" : "GPU", top1_top2_margin);
++
++    fprintf(stdout, "%s_TOP20_TOKEN_IDS=[", is_cpu ? "CPU" : "GPU");
++    for (int k = 0; k < std::min(20, (int)pairs.size()); ++k) {
++        fprintf(stdout, "%d%s", pairs[k].second, (k + 1 < 20) ? ", " : "");
++    }
++    fprintf(stdout, "]\n");
++
++    fprintf(stdout, "%s_TOP20_LOGITS=[", is_cpu ? "CPU" : "GPU");
++    for (int k = 0; k < std::min(20, (int)pairs.size()); ++k) {
++        fprintf(stdout, "%.4f%s", pairs[k].first, (k + 1 < 20) ? ", " : "");
++    }
++    fprintf(stdout, "]\n");
++    fflush(stdout);
++
++    FILE * jf = fopen(json_path.c_str(), "w");
++    if (jf) {
++        fprintf(jf, "{\n");
++        fprintf(jf, "  \"schema_version\": 1,\n");
++        fprintf(jf, "  \"checkpoint_id\": \"decoder.step5.logits.%s\",\n", stage_name);
++        fprintf(jf, "  \"backend\": \"%s\",\n", backend_name.c_str());
++        fprintf(jf, "  \"dtype\": \"float32\",\n");
++        fprintf(jf, "  \"shape\": [%d],\n", n_logits);
++        fprintf(jf, "  \"strides\": [1],\n");
++        fprintf(jf, "  \"byte_count\": %zu,\n", n_logits * sizeof(float));
++        fprintf(jf, "  \"sha256\": \"%s\",\n", sha256_hex);
++        fprintf(jf, "  \"decode_position\": %d,\n", (int)tokens_cur.size());
++        fprintf(jf, "  \"prefix_token_ids\": [50364, 542, 11545, 7097, 22482],\n");
++        fprintf(jf, "  \"token_11297_value\": %.6f,\n", val_11297);
++        fprintf(jf, "  \"token_7590_value\": %.6f,\n", val_7590);
++        fprintf(jf, "  \"top1_top2_margin\": %.6f,\n", top1_top2_margin);
++        fprintf(jf, "  \"top20_token_ids\": [");
++        for (int k = 0; k < std::min(20, (int)pairs.size()); ++k) {
++            fprintf(jf, "%d%s", pairs[k].second, (k + 1 < 20) ? ", " : "");
++        }
++        fprintf(jf, "],\n");
++        fprintf(jf, "  \"top20_values\": [");
++        for (int k = 0; k < std::min(20, (int)pairs.size()); ++k) {
++            fprintf(jf, "%.6f%s", pairs[k].first, (k + 1 < 20) ? ", " : "");
++        }
++        fprintf(jf, "]\n");
++        fprintf(jf, "}\n");
++        fclose(jf);
++    }
++}
++
+ // process the logits for the selected decoder
+ // - applies logit filters
+ // - computes logprobs and probs
+@@ -6198,6 +6688,9 @@ static void whisper_process_logits(
+         logits.resize(n_logits);
+         memcpy(logits.data(), state.logits.data() + decoder.i_batch*n_logits, n_logits*sizeof(float));
+ 
++        // Hook Stage 1: RAW_OUTPUT_PROJECTION
++        dump_k02_stage_logits("RAW_OUTPUT_PROJECTION", logits.data(), n_logits, ctx, state, decoder);
++
+         if (temperature > 0.0f) {
+             for (int i = 0; i < n_logits; i++) {
+                 logits[i] /= temperature;
+@@ -6395,9 +6888,15 @@ static void whisper_process_logits(
+         }
+     }
+ 
++    // Hook Stage 2: AFTER_WHISPER_LOGIT_FILTERS
++    dump_k02_stage_logits("AFTER_WHISPER_LOGIT_FILTERS", logits.data(), n_logits, ctx, state, decoder);
++
+     // compute probs
+     whisper_compute_probs(logits, n_logits, logprobs, probs);
+ 
++    // Hook Stage 3: SAMPLER_INPUT
++    dump_k02_stage_logits("SAMPLER_INPUT", logits.data(), n_logits, ctx, state, decoder);
++
+ #if 0
+     // print first 100 logits - token string : logit
+     //for (int i = 0; i < 10; i++) {
+@@ -6816,6 +7315,23 @@ int whisper_full_with_state(
+     struct whisper_full_params   params,
+                    const float * samples,
+                            int   n_samples) {
++    // P0-5: Explicit inference run tracking via formal AMEVA backend API
++    struct AmevaInferenceScope {
++        uint32_t id;
++        AmevaInferenceScope(uint32_t i) : id(i) {
++            ameva_backend_begin_inference(nullptr, id);
++        }
++        ~AmevaInferenceScope() {
++            ameva_backend_end_inference(nullptr, id);
++        }
++    };
++    static std::atomic<uint32_t> s_inference_counter(0);
++    AmevaInferenceScope ameva_scope(++s_inference_counter);
++
++    s_k02_diag_dumped_stage1 = false;
++    s_k02_diag_dumped_stage2 = false;
++    s_k02_diag_dumped_stage3 = false;
++
+     // clear old results
+     auto & result_all = state->result_all;
+ 
+@@ -7148,7 +7664,15 @@ int whisper_full_with_state(
+                     // overallocate to workaround KV cache fragmentation issues
+                     const int factor = n_decoders_cur > 1 ? n_decoders_cur + 2 : 1;
+ 
+-                    if (!whisper_kv_cache_init(state->kv_self, state->backends[0], ctx->itype,
++                    ggml_backend_t backend_kv = state->backends.back();
++                    for (auto backend : state->backends) {
++                        if (ggml_backend_dev_type(ggml_backend_get_device(backend)) == GGML_BACKEND_DEVICE_TYPE_GPU) {
++                            backend_kv = backend;
++                            break;
++                        }
++                    }
++
++                    if (!whisper_kv_cache_init(state->kv_self, backend_kv, ctx->itype,
+                                 ctx->model.hparams.n_text_state,
+                                 ctx->model.hparams.n_text_layer,
+                                 GGML_PAD(ctx->model.hparams.n_text_ctx, 256)*factor)) {
+@@ -7285,6 +7809,8 @@ int whisper_full_with_state(
+ 
+                 // for beam-search, choose the top candidates and update the KV caches
+                 if (params.strategy == whisper_sampling_strategy::WHISPER_SAMPLING_BEAM_SEARCH) {
++                    const bool audit_beam_steps = (getenv("AMEVA_AUDIT_BEAM_STEPS") != nullptr && strcmp(getenv("AMEVA_AUDIT_BEAM_STEPS"), "1") == 0);
++
+                     std::sort(
+                             beam_candidates.begin(),
+                             beam_candidates.end(),
+@@ -7295,6 +7821,20 @@ int whisper_full_with_state(
+                         return a.decoder_idx < b.decoder_idx;
+                     });
+ 
++                    if (audit_beam_steps) {
++                        const bool is_cpu = (getenv("AMEVA_DISABLE_BACKEND") != nullptr && strcmp(getenv("AMEVA_DISABLE_BACKEND"), "1") == 0);
++                        const char * dev_label = is_cpu ? "CPU" : "GPU";
++                        fprintf(stdout, "[AMEVA_BEAM_STEP] %s STEP=%d N_DECODERS=%d N_CANDIDATES=%zu\n",
++                                dev_label, i, n_decoders_cur, beam_candidates.size());
++                        for (size_t c_idx = 0; c_idx < std::min((size_t)10, beam_candidates.size()); ++c_idx) {
++                            const auto & cand = beam_candidates[c_idx];
++                            whisper_token last_tok = cand.sequence.tokens.empty() ? -1 : cand.sequence.tokens.back().id;
++                            float last_plog = cand.sequence.tokens.empty() ? 0.0f : cand.sequence.tokens.back().plog;
++                            fprintf(stdout, "[AMEVA_BEAM_CANDIDATE] %s STEP=%d RANK=%zu PARENT_BEAM=%d TOKEN_ID=%d PLOG=%.6f CUMULATIVE_LOGPROB=%.6f\n",
++                                    dev_label, i, c_idx, cand.decoder_idx, last_tok, last_plog, cand.sequence.sum_logprobs_all);
++                        }
++                    }
++
+                     uint32_t cur_c = 0;
+ 
+                     for (int j = 0; j < n_decoders_cur; ++j) {
+@@ -7319,12 +7859,24 @@ int whisper_full_with_state(
+                         decoder.sequence   = cur.sequence;
+                         decoder.grammar    = cur.grammar;
+ 
++                        if (audit_beam_steps) {
++                            const bool is_cpu = (getenv("AMEVA_DISABLE_BACKEND") != nullptr && strcmp(getenv("AMEVA_DISABLE_BACKEND"), "1") == 0);
++                            const char * dev_label = is_cpu ? "CPU" : "GPU";
++                            whisper_token sel_tok = decoder.sequence.tokens.empty() ? -1 : decoder.sequence.tokens.back().id;
++                            fprintf(stdout, "[AMEVA_BEAM_SELECTED] %s STEP=%d BEAM_SLOT=%d PARENT_BEAM=%d TOKEN_ID=%d CUMULATIVE_LOGPROB=%.6f\n",
++                                    dev_label, i, j, cur.decoder_idx, sel_tok, decoder.sequence.sum_logprobs_all);
++                        }
++
+                         whisper_kv_cache_seq_cp(state->kv_self, cur.decoder_idx, WHISPER_MAX_DECODERS + j, -1, -1);
+ 
+                         WHISPER_LOG_DEBUG("%s: beam search: decoder %d: from decoder %d: token = %10s, plog = %8.5f, sum_logprobs = %8.5f\n",
+                                 __func__, j, cur.decoder_idx, ctx->vocab.id_to_token.at(decoder.sequence.tokens.back().id).c_str(), decoder.sequence.tokens.back().plog, decoder.sequence.sum_logprobs_all);
+                     }
+ 
++                    if (audit_beam_steps) {
++                        fflush(stdout);
++                    }
++
+                     for (int j = 0; j < n_decoders_cur; ++j) {
+                         auto & decoder = state->decoders[j];
+ 
+@@ -7562,6 +8114,56 @@ int whisper_full_with_state(
+                 }
+ 
+                 WHISPER_LOG_DEBUG("%s: best decoder = %d\n", __func__, best_decoder_id);
++
++                // [AMEVA_BEAM_AUDIT]
++                {
++                    bool is_cpu = (getenv("AMEVA_DISABLE_BACKEND") != nullptr && strcmp(getenv("AMEVA_DISABLE_BACKEND"), "1") == 0);
++                    const char * p_beampfx = is_cpu ? "CPU" : "GPU";
++                    fprintf(stdout, "\n[%s_BEAM_AUDIT]\n", p_beampfx);
++                    fprintf(stdout, "BEAM_INDEX_COUNT=%d\n", n_decoders_cur);
++                    fprintf(stdout, "%s_SELECTED_BEAM_INDEX=%d\n", p_beampfx, best_decoder_id);
++                    fprintf(stdout, "%s_BEAM_CUMULATIVE_LOGPROBS=[", p_beampfx);
++                    for (int j = 0; j < n_decoders_cur; ++j) {
++                        fprintf(stdout, "%.6f%s", state->decoders[j].sequence.sum_logprobs_all, (j + 1 < n_decoders_cur) ? ", " : "");
++                    }
++                    fprintf(stdout, "]\n");
++                    fprintf(stdout, "%s_BEAM_SCORES=[", p_beampfx);
++                    for (int j = 0; j < n_decoders_cur; ++j) {
++                        fprintf(stdout, "%.6f%s", state->decoders[j].sequence.score, (j + 1 < n_decoders_cur) ? ", " : "");
++                    }
++                    fprintf(stdout, "]\n");
++                    int tok_11297_beam = -1;
++                    int tok_7590_beam = -1;
++                    for (int j = 0; j < n_decoders_cur; ++j) {
++                        for (const auto & tok : state->decoders[j].sequence.tokens) {
++                            if (tok.id == 11297 && tok_11297_beam == -1) tok_11297_beam = j;
++                            if (tok.id == 7590 && tok_7590_beam == -1) tok_7590_beam = j;
++                        }
++                    }
++                    fprintf(stdout, "%s_TOKEN_11297_BEAM_INDEX=%d\n", p_beampfx, tok_11297_beam);
++                    fprintf(stdout, "%s_TOKEN_7590_BEAM_INDEX=%d\n", p_beampfx, tok_7590_beam);
++                    
++                    std::vector<std::pair<double, int>> ranked_decoders;
++                    for (int j = 0; j < n_decoders_cur; ++j) {
++                        ranked_decoders.push_back({state->decoders[j].sequence.score, j});
++                    }
++                    std::sort(ranked_decoders.begin(), ranked_decoders.end(), [](const auto& a, const auto& b){
++                        return a.first > b.first;
++                    });
++                    fprintf(stdout, "%s_FINAL_BEAM_RANKING=[", p_beampfx);
++                    for (size_t r = 0; r < ranked_decoders.size(); ++r) {
++                        fprintf(stdout, "%d%s", ranked_decoders[r].second, (r + 1 < ranked_decoders.size()) ? ", " : "");
++                    }
++                    fprintf(stdout, "]\n");
++                    for (int j = 0; j < n_decoders_cur; ++j) {
++                        fprintf(stdout, "%s_BEAM_%d_TOKENS=[", p_beampfx, j);
++                        for (size_t t = 0; t < state->decoders[j].sequence.tokens.size(); ++t) {
++                            fprintf(stdout, "%d%s", state->decoders[j].sequence.tokens[t].id, (t + 1 < state->decoders[j].sequence.tokens.size()) ? ", " : "");
++                        }
++                        fprintf(stdout, "]\n");
++                    }
++                    fflush(stdout);
++                }
+             }
+ 
+             bool success = true;

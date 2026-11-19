@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
 // AMEVA quantized KV cache (q8_0 / q4_0, ggml layout) through the real ggml backend path.
 //
 // 1. SET_ROWS f32 -> q8_0 / q4_0 (the KV-cache write). Rows of 96 elements (3 blocks: every other row starts in the

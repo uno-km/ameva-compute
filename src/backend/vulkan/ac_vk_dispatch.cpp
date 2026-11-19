@@ -1,3 +1,7 @@
+/**
+ * Copyright (c) 2026 Uno Kim / AMEVA Foundation. All rights reserved.
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR LicenseRef-AMEVA-Commercial
+ */
 #include "ac_dispatch.h"
 #include "ac_base.h"
 #include <stdio.h>
@@ -7,6 +11,7 @@
 #include <vector>
 #include <new>
 #include <unordered_map>
+#include <algorithm>
 
 static uint64_t get_time_ns(void) {
     struct timespec ts;
@@ -30,6 +35,14 @@ const uint32_t kDescStoragePerPool = 256 * 8;
 const uint32_t kDescUniformPerPool = 256;
 /* above this many sets the cache is emptied, but only when nothing is recording or in flight */
 const size_t kDescCacheTrimThreshold = 16384;
+
+/* Capacity for n elements, grown geometrically. reserve(n) alone allocates exactly n, so reserving size() + k before
+ * every k pushes reallocates and copies the whole vector each time: quadratic in the dispatches of one batch (a
+ * 19000-dispatch graph spent about 100 us per dispatch here). */
+template <class V>
+void reserve_geometric(V& v, size_t n) {
+    if (v.capacity() < n) v.reserve(std::max(n, 2 * v.capacity()));
+}
 
 template <class H>
 uint64_t handle_bits(H h) {
@@ -575,7 +588,10 @@ cleanup_cmd:
 struct AcVkSubmission {
     AcVkContext* ctx;
     VkCommandBuffer cmd;                  /* command buffer being recorded (the last one once submitted) */
-    std::vector<VkCommandBuffer> flushed; /* earlier command buffers of this batch, already submitted */
+    std::vector<VkCommandBuffer> flushed; /* earlier command buffers of this batch, submitted, oldest first */
+    std::vector<VkFence> flushed_fences;  /* the fence of each flushed command buffer */
+    std::vector<VkCommandBuffer> spare;   /* flushed command buffers seen complete, recorded again by later flushes */
+    std::vector<VkFence> spare_fences;    /* their fences, reset */
     VkFence fence;
     VkQueryPool query_pool;
     bool has_timestamps;
@@ -659,6 +675,14 @@ static void sub_free_vk(AcVkSubmission* s) {
         vkFreeCommandBuffers(dev, s->ctx->command_pool, (uint32_t)s->flushed.size(), s->flushed.data());
         s->flushed.clear();
     }
+    if (!s->spare.empty()) {
+        vkFreeCommandBuffers(dev, s->ctx->command_pool, (uint32_t)s->spare.size(), s->spare.data());
+        s->spare.clear();
+    }
+    for (VkFence f : s->flushed_fences) vkDestroyFence(dev, f, NULL);
+    for (VkFence f : s->spare_fences) vkDestroyFence(dev, f, NULL);
+    s->flushed_fences.clear();
+    s->spare_fences.clear();
     s->query_pool = VK_NULL_HANDLE;
     s->fence = VK_NULL_HANDLE;
     s->cmd = VK_NULL_HANDLE;
@@ -735,7 +759,7 @@ static AcResult batch_record(AcVkCommandBatch* b, AcVkKernel* kernel, AcVkBuffer
     }
     try {
         b->sub->kernels.push_back(kernel);
-        b->sub->buffers.reserve(b->sub->buffers.size() + count);
+        reserve_geometric(b->sub->buffers, b->sub->buffers.size() + count);
     } catch (...) {
         if (ev) {
             b->sub->refs--;
@@ -798,12 +822,43 @@ bool ac_vk_submission_is_submitted(const AcVkSubmission* s) {
     return s && s->state == SUB_SUBMITTED;
 }
 
+/* AMEVA_VK_WAIT (experiment, read once): "block" (default) waits in vkWaitForFences, the thread sleeps until the
+   driver wakes it; "spin" reads the fence status in a loop with about 20 us of clock reads between reads, one CPU
+   core busy while the GPU works (as AMEVA_CL_WAIT=spin of the OpenCL backend). Any other value fails the wait. */
+static int vk_wait_mode(void) {
+    static const int mode = [] {
+        const char* e = getenv("AMEVA_VK_WAIT");
+        if (!e || !*e || !strcmp(e, "block")) return 0;
+        if (!strcmp(e, "spin")) {
+            fprintf(stderr, "ac_runtime(vulkan): fences are waited by spinning (AMEVA_VK_WAIT=spin)\n");
+            return 1;
+        }
+        fprintf(stderr, "ac_runtime(vulkan): AMEVA_VK_WAIT must be block or spin (got \"%s\")\n", e);
+        return -1;
+    }();
+    return mode;
+}
+
+static VkResult vk_wait_fence(VkDevice device, VkFence fence, uint64_t timeout_ns) {
+    if (vk_wait_mode() == 0) return vkWaitForFences(device, 1, &fence, VK_TRUE, timeout_ns);
+    if (vk_wait_mode() < 0) return VK_ERROR_INITIALIZATION_FAILED;
+    const uint64_t t0 = get_time_ns();
+    for (;;) {
+        const VkResult r = vkGetFenceStatus(device, fence);
+        if (r != VK_NOT_READY) return r;
+        const uint64_t t = get_time_ns();
+        if (t - t0 >= timeout_ns) return VK_TIMEOUT;
+        while (get_time_ns() - t < 20000) {}
+    }
+}
+
 AcResult ac_vk_submission_wait(AcVkSubmission* s, uint64_t timeout_ns) {
     if (!s) return AC_ERR_NULL_POINTER;
     if (s->state != SUB_SUBMITTED) return AC_ERR_INVALID_ARGUMENT;
     if (s->signaled) return AC_SUCCESS;
     if (s->device_lost) return AC_ERR_DRIVER_CRASH_OR_LOST;
-    VkResult r = vkWaitForFences(s->ctx->device, 1, &s->fence, VK_TRUE, timeout_ns);
+    VkResult r = vk_wait_fence(s->ctx->device, s->fence, timeout_ns);
+    if (r == VK_ERROR_INITIALIZATION_FAILED) return AC_ERR_INVALID_ARGUMENT;
     if (r == VK_TIMEOUT) return AC_ERR_LAUNCH_TIMEOUT;
     if (r == VK_ERROR_DEVICE_LOST) {
         s->device_lost = true;
@@ -1051,24 +1106,87 @@ AcResult ac_vk_batch_barrier(AcVkCommandBatch* batch) {
  * are cut into submissions of bounded GPU time this way (mobile drivers reset the GPU when one submission runs for
  * seconds), and the GPU starts while the rest is still being recorded. Ordering needs nothing extra: a barrier recorded
  * later has every earlier command of the queue in its first synchronization scope, and the final fence signals after
- * all earlier submissions. The hazard state of the batch carries over unchanged. */
+ * all earlier submissions. The hazard state of the batch carries over unchanged.
+ *
+ * Driver memory of a command buffer stays allocated until the command buffer is reset or freed: on Mali-G68 about
+ * 100 KB per recorded dispatch (one ameva_qmm f32 dispatch, barriers or not), so a 30000-dispatch graph held about
+ * 3 GB until its final fence. Each flushed command buffer therefore carries a fence; one seen complete is recorded
+ * again by a later flush (the pool keeps its memory for reuse), and once more than kMaxPendingFlushes are on the queue
+ * the recording thread waits for the oldest. The GPU still has the others queued while it waits. */
+static const size_t kMaxPendingFlushes = 4;
+static const uint64_t kPendingFlushTimeoutNs = 60000000000ULL; /* one flush is bounded by the caller's work budget */
+
+/* Moves the oldest flushed command buffer, known complete, to the spare list. */
+static void sub_recycle_oldest(AcVkSubmission* s) {
+    VkFence f = s->flushed_fences.front();
+    vkResetFences(s->ctx->device, 1, &f);
+    s->spare.push_back(s->flushed.front());
+    s->spare_fences.push_back(f);
+    s->flushed.erase(s->flushed.begin());
+    s->flushed_fences.erase(s->flushed_fences.begin());
+}
+
+/* Recycles flushed command buffers that completed; with wait, first waits until at most kMaxPendingFlushes are
+ * pending. Spare capacity is reserved by the caller. */
+static AcResult sub_collect_flushed(AcVkSubmission* s, bool wait) {
+    while (!s->flushed.empty()) {
+        VkResult r = vkGetFenceStatus(s->ctx->device, s->flushed_fences.front());
+        if (r == VK_NOT_READY && wait && s->flushed.size() > kMaxPendingFlushes) {
+            r = vk_wait_fence(s->ctx->device, s->flushed_fences.front(), kPendingFlushTimeoutNs);
+            if (r == VK_TIMEOUT) return AC_ERR_LAUNCH_TIMEOUT;
+            if (r == VK_ERROR_INITIALIZATION_FAILED) return AC_ERR_INVALID_ARGUMENT;
+        }
+        if (r == VK_NOT_READY) return AC_SUCCESS;
+        if (r != VK_SUCCESS) return AC_ERR_DRIVER_CRASH_OR_LOST;
+        sub_recycle_oldest(s);
+    }
+    return AC_SUCCESS;
+}
+
 AcResult ac_vk_batch_flush(AcVkCommandBatch* batch) {
     if (!batch) return AC_ERR_NULL_POINTER;
     AcVkSubmission* s = batch->sub;
     if (s->state != SUB_RECORDING) return AC_ERR_INVALID_ARGUMENT;
     if (batch->dispatch_count == batch->dispatches_at_flush) return AC_SUCCESS; // nothing new to send
     try {
-        s->flushed.reserve(s->flushed.size() + 1);
+        reserve_geometric(s->flushed, s->flushed.size() + 1);
+        reserve_geometric(s->flushed_fences, s->flushed_fences.size() + 1);
+        reserve_geometric(s->spare, s->spare.size() + s->flushed.size() + 1);
+        reserve_geometric(s->spare_fences, s->spare_fences.size() + s->flushed.size() + 1);
     } catch (...) {
         return AC_ERR_OUT_OF_HOST_MEMORY;
     }
-    VkCommandBufferAllocateInfo cai = {};
-    cai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    cai.commandPool = batch->ctx->command_pool;
-    cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cai.commandBufferCount = 1;
+    AcResult cr = sub_collect_flushed(s, false);
+    if (cr != AC_SUCCESS) {
+        s->state = SUB_ABORTED;
+        batch_end_recording(batch);
+        if (sub_drain(s)) sub_retire(s);
+        return cr;
+    }
     VkCommandBuffer next = VK_NULL_HANDLE;
-    if (vkAllocateCommandBuffers(batch->ctx->device, &cai, &next) != VK_SUCCESS) return AC_ERR_OUT_OF_DEVICE_MEMORY;
+    if (!s->spare.empty()) {
+        next = s->spare.back();
+        s->spare.pop_back();
+    } else {
+        VkCommandBufferAllocateInfo cai = {};
+        cai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cai.commandPool = batch->ctx->command_pool;
+        cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cai.commandBufferCount = 1;
+        if (vkAllocateCommandBuffers(batch->ctx->device, &cai, &next) != VK_SUCCESS) return AC_ERR_OUT_OF_DEVICE_MEMORY;
+    }
+    VkFence fence = VK_NULL_HANDLE;
+    if (!s->spare_fences.empty()) {
+        fence = s->spare_fences.back();
+        s->spare_fences.pop_back();
+    } else {
+        VkFenceCreateInfo fci = {};
+        fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        if (vkCreateFence(batch->ctx->device, &fci, NULL, &fence) != VK_SUCCESS) {
+            s->spare.push_back(next); // capacity reserved above
+            return AC_ERR_OUT_OF_DEVICE_MEMORY;
+        }
+    }
 
     VkResult r = vkEndCommandBuffer(s->cmd);
     if (r == VK_SUCCESS) {
@@ -1077,11 +1195,12 @@ AcResult ac_vk_batch_flush(AcVkCommandBatch* batch) {
         si.commandBufferCount = 1;
         si.pCommandBuffers = &s->cmd;
         if (!s->in_flight) s->submit_ns = get_time_ns();
-        r = vkQueueSubmit(batch->ctx->compute_queue, 1, &si, VK_NULL_HANDLE);
+        r = vkQueueSubmit(batch->ctx->compute_queue, 1, &si, fence);
     }
     if (r != VK_SUCCESS) {
         /* the batch cannot continue: earlier flushed work may be running, the caller must destroy the batch */
-        vkFreeCommandBuffers(batch->ctx->device, batch->ctx->command_pool, 1, &next);
+        s->spare.push_back(next);
+        vkDestroyFence(batch->ctx->device, fence, NULL);
         s->state = SUB_ABORTED;
         batch_end_recording(batch);
         if (sub_drain(s)) sub_retire(s);
@@ -1092,6 +1211,7 @@ AcResult ac_vk_batch_flush(AcVkCommandBatch* batch) {
         batch->ctx->submission_outstanding_count++;
     }
     s->flushed.push_back(s->cmd);
+    s->flushed_fences.push_back(fence);
     s->cmd = next;
     VkCommandBufferBeginInfo bi = {};
     bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -1101,6 +1221,14 @@ AcResult ac_vk_batch_flush(AcVkCommandBatch* batch) {
         batch_end_recording(batch);
         if (sub_drain(s)) sub_retire(s);
         return AC_ERR_DRIVER_CRASH_OR_LOST;
+    }
+    cr = sub_collect_flushed(s, true);
+    if (cr != AC_SUCCESS) {
+        fprintf(stderr, "ac_vk_batch: waiting for a flushed command buffer failed (code %d)\n", (int)cr);
+        s->state = SUB_ABORTED;
+        batch_end_recording(batch);
+        if (sub_drain(s)) sub_retire(s);
+        return cr;
     }
     /* bound state does not survive a command buffer boundary */
     batch->last_pipeline = VK_NULL_HANDLE;
