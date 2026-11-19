@@ -1,11 +1,14 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 // AMEVA GET_ROWS for quantized weight types (q4_0, q5_0, q8_0, q6_K) with i32 indices and f32 result.
-// Variant: -DQ4_0, -DQ5_0, -DQ8_0 or -DQ6_K.
+// Variant: -DQ4_0, -DQ5_0, -DQ8_0 or -DQ6_K, and with -DREPACKED the same types read in the AMEVA repacked layout.
 //
 //   dst[c, i10, i11, i12] = dequant(src0[c, idx[i10, i11, i12]])
 //
-// src0 is in the ggml block layout (NOT the AMEVA repacked layout). Each invocation produces one f32 element.
+// Without REPACKED src0 is in the ggml block layout. With REPACKED it is in the repacked layout of
+// ggml-ameva-repack.h (a 2-D table that fits one binding): Q region at the tensor start, H region at h_base, S region
+// at s_base, row strides q_row / h_row / s_row in bytes; q6_K keeps Q and H in 16-row tiles. Each invocation produces
+// one f32 element.
 // Block sizes: q4_0 = 18 bytes / 32 elements; q5_0 = 22 bytes / 32 elements; q8_0 = 34 bytes / 32 elements;
 // q6_K = 210 bytes / 256 elements.
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
@@ -38,6 +41,11 @@ layout(push_constant) uniform PushConstants {
     uint node;       // node id for status
     uint row0;       // first src0 row of this binding: a chunk takes the indices in [row0, row0 + src_rows)
     uint total_rows; // src0 row count: an index outside [0, total_rows) is an error (reported by the chunk at row 0)
+    uint h_base;     // REPACKED: byte offset of the H region from the tensor start
+    uint s_base;     // REPACKED: byte offset of the S region from the tensor start
+    uint q_row;      // REPACKED: bytes per row in Q (non-tiled types)
+    uint h_row;      // REPACKED: bytes per row in H (non-tiled types)
+    uint s_row;      // REPACKED: bytes per row in S
 } pc;
 
 // Byte read helpers (little-endian, a[] is a uint array from binding start)
@@ -78,6 +86,50 @@ void main() {
 #endif
     float val;
 
+#if defined(REPACKED)
+    // repacked layout (ggml-ameva-repack.h): 32-weight unit u of the row, weight k of the unit. Q holds the low bits
+    // canonically (byte k & 15, low nibble for k < 16, high nibble for k >= 16; q8_0: byte k), H the high bits
+    // (q5_0: bit k of a 32-bit word; q6_K: two bits at 2 (k & 15) + 32 (k >> 4) of 8 bytes), S the block's scale fields
+    // as in ggml. Offsets are in bytes from the tensor start; the table is bound whole (no row chunks).
+    const uint u = c >> 5u;
+    const uint k = c & 31u;
+    const uint U = pc.nc >> 5u;
+    const uint urow = uint(row);
+#if defined(Q4_0) || defined(Q5_0) || defined(Q8_0)
+    const uint unit = urow * U + u;
+    const float delta = ameva_h2f(a_read_u16(pc.a_off + pc.s_base + urow * pc.s_row + u * 2u));
+#endif
+#if defined(Q4_0)
+    const uint qbyte = a_read_byte(pc.a_off + unit * 16u + (k & 15u));
+    const uint q4    = k < 16u ? (qbyte & 0xFu) : (qbyte >> 4u);
+    val = delta * (float(q4) - 8.0);
+#elif defined(Q5_0)
+    const uint qbyte = a_read_byte(pc.a_off + unit * 16u + (k & 15u));
+    const uint ql    = k < 16u ? (qbyte & 0xFu) : (qbyte >> 4u);
+    const uint qh    = (a_read_byte(pc.a_off + pc.h_base + unit * 4u + (k >> 3u)) >> (k & 7u)) & 1u;
+    val = delta * (float(ql | (qh << 4u)) - 16.0);
+#elif defined(Q8_0)
+    const uint qb = a_read_byte(pc.a_off + unit * 32u + k);
+    val = delta * float(int(qb) - (qb >= 128u ? 256 : 0));
+#elif defined(Q6_K)
+    // Q and H of q6_K are in tiles of 16 rows: unit (r, u) at r0 U + u T + (r - r0), r0 = r rounded down to 16
+    const uint r0   = urow & ~15u;
+    const uint T    = min(16u, pc.total_rows - r0);
+    const uint unit = r0 * U + u * T + (urow - r0);
+    const uint qbyte = a_read_byte(pc.a_off + unit * 16u + (k & 15u));
+    const uint lo    = k < 16u ? (qbyte & 0xFu) : (qbyte >> 4u);
+    const uint bit   = 2u * (k & 15u) + 32u * (k >> 4u);
+    const uint hi    = (a_read_byte(pc.a_off + pc.h_base + unit * 8u + (bit >> 3u)) >> (bit & 7u)) & 3u;
+    const uint e6    = c & 255u;                     // element of the block: scale index as in ggml's q6_K
+    const uint sb    = pc.a_off + pc.s_base + urow * pc.s_row + (c >> 8u) * 18u;
+    const uint scb   = a_read_byte(sb + 8u * (e6 >> 7u) + ((e6 & 31u) >> 4u) + 2u * ((e6 >> 5u) & 3u));
+    const float scale = float(int(scb) - (scb >= 128u ? 256 : 0));
+    const float delta = ameva_h2f(a_read_u16(sb + 16u));
+    val = delta * scale * float(int(lo | (hi << 4u)) - 32);
+#else
+#error "define Q4_0, Q5_0, Q8_0 or Q6_K"
+#endif
+#else
     // ggml's q4_0 / q5_0 blocks (dequantize_row_q4_0 / _q5_0): byte qs[j] holds element j in its low nibble and
     // element j + 16 in its high nibble; q5_0's 32-bit qh holds the fifth bit of element e at bit e
 #if defined(Q4_0)
@@ -123,6 +175,7 @@ void main() {
 #else
 #error "define Q4_0, Q5_0, Q8_0 or Q6_K"
 #endif
+#endif /* REPACKED */
 
     d[pc.d_off + c + i10 * pc.d_s1 + i11 * pc.d_s2 + i12 * pc.d_s3] = floatBitsToUint(val);
 }

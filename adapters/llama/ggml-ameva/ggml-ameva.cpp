@@ -1652,6 +1652,22 @@ static bool ameva_declined_by_env(const struct ggml_tensor* op) {
     return false;
 }
 
+// GET_ROWS reads src0 in the repacked layout (ameva_get_rows_q -DREPACKED) when src0 is a whole 2-D table of q4_0, q5_0,
+// q8_0 or q6_K that fits one binding (no row chunks: the regions of a repacked tensor are not row ranges). With
+// AMEVA_REPACK_ALL=1 such a table becomes repacked at its first write, after supports_op was asked, so the same shape
+// rules are applied before it is repacked; a view of an already repacked table is declined.
+static bool get_rows_reads_repacked(const struct ggml_tensor* op, int i) {
+    if (!op || op->op != GGML_OP_GET_ROWS || i != 0 || !op->src[0]) return false;
+    const struct ggml_tensor* a = op->src[0];
+    if (a->type != GGML_TYPE_Q4_0 && a->type != GGML_TYPE_Q5_0 && a->type != GGML_TYPE_Q8_0 && a->type != GGML_TYPE_Q6_K)
+        return false;
+    if (a->ne[2] != 1 || a->ne[3] != 1 || !fits_binding(a)) return false;
+    if (const struct ggml_tensor* base = ameva_repacked_base(a)) {
+        if (base->data != a->data || base->type != a->type || !ggml_are_same_shape(base, a)) return false;
+    }
+    return true;
+}
+
 const char* ameva_op_unsupported_reason(const struct ggml_tensor* op) {
     if (!op) return "null op";
     if (!ameva_op_is_empty(op->op) && ameva_declined_by_env(op)) return "declined by AMEVA_DECLINE (experiment)";
@@ -1660,7 +1676,8 @@ const char* ameva_op_unsupported_reason(const struct ggml_tensor* op) {
         // layout and no op may write it. Another backend gets them through the buffer interface, which converts.
         if (ameva_repacked_base(op)) return "writes a repacked weight";
         for (int i = 0; i < GGML_MAX_SRC; ++i) {
-            if (op->src[i] && !(op->op == GGML_OP_MUL_MAT && i == 0) && ameva_repacked_base(op->src[i]))
+            if (op->src[i] && !(op->op == GGML_OP_MUL_MAT && i == 0) && !get_rows_reads_repacked(op, i) &&
+                ameva_repacked_base(op->src[i]))
                 return "reads a repacked weight outside MUL_MAT";
         }
         // With AMEVA_REPACK_ALL=1 a quantized tensor becomes repacked at its first write, which usually comes after
@@ -1672,8 +1689,8 @@ const char* ameva_op_unsupported_reason(const struct ggml_tensor* op) {
                 return "AMEVA_REPACK_ALL stores this quantized result repacked";
             for (int i = 0; i < GGML_MAX_SRC; ++i) {
                 const struct ggml_tensor* s = op->src[i];
-                if (s && !(op->op == GGML_OP_MUL_MAT && i == 0) && ggml_is_quantized(s->type) &&
-                    ameva_qmv_has_type(s->type))
+                if (s && !(op->op == GGML_OP_MUL_MAT && i == 0) && !get_rows_reads_repacked(op, i) &&
+                    ggml_is_quantized(s->type) && ameva_qmv_has_type(s->type))
                     return "AMEVA_REPACK_ALL stores this quantized input repacked";
             }
         }
@@ -4042,15 +4059,20 @@ static const char* enc_set_rows(AmevaRecorder& rec, const struct ggml_tensor* no
                         (double)ggml_nelements(a));
 }
 
-// GET_ROWS for q4_0 / q5_0 / q8_0 / q6_K sources (ggml block layout, not repacked): gather + dequantize → f32 dst.
+// GET_ROWS for q4_0 / q5_0 / q8_0 / q6_K sources (ggml block layout, or the repacked layout of a weight that
+// AMEVA_REPACK_ALL or another op repacked): gather + dequantize → f32 dst.
 static const char* enc_get_rows_q(AmevaRecorder& rec, const struct ggml_tensor* node) {
     const struct ggml_tensor *a = node->src[0], *idx = node->src[1];
+    const bool repacked = ameva_repacked_base(a) != nullptr;
+    if (repacked && !get_rows_reads_repacked(node, 0)) return "get_rows: a repacked table must be whole, 2-D and fit one binding";
+    AmevaRepackRegions rg = {};
+    if (repacked && !ameva_repack_regions(a->type, a->ne[0], a->ne[1], &rg)) return "get_rows: no repacked layout for this type";
     AmevaOpKernelId id;
     switch (a->type) {
-        case GGML_TYPE_Q4_0: id = AMEVA_K_GET_ROWS_Q4_0; break;
-        case GGML_TYPE_Q5_0: id = AMEVA_K_GET_ROWS_Q5_0; break;
-        case GGML_TYPE_Q8_0: id = AMEVA_K_GET_ROWS_Q8_0; break;
-        case GGML_TYPE_Q6_K: id = AMEVA_K_GET_ROWS_Q6_K; break;
+        case GGML_TYPE_Q4_0: id = repacked ? AMEVA_K_GET_ROWS_Q4_0_RP : AMEVA_K_GET_ROWS_Q4_0; break;
+        case GGML_TYPE_Q5_0: id = repacked ? AMEVA_K_GET_ROWS_Q5_0_RP : AMEVA_K_GET_ROWS_Q5_0; break;
+        case GGML_TYPE_Q8_0: id = repacked ? AMEVA_K_GET_ROWS_Q8_0_RP : AMEVA_K_GET_ROWS_Q8_0; break;
+        case GGML_TYPE_Q6_K: id = repacked ? AMEVA_K_GET_ROWS_Q6_K_RP : AMEVA_K_GET_ROWS_Q6_K; break;
         default: return "get_rows: no kernel for this quantized type";
     }
     AcKernel* kernel = ameva_op_kernel(id);
@@ -4071,12 +4093,13 @@ static const char* enc_get_rows_q(AmevaRecorder& rec, const struct ggml_tensor* 
         e = chunk < total ? ameva_bind_span(a, r0 * (uint64_t)a->nb[1], rows * (uint64_t)a->nb[1], 2, &ba)
                           : ameva_bind(a, 2, &ba);
         if (e) return e;
-        const uint32_t pc[20] = {
+        const uint32_t pc[25] = {
             (uint32_t)node->ne[0], (uint32_t)idx->ne[0], (uint32_t)idx->ne[1], (uint32_t)idx->ne[2],
             ba.elem * 2u, (uint32_t)a->nb[1], (uint32_t)a->nb[2], (uint32_t)a->nb[3],
             bi.elem, (uint32_t)(idx->nb[0] / 4u), (uint32_t)(idx->nb[1] / 4u), (uint32_t)(idx->nb[2] / 4u),
             bd.elem, st(node, 1), st(node, 2), st(node, 3),
-            (uint32_t)rows, (uint32_t)rec.node, (uint32_t)r0, (uint32_t)total
+            (uint32_t)rows, (uint32_t)rec.node, (uint32_t)r0, (uint32_t)total,
+            (uint32_t)rg.h, (uint32_t)rg.s, (uint32_t)rg.q_row, (uint32_t)rg.h_row, (uint32_t)rg.s_row
         };
         const AcBufferBinding bind[4] = { ba.b, bi.b, bs.b, bd.b };
         const AmevaBind reads[2] = { ba, bi };

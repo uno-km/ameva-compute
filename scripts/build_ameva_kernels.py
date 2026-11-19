@@ -126,7 +126,10 @@ OPS_DEFINED = [("set_rows_q8_0", "set_rows_q", ["QTYPE_Q8_0"]), ("set_rows_q4_0"
                ("mm_f16a", "mm", ["F16_A"]), ("mm_f16aw", "mm", ["F16_A", "F16_WORDS"]),
                ("mm_f16awu", "mm", ["F16_A", "F16_WORDS", "F16_UNPACK"]),
                ("get_rows_q4_0", "get_rows_q", ["Q4_0"]), ("get_rows_q5_0", "get_rows_q", ["Q5_0"]),
-               ("get_rows_q8_0", "get_rows_q", ["Q8_0"]), ("get_rows_q6_k", "get_rows_q", ["Q6_K"])]
+               ("get_rows_q8_0", "get_rows_q", ["Q8_0"]), ("get_rows_q6_k", "get_rows_q", ["Q6_K"]),
+               # the same tables in the AMEVA repacked layout (AMEVA_REPACK_ALL, or a weight another op repacked)
+               ("get_rows_q4_0_rp", "get_rows_q", ["Q4_0", "REPACKED"]), ("get_rows_q5_0_rp", "get_rows_q", ["Q5_0", "REPACKED"]),
+               ("get_rows_q8_0_rp", "get_rows_q", ["Q8_0", "REPACKED"]), ("get_rows_q6_k_rp", "get_rows_q", ["Q6_K", "REPACKED"])]
 
 # Kernels built as SPIR-V only, in the order of enum AmevaVkKernelId: (kernel name, source, defines).
 # ameva_conv: weights f16 through the exact decoder, f16 through the built-in conversion (f16u; the engine selects it
