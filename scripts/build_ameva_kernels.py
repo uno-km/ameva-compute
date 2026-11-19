@@ -309,6 +309,37 @@ def c_string(text):
     return "\n".join(out)
 
 
+# Hand-written OpenCL C that replaces the translation of a GLSL kernel in the OpenCL tables (the SPIR-V is still compiled
+# from the GLSL): shaders/opencl/<kernel>_<type>.cl. The file must keep the interface of the GLSL source.
+CL_OVERRIDE_DIR = os.path.join(SHADERS, "opencl")
+
+
+def cl_override(kernel, type_name, src):
+    """text of shaders/opencl/<kernel>_<type_name>.cl, or None when the kernel is translated from its GLSL. Checks the
+    interface against the GLSL source: bindings, push-constant words, work-group size."""
+    path = os.path.join(CL_OVERRIDE_DIR, "%s_%s.cl" % (kernel, type_name))
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8", newline=None) as f:  # universal newlines: the text is LF whatever the checkout
+        text = f.read()
+    sbind, spush, slocal = source_info(src)
+    code = re.sub(r"//[^\n]*", "", text)
+    sig = re.search(r"__kernel[^{]*?void\s+%s\s*\((.*?)\)\s*\{" % re.escape(glsl_to_opencl.ENTRY_POINT), code, re.S)
+    if not sig:
+        fail("%s: no __kernel void %s" % (path, glsl_to_opencl.ENTRY_POINT))
+    nbind = len(re.findall(r"__global", sig.group(1)))
+    pc = re.search(r"typedef\s+struct\s*\{(.*?)\}\s*ameva_pc_t\s*;", code, re.S)
+    if not pc:
+        fail("%s: no ameva_pc_t" % path)
+    npush = 4 * sum(len([n for n in d[4:].split(",") if n.strip()]) for d in
+                    (x.strip() for x in pc.group(1).split(";")) if d.startswith("uint "))
+    local = re.search(r"reqd_work_group_size\((\d+),\s*1,\s*1\)", code)
+    if (nbind, npush, int(local.group(1)) if local else None) != (sbind, spush, slocal):
+        fail("%s: %d bindings, %d push-constant bytes, local size %s; the GLSL source %d, %d, %s"
+             % (path, nbind, npush, local.group(1) if local else None, sbind, spush, slocal))
+    return text
+
+
 # OpenCL C tables of ggml_ameva_kernels_cl.h: (key in cl, table name), in the order of the SPIR-V tables
 CL_TABLES = [("qmm", "kAmevaClQmm"), ("qmv", "kAmevaClQmv"), ("mali_qmv", "kAmevaClMaliQmv"),
              ("qgemm", "kAmevaClQgemm"), ("mmq", "kAmevaClMmq"), ("mmqb", "kAmevaClMmqb"), ("mmvq", "kAmevaClMmvq"), ("mmvqe", "kAmevaClMmvqe"),
@@ -453,7 +484,13 @@ def main():
         mbind, mpush, mlocal = source_info(msrc)
         for name, define in QMV_TYPES:
             spv = os.path.join(tmp, "mmq_%s.spv" % name)
-            data, rsize = compile_module(args, msrc, [define], spv, cl["mmq"])
+            override = cl_override("ameva_mmq", name, msrc)
+            if override is None:
+                data, rsize = compile_module(args, msrc, [define], spv, cl["mmq"])
+            else:
+                data, rsize = compile_module(args, msrc, [define], spv, None)
+                cl["mmq"].append(override)
+                print("mmq   %-6s OpenCL C from shaders/opencl/ameva_mmq_%s.cl" % (name, name))
             if rsize is not None and rsize != mpush:
                 fail("ameva_mmq %s: reflection says %d push-constant bytes, source %d" % (name, rsize, mpush))
             var = "kAmevaMmq_%s" % name
